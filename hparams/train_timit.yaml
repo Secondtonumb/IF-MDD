@@ -1,0 +1,185 @@
+# Hyperparameters toggles
+
+# TIMIT
+timit_local_data_folder: "/common/db/TIMIT"
+
+pretrained_models:
+    {
+        "wav2vec2_base": "facebook/wav2vec2-base", # 768
+        "hubert_base": "facebook/hubert-base-ls960", # 768
+        "data2vec_base": "facebook/data2vec-audio-base", # 768
+        "wavlm_base": "microsoft/wavlm-base-plus", # 768
+        "clap" : "laion/clap-htsat-fused", # 768
+        "wav2vec2_large": "facebook/wav2vec2-large", # 1024
+        "hubert_large": "facebook/hubert-large-ls960", # 1024
+        "whisper_medium": "openai/whisper-medium", # 1024
+        "data2vec_large": "facebook/data2vec-audio-large", #1024
+        "wavlm_large": "microsoft/wavlm-large-plus", # 1024
+        "whisper_large_v3_turbo": "openai/whisper-large-v3-turbo", # 1280
+    }
+
+# models hidden size, varies by model
+ENCODER_DIM_Base: 768  # Dimension of the encoder output
+ENCODER_DIM_Large: 1024  # Dimension of the encoder output
+ENCODER_DIM_Whisper_Large_V3_Turbo: 1280  # Dimension
+
+use_pretrained_models: 
+    {
+        "wav2vec2": true,             # Whether to use wav2vec2
+        "hubert": False,               # Whether to use Hubert
+        "whisper": False,             # Whether to use Whisper encoder
+        "data2vec": False,            # Whether to use Data2Vec
+        "wavlm": False,               # Whether to use WavLM
+        "clap": False,                # Whether to use CLAP
+    }
+
+use_wav2vec: true             # Whether to use wav2vec2
+use_whisper: False            # Whether to use Whisper encoder
+feature_fusion: "none"      # Options: "none", "concat", "add", "blend"
+blend_alpha: 0.5              # If using "blend" fusion
+
+seed: 1234
+__set_seed: !apply:torch.manual_seed [!ref <seed>]
+# Function to generate a unique training ID based on key hyperparameters
+
+generate_training_id: !ref wv2v_<use_wav2vec>_whsp_<use_whisper>_fuse_<feature_fusion>/frz_wav2vec_<freeze_wav2vec>_frz_whisper_<freeze_whisper>/encdim_<ENCODER_DIM>/
+
+output_folder: !ref result_timit/<generate_training_id>
+wer_file: !ref <output_folder>/wer.txt
+mpd_file: !ref <output_folder>/mpd.txt
+save_folder: !ref <output_folder>/save
+train_log: !ref <output_folder>/timit_log.txt
+
+# Encoder hyperparameters
+wav2vec2_hub: "facebook/wav2vec2-base"
+whisper_hub: "openai/whisper-medium"
+
+pretrained_model: !ref pretrained_models/
+
+# (For Whisper, freeze_encoder can also be set to freeze just the encoder)
+
+ENCODER_DIM: 768  # Dimension of the encoder output
+# 1024 for wav2vec2-large, 768 for wav2vec2-base, whisper-large-v3-turbo: 1280, whisper-medium: 1024
+
+# Modules (SpeechBrain lobes)
+modules:
+  wav2vec2: !ref <wav2vec2>
+  whisper: !ref <whisper>
+  enc: !ref <enc>
+  ctc_lin: !ref <ctc_lin>
+
+wav2vec2:
+  !new:speechbrain.lobes.models.huggingface_transformers.wav2vec2.Wav2Vec2
+    source: !ref <wav2vec2_hub>
+    freeze: !ref <freeze_wav2vec>
+    freeze_feature_extractor: !ref <freeze_wav2vec_feature_extractor>
+    save_path: !ref <pretrained_model>
+
+whisper:
+  !new:speechbrain.lobes.models.huggingface_transformers.whisper.Whisper
+    source: !ref <whisper_hub>
+    freeze_encoder: !ref <freeze_whisper>
+    encoder_only: true
+    save_path: !ref <pretrained_model>
+
+enc:
+  !new:speechbrain.lobes.models.VanillaNN.VanillaNN
+    input_shape: [null, null, !ref <ENCODER_DIM>]
+    activation: !ref <activation>
+    dnn_blocks: !ref <dnn_layers>
+    dnn_neurons: !ref <dnn_neurons>
+
+ctc_lin:  !new:speechbrain.nnet.linear.Linear
+    input_size: !ref <dnn_neurons>
+    n_neurons: !ref <output_neurons>  # 40 phonemes + 1 blank + 1 err
+
+# (Define other modules: e.g., decoder, embedding, etc., as needed)
+
+# Data files
+data_folder_save: "./data"
+
+# dump as json
+dump_as_json: True
+
+# prepared l2arctic data
+train_annotation: !ref <data_folder_save>/train-timit.json
+valid_annotation: !ref <data_folder_save>/dev-timit.json
+test_annotation: !ref <data_folder_save>/test-timit.json
+
+# Training parameters
+number_of_epochs: 50
+batch_size: 16
+lr: 0.0003
+sorting: ascending
+auto_mix_prec: False
+sample_rate: 16000
+gradient_accumulation: 2
+
+lr_pretrained: 0.00001
+
+# Model parameters
+activation: !name:torch.nn.LeakyReLU
+dnn_layers: 2
+dnn_neurons: 384  
+freeze_wav2vec: False
+freeze_wav2vec_feature_extractor: True  # freeze the CNN extractor in wav2vec
+wav2vec2_specaug: True
+
+freeze_whisper: True         # Freeze Whisper encoder?
+
+# Outputs
+output_neurons: 42 # l2arctic: 40phns(sil)+err+blank=42
+blank_index: 0
+
+# Dataloader options
+train_dataloader_opts:
+    batch_size: !ref <batch_size>
+    num_workers: !ref <batch_size>
+
+valid_dataloader_opts:
+    batch_size: !ref <batch_size>
+    num_workers: !ref <batch_size>
+
+test_dataloader_opts:
+    batch_size: 1
+    num_workers: 1
+
+augmentation: !new:speechbrain.augment.time_domain.SpeedPerturb
+    orig_freq: !ref <sample_rate>
+    speeds: [95, 100, 105]
+
+epoch_counter: !new:speechbrain.utils.epoch_loop.EpochCounter
+    limit: !ref <number_of_epochs>
+
+log_softmax: !new:speechbrain.nnet.activations.Softmax
+    apply_log: True
+
+ctc_cost: !name:speechbrain.nnet.losses.ctc_loss
+    blank_index: !ref <blank_index>
+
+model: !new:torch.nn.ModuleList
+    - [!ref <enc>, !ref <ctc_lin>]
+
+adam_opt_class: !name:torch.optim.Adam
+    lr: !ref <lr>
+
+pretrained_opt_class: !name:torch.optim.Adam
+    lr: !ref <lr_pretrained>
+
+checkpointer: !new:speechbrain.utils.checkpoints.Checkpointer
+    checkpoints_dir: !ref <save_folder>
+    recoverables:
+        model: !ref <model>
+        wav2vec2: !ref <wav2vec2>
+        whisper: !ref <whisper>
+        counter: !ref <epoch_counter>
+
+train_logger: !new:speechbrain.utils.train_logger.FileTrainLogger
+    save_file: !ref <train_log>
+
+ctc_stats: !name:speechbrain.utils.metric_stats.MetricStats
+    metric: !name:speechbrain.nnet.losses.ctc_loss
+        blank_index: !ref <blank_index>
+        reduction: batch
+
+per_stats: !name:speechbrain.utils.metric_stats.ErrorRateStats
