@@ -3,30 +3,29 @@
 
 ## SSL features Selection
 pretrained_models_path: pretrained_models/
-pretrained_models:
-    {
-        "wav2vec2_base": "facebook/wav2vec2-base", # 768
-        "hubert_base": "facebook/hubert-base-ls960", # 768
-        "wavlm_base": "microsoft/wavlm-base", # 768
-        "wavlm_base_plus": "microsoft/wavlm-base-plus", # 768
-        "wav2vec2_large": "facebook/wav2vec2-large", # 1024
-        "hubert_large": "facebook/hubert-large-ls960", # 1024
-        "hubert_multilingual": "utter-project/mHuBERT-147", # 768
-        "wavlm_large": "microsoft/wavlm-large-plus", # 1024
-        "data2vec_base": "facebook/data2vec-audio-base", # 768
-        "data2vec_large": "facebook/data2vec-audio-large", #1024
-        "clap" : "laion/clap-htsat-fused", # 768
-        "whisper_medium": "openai/whisper-medium", # 1024
-        "whisper_large_v3_turbo": "openai/whisper-large-v3-turbo", # 1280
-    }
+# pretrained_models:
+# {
+#     "wav2vec2_base": "facebook/wav2vec2-base", # 768
+#     "hubert_base": "facebook/hubert-base-ls960", # 768
+#     "wavlm_base": "microsoft/wavlm-base", # 768
+#     "wavlm_base_plus": "microsoft/wavlm-base-plus", # 768
+#     "hubert_multilingual": "utter-project/mHuBERT-147", # 768
+#     "clap" : "laion/clap-htsat-fused", # 768
+#     "data2vec_base": "facebook/data2vec-audio-base", # 768
+    
+#     "wav2vec2_large": "facebook/wav2vec2-large", # 1024
+#     "hubert_large": "facebook/hubert-large-ls960", # 1024
+#     "wavlm_large": "microsoft/wavlm-large-plus", # 1024
+#     "data2vec_large": "facebook/data2vec-audio-large", #1024
+#     "whisper_medium": "openai/whisper-medium", # 1024
+    
+#     "whisper_large_v3_turbo": "openai/whisper-large-v3-turbo", # 1280
+# }
 
 
 # select pretrained SSL models
 perceived_ssl_model: "hubert_multilingual" # in pretrained_models
 canonical_ssl_model: Null
-# 
-perceived_ssl_model_id: !ref <pretrained_models[hubert_multilingual]>
-canonical_ssl_model_id: Null
 
 # # models hidden size, varies by model
 ENCODER_DIM_Base: 768  # Dimension of the encoder output
@@ -62,13 +61,13 @@ modules:
   ctc_lin: !ref <ctc_lin>
 
 perceived_ssl: !apply:trainer.AutoSSLoader.AutoSSLLoader
-    source: !ref <perceived_ssl_model_id>
+    model_name: !ref <perceived_ssl_model>
     freeze: !ref <freeze_perceived_ssl>
     freeze_feature_extractor: !ref <freeze_perceived_feature_extractor>
     save_path: !ref <pretrained_models_path>
 
 canonical_ssl: !apply:trainer.AutoSSLoader.AutoSSLLoader
-    source: !ref <canonical_ssl_model_id>
+    model_name: !ref <canonical_ssl_model>
     freeze: !ref <freeze_canonical_ssl>
     freeze_feature_extractor: !ref <freeze_perceived_feature_extractor>
     save_path: !ref <pretrained_models_path>
@@ -119,6 +118,7 @@ checkpointer: !new:speechbrain.utils.checkpoints.Checkpointer
         model: !ref <model>
         perceived_ssl: !ref <perceived_ssl>
         counter: !ref <epoch_counter>
+    
 # canonical_ssl: !ref <canonical_ssl>
 
 augmentation: !new:speechbrain.augment.time_domain.SpeedPerturb
@@ -146,7 +146,7 @@ seed: 1234
 __set_seed: !apply:torch.manual_seed [!ref <seed>]
 
 # training parameters
-number_of_epochs: 120
+number_of_epochs: 50
 batch_size: 16
 lr: 0.0003
 sorting: ascending

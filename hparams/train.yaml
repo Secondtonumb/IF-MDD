@@ -9,22 +9,23 @@ pretrained_models:
         "hubert_base": "facebook/hubert-base-ls960", # 768
         "wavlm_base": "microsoft/wavlm-base", # 768
         "wavlm_base_plus": "microsoft/wavlm-base-plus", # 768
+        "hubert_multilingual": "utter-project/mHuBERT-147", # 768
+        "data2vec_base": "facebook/data2vec-audio-base", # 768
+        "clap" : "laion/clap-htsat-fused", # 768
+        
         "wav2vec2_large": "facebook/wav2vec2-large", # 1024
         "hubert_large": "facebook/hubert-large-ls960", # 1024
-        "hubert_multilingual": "utter-project/mHuBERT-147", # 768
         "wavlm_large": "microsoft/wavlm-large-plus", # 1024
-        "data2vec_base": "facebook/data2vec-audio-base", # 768
         "data2vec_large": "facebook/data2vec-audio-large", #1024
-        "clap" : "laion/clap-htsat-fused", # 768
         "whisper_medium": "openai/whisper-medium", # 1024
         "whisper_large_v3_turbo": "openai/whisper-large-v3-turbo", # 1280
     }
 
 # select pretrained SSL models
-perceived_ssl_model: "wavlm_base_plus" # in pretrained_models
+perceived_ssl_model: "clap" # in pretrained_models
 canonical_ssl_model: Null
 # 
-perceived_ssl_model_id: !ref <pretrained_models[wavlm_base_plus]>
+perceived_ssl_model_id: !ref <pretrained_models[clap]>
 canonical_ssl_model_id: Null
 
 # # models hidden size, varies by model
@@ -146,7 +147,7 @@ seed: 1234
 __set_seed: !apply:torch.manual_seed [!ref <seed>]
 
 # training parameters
-number_of_epochs: 100
+number_of_epochs: 50
 batch_size: 32
 lr: 0.0003
 sorting: ascending

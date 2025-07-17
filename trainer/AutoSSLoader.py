@@ -14,35 +14,67 @@ from speechbrain.lobes.models.huggingface_transformers.hubert import HuBERT
 from speechbrain.lobes.models.huggingface_transformers.wavlm import WavLM
 from speechbrain.lobes.models.huggingface_transformers.whisper import Whisper
 
-def AutoSSLLoader(source, freeze, freeze_feature_extractor, save_path, encoder_type=None):
-    if source == None:
+pretrained_models={
+    "wav2vec2_base": "facebook/wav2vec2-base", # 768
+    "hubert_base": "facebook/hubert-base-ls960", # 768
+    "wavlm_base": "microsoft/wavlm-base", # 768
+    "wavlm_base_plus": "microsoft/wavlm-base-plus", # 768
+    "hubert_multilingual": "utter-project/mHuBERT-147", # 768
+    "clap" : "laion/clap-htsat-fused", # 768
+    "data2vec_base": "facebook/data2vec-audio-base", # 768
+    
+    "wav2vec2_large": "facebook/wav2vec2-large", # 1024
+    "hubert_large": "facebook/hubert-large-ls960", # 1024
+    "wavlm_large": "microsoft/wavlm-large-plus", # 1024
+    "data2vec_large": "facebook/data2vec-audio-large", #1024
+    
+    "whisper_medium": "openai/whisper-medium", # 1024
+    "whisper_large_v3_turbo": "openai/whisper-large-v3-turbo", # 1280
+}
+
+def AutoSSLLoader(model_name, freeze, freeze_feature_extractor, save_path, encoder_type=None):
+    """
+    source: str, the name of the pretrained model e.g "hubert_multilingual", "clap", "data2vec_base", etc.
+    freeze: bool, whether to freeze the model
+    freeze_feature_extractor: bool, whether to freeze the feature extractor
+    save_path: str, the path to save the model
+    encoder_type: str, the type of the encoder
+    """    
+    if model_name == None:
+        print(f"model_name for SSL is None, return None")
         return None
     else:
-        source = source.lower()
-        if "wav2vec2" in source:
+        model_id = pretrained_models.get(model_name, None)
+    
+    if model_id is None:
+        raise ValueError(f"Unsupported model_name: {model_name}")
+    
+    else:
+        model_id = model_id.lower()
+        if "wav2vec2" in model_id:
             return Wav2Vec2(
-                source=source,
+                source=model_id,
                 freeze=freeze,
                 freeze_feature_extractor=freeze_feature_extractor,
                 save_path=save_path
             )
-        elif "hubert" in source:
+        elif "hubert" in model_id:
             return HuBERT(
-                source=source,
+                source=model_id,
                 freeze=freeze,
                 freeze_feature_extractor=freeze_feature_extractor,
                 save_path=save_path
             )
-        elif "wavlm" in source:
+        elif "wavlm" in model_id:
             return WavLM(
-                source=source,
+                source=model_id,
                 freeze=freeze,
                 freeze_feature_extractor=freeze_feature_extractor,
                 save_path=save_path
             )
-        elif "whisper" in source:
+        elif "whisper" in model_id:
             return Whisper(
-                source=source,
+                source=model_id,
                 freeze=freeze,
                 save_path=save_path
             )
@@ -50,7 +82,7 @@ def AutoSSLLoader(source, freeze, freeze_feature_extractor, save_path, encoder_t
             # use the give encoder 
             try:
                 return encoder_type(
-                    source=source,
+                    source=model_id,
                     freeze=freeze,
                     freeze_feature_extractor=freeze_feature_extractor,
                     save_path=save_path
@@ -58,4 +90,4 @@ def AutoSSLLoader(source, freeze, freeze_feature_extractor, save_path, encoder_t
             except:
                 raise ValueError(f"Unsupported encoder type: {encoder_type}")
         else:
-            raise ValueError(f"Unsupported source: {source}")
+            raise ValueError(f"Unsupported model_name: {model_name}")

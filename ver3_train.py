@@ -261,6 +261,7 @@ class ASR(sb.Brain):
                 stats_meta={"Epoch loaded": self.hparams.epoch_counter.current},
                 test_stats={"loss": stage_loss, "PER": per, "mpd_f1": mpd_f1},
             )
+            # 
             with open(self.hparams.wer_file, "w") as w:
                 w.write("CTC loss stats:\n")
                 self.ctc_metrics.write_stats(w)
@@ -372,9 +373,11 @@ class ASR(sb.Brain):
         ## NOTE: make sure to use the "best" model to continual training
         ## so we set the `min_key` argument
         if self.checkpointer is not None:
+            # TODO: support recover best on PER or mpd_f1 or averaged model of best PER and mpd_f1
             self.checkpointer.recover_if_possible(
-                min_key="PER"
-                
+                important_keys=["PER", "mpd_f1"],
+                #min_key="PER",
+                #max_key="mpd_f1",
             )
 
 def dataio_prep(hparams):
@@ -701,243 +704,425 @@ def dataio_prep_for_llm(hparams):
         "wrd"  # word list, not used in training
         ]
     )
+    
     return train_data, valid_data, test_data, label_encoder
 
-def dataio_prep_for_timit(hparams):
+def dataio_prep_for_llm_v2(hparams):
     """This function prepares the datasets to be used in the brain class.
     It also defines the data processing pipeline through user-defined functions."""
-    
-    # split train_dev_data into train and valid
-    local_data_folder = hparams["timit_local_data_folder"]
+    data_folder = hparams["data_folder_save"]
+    # 1. Declarations:
+    train_data = sb.dataio.dataset.DynamicItemDataset.from_json(
+        json_path=hparams["train_annotation"],
+        replacements={"data_root": data_folder},
+    )
+    if hparams["sorting"] == "ascending":
+        # we sort training data to speed up training and get better results.
+        train_data = train_data.filtered_sorted(sort_key="duration")
+        # when sorting do not shuffle in dataloader ! otherwise is pointless
+        hparams["train_dataloader_opts"]["shuffle"] = False
+
+    elif hparams["sorting"] == "descending":
+        train_data = train_data.filtered_sorted(
+            sort_key="duration", reverse=True
+        )
+        # when sorting do not shuffle in dataloader ! otherwise is pointless
+        hparams["train_dataloader_opts"]["shuffle"] = False
+
+    elif hparams["sorting"] == "random":
+        pass
+
+    else:
+        raise NotImplementedError(
+            "sorting must be random, ascending or descending"
+        )
+
+    valid_data = sb.dataio.dataset.DynamicItemDataset.from_json(
+        json_path=hparams["valid_annotation"],
+        replacements={"data_root": data_folder},
+    )
+    valid_data = valid_data.filtered_sorted(sort_key="duration")
+
+    test_data = sb.dataio.dataset.DynamicItemDataset.from_json(
+        json_path=hparams["test_annotation"],
+        replacements={"data_root": data_folder},
+    )
+    test_data = test_data.filtered_sorted(sort_key="duration")
+
+    datasets = [train_data, valid_data, test_data]
     label_encoder = sb.dataio.encoder.CTCTextEncoder()
-
-    # 0. Load TIMIT dataset
-    from datasets import load_dataset
-    train_dev_data = load_dataset("timit_asr",data_dir=local_data_folder,split="train")
-    train_dev_data = train_dev_data.train_test_split(test_size=0.1, seed=42)
-    train_data = train_dev_data["train"]
-    valid_data = train_dev_data["test"]
-    # Keep audio column so we can use the waveform
-    # Do NOT remove "audio" column since we need raw audio
     
-    test_data = load_dataset(
-        "timit_asr",
-        data_dir=local_data_folder,
-        split="test") 
+    # 2. Define audio pipeline:
+    @sb.utils.data_pipeline.takes("wav")
+    @sb.utils.data_pipeline.provides("sig")
+    def audio_pipeline(wav):
+        # sig = sb.dataio.dataio.read_audio(wav)
+        # # sample rate change to 16000, e,g, using librosa
+        # sig = torch.Tensor(librosa.core.load(wav, hparams["sample_rate"])[0])
+        # Use wav2vec processor to do normalization
+        waveform, sr = torchaudio.load(wav)  # waveform: [1, T]
 
-    # remove id column 
-    train_data = train_data.remove_columns(["id"])
-    valid_data = valid_data.remove_columns(["id"])
-    test_data = test_data.remove_columns(["id"])
+        # Optional: resample to match model sample rate
+        target_sr = hparams["sample_rate"]
+        if sr != target_sr:
+            resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=target_sr)
+            waveform = resampler(waveform)
 
-    # convert Dataset into speechbrain Dataset
-    train_data_sb = sb.dataio.dataset.DynamicItemDataset.from_arrow_dataset(train_data)
-    valid_data_sb = sb.dataio.dataset.DynamicItemDataset.from_arrow_dataset(valid_data)
-    test_data_sb = sb.dataio.dataset.DynamicItemDataset.from_arrow_dataset(test_data)
+        # Convert to mono if stereo
+        if waveform.shape[0] > 1:
+            waveform = waveform.mean(dim=0, keepdim=True)
 
-    timit2cmu = {
-        # Vowels & diphthongs
-        "aa": "aa", "ae": "ae", "ah": "ah",
-        "ao": "aa", "aw": "aw", "ay": "ay",
-        "eh": "eh", "er": "er", "ey": "ey",
-        "ih": "ih", "iy": "iy", "ow": "ow",
-        "oy": "oy", "uh": "uh", "uw": "uw",
-        "axr": "er",
-        "ix": "ih",
-        "ux": "uw",
-        "em": "m",
-        "en": "n",
-        "eng": "ng",
-        "nx": "n",
-        "hv": "hh",
-        "ax": "ah",
-        "ix": "iy",
-        "ax-h": "ah",
+        # Apply feature extractor (expecting 1D numpy array)
+        sig = hparams["perceived_ssl"].feature_extractor(
+            waveform.squeeze(0).numpy(),  # convert to 1D numpy
+            sampling_rate=target_sr
+        ).input_values[0]
+
+        sig = torch.Tensor(sig)
+        return sig
+
+    sb.dataio.dataset.add_dynamic_item(datasets, audio_pipeline)
         
-    
-        # Consonants
-        "b": "b", "bcl": "b",
-        "ch": "ch",
-        "d": "d", "dcl": "d",
-        "dh": "dh", "dx": "d",
-        "f": "f",
-        "g": "g", "gcl": "g",
-        "hh": "hh", "hv": "hh",
-        "jh": "jh",
-        "k": "k", "kcl": "k",
-        "l": "l", "el": "l",
-        "m": "m", "em": "m",
-        "n": "n", "en": "n", "nx": "n",
-        "ng": "ng",
-        "p": "p", "pcl": "p",
-        "r": "r",
-        "s": "s",
-        "sh": "sh",
-        "t": "t", "tcl": "t",
-        "th": "th",
-        "v": "v",
-        "w": "w",
-        "y": "y",
-        "z": "z",
-        "zh": "zh",
-
-        # Silences/closures / fillers
-        "pau": "sil", "h#": "sil", "epi": "sil",
-        "cl": "sil", "q": "sil"
-        
-    }
-    # convert phoneme labels to 40 phonemes
-    # (Pdb) test_data
-    # Dataset({
-    # features: ['file', 'audio', 'text', 'phonetic_detail', 'word_detail', 'dialect_region', 'sentence_type', 'speaker_id', 'id'],
-    # num_rows: 1600
-    # })
-    # (Pdb) dataset_test["phonetic_detail"][0]
-    # {'start': [0, 9640, 11240, 12783, 14078, 16157, 16880, 17103, 17587, 18760, 19720, 19962, 21514, 22680, 23800, 24104, 26280, 28591, 29179, 30337, 31880, 32500, 33170, 33829, 35150, 37370, 38568, 40546, 42357, 45119, 45624, 46855, 48680, 49240, 51033, 52378, 54500, 55461, 57395, 59179, 60600], 'stop': [9640, 11240, 12783, 14078, 16157, 16880, 17103, 17587, 18760, 19720, 19962, 21514, 22680, 23800, 24104, 26280, 28591, 29179, 30337, 31880, 32500, 33170, 33829, 35150, 37370, 38568, 40546, 42357, 45119, 45624, 46855, 48680, 49240, 51033, 52378, 54500, 55461, 57395, 59179, 60600, 63440], 'utterance': ['h#', 'sh', 'iy', 'hv', 'ae', 'dcl', 'd', 'y', 'er', 'dcl', 'd', 'aa', 'r', 'kcl', 'k', 's', 'uw', 'dx', 'ih', 'ng', 'gcl', 'g', 'r', 'iy', 's', 'iy', 'w', 'aa', 'sh', 'epi', 'w', 'aa', 'dx', 'er', 'q', 'ao', 'l', 'y', 'iy', 'axr', 'h#']}
-    # (Pdb)  dataset_test["word_detail"][0]
-    # {'start': [9640, 12783, 17103, 18760, 24104, 29179, 31880, 38568, 45624, 52378, 55461], 'stop': [12783, 17103, 18760, 24104, 29179, 31880, 38568, 45119, 51033, 55461, 60600], 'utterance': ['she', 'had', 'your', 'dark', 'suit', 'in', 'greasy', 'wash', 'water', 'all', 'year']}
-    # (Pdb)  dataset_test[0]
-    # {'file': '/common/db/TIMIT/timit/test/dr1/faks0/sa1.wav', 'audio': {'path': '/common/db/TIMIT/timit/test/dr1/faks0/sa1.wav', 'array': array([9.15527344e-05, 1.52587891e-04, 6.10351562e-05, ...,   2.44140625e-04, 3.05175781e-04, 2.13623047e-04]), 'sampling_rate': 16000}, 'text': 'She had your dark suit in greasy wash water all year.', 'phonetic_detail': {'start': [0, 9640, 11240, 12783, 14078, 16157, 16880, 17103, 17587, 18760, 19720, 19962, 21514, 22680, 23800, 24104, 26280, 28591, 29179, 30337, 31880, 32500, 33170, 33829, 35150, 37370, 38568, 40546, 42357, 45119, 45624, 46855, 48680, 49240, 51033, 52378, 54500, 55461, 57395, 59179, 60600], 'stop': [9640, 11240, 12783, 14078, 16157, 16880, 17103, 17587, 18760, 19720, 19962, 21514, 22680, 23800, 24104, 26280, 28591, 29179, 30337, 31880, 32500, 33170, 33829, 35150, 37370, 38568, 40546, 42357, 45119, 45624, 46855, 48680, 49240, 51033, 52378, 54500, 55461, 57395, 59179, 60600, 63440], 'utterance': ['h#', 'sh', 'iy', 'hv', 'ae', 'dcl', 'd', 'y', 'er', 'dcl', 'd', 'aa', 'r', 'kcl', 'k', 's', 'uw', 'dx', 'ih', 'ng', 'gcl', 'g', 'r', 'iy', 's', 'iy', 'w', 'aa', 'sh', 'epi', 'w', 'aa', 'dx', 'er', 'q', 'ao', 'l', 'y', 'iy', 'axr', 'h#']}, 'word_detail': {'start': [9640, 12783, 17103, 18760, 24104, 29179, 31880, 38568, 45624, 52378, 55461], 'stop': [12783, 17103, 18760, 24104, 29179, 31880, 38568, 45119, 51033, 55461, 60600], 'utterance': ['she', 'had', 'your', 'dark', 'suit', 'in', 'greasy', 'wash', 'water', 'all', 'year']}, 'dialect_region': 'dr1', 'sentence_type': 'sa', 'speaker_id': 'aks0', 'id': 'sa1'}
-    
-    # 1. Define text pipeline:
-    @sb.utils.data_pipeline.takes("text", "phonetic_detail", "word_detail", "audio")
+    # 3. Define text pipeline:
+    @sb.utils.data_pipeline.takes("perceived_train_target")
     @sb.utils.data_pipeline.provides(
         "phn_list_target",
+        "phn_encoded_list_target",
         "phn_encoded_target",
-        "phn_encoded_target_lens",
-        "phn_list_canonical",
-        "phn_encoded_canonical",
-        "phn_encoded_canonical_lens",
-        "phn_list_perceived",
-        "phn_encoded_perceived",
-        "phn_encoded_perceived_lens",
-        "wrd",
-        "sig"
+        "wrd"
     )
-    def text_pipeline(text: str, phonetic_detail: dict, word_detail: dict, audio: dict):
-        # Convert perceived phonemes to 40 phonemes
-        # Use word sequence to get the canonical phonemes
-        # phonetic_detail is a dict key,
-        
-        ## Perceived phonemes
-        phonemes = phonetic_detail["utterance"]
-                # convert to 40 phonemes using timit2cmu mapping
-        # clean the phonemes
-        phn_list_perceived = [simplify_phoneme(p) for p in phonemes]
-        phn_list_perceived = [timit2cmu.get(p, p) for p in phn_list_perceived]
+    def text_pipeline_train(phn):
+        phn_list = phn.strip().split()
+        yield phn_list
+        phn_encoded_list = label_encoder.encode_sequence(phn_list)
+        yield phn_encoded_list
+        phn_encoded = torch.LongTensor(phn_encoded_list)
+        yield phn_encoded
 
-        # 
-
-        ## Canonical phonemes and Wrd
-        # apply word detail to get the canonical phonemes and wrd
-        word_phonemes = word_detail["utterance"] # list of words
-        # get the canonical phonemes for each word
-        canonical_phonemes = [sentence_to_phoneme(word) for word in word_phonemes]
-        # flatten the list
-        canonical_phonemes = [p for sublist in canonical_phonemes for p in sublist]
-        # simplify the phonemes
-        canonical_phonemes = [simplify_phoneme(p) for p in canonical_phonemes]
-        canonical_phonemes = [timit2cmu.get(p, p) for p in canonical_phonemes]
-        phn_list_canonical = canonical_phonemes
-
-        ## Wrd
-        wrd = word_detail["utterance"]
-
-        ## Target  == Perceived
-        phn_list_target = phn_list_perceived
-        
-        # Encode the phonemes
-        phn_encoded_target = label_encoder.encode_sequence(phn_list_target)
-        phn_encoded_canonical = label_encoder.encode_sequence(canonical_phonemes)
-        phn_encoded_perceived = label_encoder.encode_sequence(phn_list_perceived)
-
-        # Yield the results
+    @sb.utils.data_pipeline.takes("perceived_train_target", "canonical_aligned", "perceived_aligned")
+    @sb.utils.data_pipeline.provides(
+        "phn_list_target",
+        "phn_encoded_list_target",
+        "phn_encoded_target",
+        "phn_list_canonical",
+        "phn_encoded_list_canonical",
+        "phn_encoded_canonical",
+        "phn_list_perceived",
+        "phn_encoded_list_perceived",
+        "phn_encoded_perceived",
+    )
+    def text_pipeline_test(target, canonical, perceived):
+        phn_list_target = target.strip().split()
         yield phn_list_target
+        phn_encoded_list_target = label_encoder.encode_sequence(phn_list_target)
+        yield phn_encoded_list_target
+        phn_encoded_target = torch.LongTensor(phn_encoded_list_target)
         yield phn_encoded_target
+        phn_list_canonical = canonical.strip().split()
+        # remove extra spaces
         yield phn_list_canonical
+        phn_encoded_list_canonical = label_encoder.encode_sequence(phn_list_canonical)
+        yield phn_encoded_list_canonical
+        phn_encoded_canonical = torch.LongTensor(phn_encoded_list_canonical)
         yield phn_encoded_canonical
+        phn_list_perceived = perceived.strip().split()
         yield phn_list_perceived
+        phn_encoded_list_perceived = label_encoder.encode_sequence(phn_list_perceived)
+        yield phn_encoded_list_perceived
+        phn_encoded_perceived = torch.LongTensor(phn_encoded_list_perceived)
         yield phn_encoded_perceived
-        yield wrd
-        # Audio waveform to sig
-        waveform = torch.tensor(audio["array"]).float()
-        sr = audio["sampling_rate"]
-        if sr != hparams["sample_rate"]:
-            resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=hparams["sample_rate"])
-            waveform = resampler(waveform)
-        if waveform.ndim > 1:
-            waveform = waveform.mean(dim=0)  # Convert to mono
-        yield waveform
 
-    sb.dataio.dataset.add_dynamic_item([train_data_sb, valid_data_sb, test_data_sb], text_pipeline)
+    # sb.dataio.dataset.add_dynamic_item([train_data], text_pipeline_train)
+    sb.dataio.dataset.add_dynamic_item([train_data], text_pipeline_test)
+    sb.dataio.dataset.add_dynamic_item([valid_data, test_data], text_pipeline_test)
 
     # 3. Fit encoder:
     # Load or compute the label encoder
-    # get hparams. label_encoder_file, if not set create one
-    if "label_encoder_file" in hparams:
-        lab_enc_file = hparams["label_encoder_file"]
-        special_labels = {
-            "blank_label": hparams["blank_index"],
-        }
-        
-        label_encoder.load_or_create(
-            path=lab_enc_file,
-            from_didatasets=[train_data_sb, valid_data_sb, test_data_sb],
-            output_key="phn_list_target",
-            special_labels=special_labels,
-            sequence_input=True,
-        )
-    else:
-        lab_enc_file = os.path.join(hparams["save_folder"], "label_encoder.txt")
+    lab_enc_file = os.path.join(hparams["save_folder"], "label_encoder.txt")
+    special_labels = {
+        "blank_label": hparams["blank_index"],
+    }
+    label_encoder.load_or_create(
+        path=lab_enc_file,
+        from_didatasets=[train_data],
+        output_key="phn_list_target",
+        special_labels=special_labels,
+        sequence_input=True,
+    )
 
-        special_labels = {
-            "blank_label": hparams["blank_index"],
-        }
-        
-        label_encoder.load_or_create(
-            path=lab_enc_file,
-            from_didatasets=[train_data_sb, valid_data_sb, test_data_sb],
-            output_key="phn_list_target",
-            special_labels=special_labels,
-            sequence_input=True,
-        )
     # 4. Set output: # use raw phoneme encoding
     sb.dataio.dataset.set_output_keys(
-        [train_data_sb],
-        [
-            "id",
-            "phn_encoded_target",
-            "phn_encoded_target_lens",
-            "phn_encoded_canonical",
-            "phn_encoded_canonical_lens",
-            "phn_encoded_perceived",
-            "phn_encoded_perceived_lens",
-            "phn_list_target",
-            "phn_list_canonical",
-            "phn_list_perceived",
-            "wrd",
-            "sig"
+        [train_data],
+        ["id",
+         "sig", 
+         "phn_encoded_target",
+        "phn_encoded_canonical",
+        "phn_encoded_perceived",
+        "phn_list_target",
+        "phn_list_canonical",
+        "phn_list_perceived",
+        "wrd"  # word list, not used in training
         ]
     )
     sb.dataio.dataset.set_output_keys(
-        [valid_data_sb, test_data_sb],
-        [
-            "id",
-            "phn_encoded_target",
-            "phn_encoded_target_lens",
-            "phn_encoded_canonical",
-            "phn_encoded_canonical_lens",
-            "phn_encoded_perceived",
-            "phn_encoded_perceived_lens",
-            "phn_list_target",
-            "phn_list_canonical",
-            "phn_list_perceived",
-            "wrd",
-            "sig"
+        [valid_data, test_data],
+        ["id",
+         "sig", 
+         "phn_encoded_target",
+        "phn_encoded_canonical",
+        "phn_encoded_perceived",
+        "phn_list_target",
+        "phn_list_canonical",
+        "phn_list_perceived",
+        "wrd"  # word list, not used in training
         ]
     )
+    
+    # 5. select samples from test_data to do on-training evaluation
+    # if given id_list, select the samples with the given id
+    # if not given, select 5 samples from test_data
+    if hparams.get("on_training_eval_id_list", None) is not None:
+        test_data_on_training = test_data.select(hparams.get("on_training_eval_id_list"))
+    else:
+        test_data_on_training = test_data.select(range(5))
+    
+    return train_data, valid_data, test_data, test_data_on_training, label_encoder
 
-    return train_data_sb, valid_data_sb, test_data_sb, label_encoder
+# def dataio_prep_for_timit(hparams):
+#     """This function prepares the datasets to be used in the brain class.
+#     It also defines the data processing pipeline through user-defined functions."""
+    
+#     # split train_dev_data into train and valid
+#     local_data_folder = hparams["timit_local_data_folder"]
+#     label_encoder = sb.dataio.encoder.CTCTextEncoder()
+
+#     # 0. Load TIMIT dataset
+#     from datasets import load_dataset
+#     train_dev_data = load_dataset("timit_asr",data_dir=local_data_folder,split="train")
+#     train_dev_data = train_dev_data.train_test_split(test_size=0.1, seed=42)
+#     train_data = train_dev_data["train"]
+#     valid_data = train_dev_data["test"]
+#     # Keep audio column so we can use the waveform
+#     # Do NOT remove "audio" column since we need raw audio
+    
+#     test_data = load_dataset(
+#         "timit_asr",
+#         data_dir=local_data_folder,
+#         split="test") 
+
+#     # remove id column 
+#     train_data = train_data.remove_columns(["id"])
+#     valid_data = valid_data.remove_columns(["id"])
+#     test_data = test_data.remove_columns(["id"])
+
+#     # convert Dataset into speechbrain Dataset
+#     train_data_sb = sb.dataio.dataset.DynamicItemDataset.from_arrow_dataset(train_data)
+#     valid_data_sb = sb.dataio.dataset.DynamicItemDataset.from_arrow_dataset(valid_data)
+#     test_data_sb = sb.dataio.dataset.DynamicItemDataset.from_arrow_dataset(test_data)
+
+#     timit2cmu = {
+#         # Vowels & diphthongs
+#         "aa": "aa", "ae": "ae", "ah": "ah",
+#         "ao": "aa", "aw": "aw", "ay": "ay",
+#         "eh": "eh", "er": "er", "ey": "ey",
+#         "ih": "ih", "iy": "iy", "ow": "ow",
+#         "oy": "oy", "uh": "uh", "uw": "uw",
+#         "axr": "er",
+#         "ix": "ih",
+#         "ux": "uw",
+#         "em": "m",
+#         "en": "n",
+#         "eng": "ng",
+#         "nx": "n",
+#         "hv": "hh",
+#         "ax": "ah",
+#         "ix": "iy",
+#         "ax-h": "ah",
+        
+    
+#         # Consonants
+#         "b": "b", "bcl": "b",
+#         "ch": "ch",
+#         "d": "d", "dcl": "d",
+#         "dh": "dh", "dx": "d",
+#         "f": "f",
+#         "g": "g", "gcl": "g",
+#         "hh": "hh", "hv": "hh",
+#         "jh": "jh",
+#         "k": "k", "kcl": "k",
+#         "l": "l", "el": "l",
+#         "m": "m", "em": "m",
+#         "n": "n", "en": "n", "nx": "n",
+#         "ng": "ng",
+#         "p": "p", "pcl": "p",
+#         "r": "r",
+#         "s": "s",
+#         "sh": "sh",
+#         "t": "t", "tcl": "t",
+#         "th": "th",
+#         "v": "v",
+#         "w": "w",
+#         "y": "y",
+#         "z": "z",
+#         "zh": "zh",
+
+#         # Silences/closures / fillers
+#         "pau": "sil", "h#": "sil", "epi": "sil",
+#         "cl": "sil", "q": "sil"
+        
+#     }
+#     # convert phoneme labels to 40 phonemes
+#     # (Pdb) test_data
+#     # Dataset({
+#     # features: ['file', 'audio', 'text', 'phonetic_detail', 'word_detail', 'dialect_region', 'sentence_type', 'speaker_id', 'id'],
+#     # num_rows: 1600
+#     # })
+#     # (Pdb) dataset_test["phonetic_detail"][0]
+#     # {'start': [0, 9640, 11240, 12783, 14078, 16157, 16880, 17103, 17587, 18760, 19720, 19962, 21514, 22680, 23800, 24104, 26280, 28591, 29179, 30337, 31880, 32500, 33170, 33829, 35150, 37370, 38568, 40546, 42357, 45119, 45624, 46855, 48680, 49240, 51033, 52378, 54500, 55461, 57395, 59179, 60600], 'stop': [9640, 11240, 12783, 14078, 16157, 16880, 17103, 17587, 18760, 19720, 19962, 21514, 22680, 23800, 24104, 26280, 28591, 29179, 30337, 31880, 32500, 33170, 33829, 35150, 37370, 38568, 40546, 42357, 45119, 45624, 46855, 48680, 49240, 51033, 52378, 54500, 55461, 57395, 59179, 60600, 63440], 'utterance': ['h#', 'sh', 'iy', 'hv', 'ae', 'dcl', 'd', 'y', 'er', 'dcl', 'd', 'aa', 'r', 'kcl', 'k', 's', 'uw', 'dx', 'ih', 'ng', 'gcl', 'g', 'r', 'iy', 's', 'iy', 'w', 'aa', 'sh', 'epi', 'w', 'aa', 'dx', 'er', 'q', 'ao', 'l', 'y', 'iy', 'axr', 'h#']}
+#     # (Pdb)  dataset_test["word_detail"][0]
+#     # {'start': [9640, 12783, 17103, 18760, 24104, 29179, 31880, 38568, 45624, 52378, 55461], 'stop': [12783, 17103, 18760, 24104, 29179, 31880, 38568, 45119, 51033, 55461, 60600], 'utterance': ['she', 'had', 'your', 'dark', 'suit', 'in', 'greasy', 'wash', 'water', 'all', 'year']}
+#     # (Pdb)  dataset_test[0]
+#     # {'file': '/common/db/TIMIT/timit/test/dr1/faks0/sa1.wav', 'audio': {'path': '/common/db/TIMIT/timit/test/dr1/faks0/sa1.wav', 'array': array([9.15527344e-05, 1.52587891e-04, 6.10351562e-05, ...,   2.44140625e-04, 3.05175781e-04, 2.13623047e-04]), 'sampling_rate': 16000}, 'text': 'She had your dark suit in greasy wash water all year.', 'phonetic_detail': {'start': [0, 9640, 11240, 12783, 14078, 16157, 16880, 17103, 17587, 18760, 19720, 19962, 21514, 22680, 23800, 24104, 26280, 28591, 29179, 30337, 31880, 32500, 33170, 33829, 35150, 37370, 38568, 40546, 42357, 45119, 45624, 46855, 48680, 49240, 51033, 52378, 54500, 55461, 57395, 59179, 60600], 'stop': [9640, 11240, 12783, 14078, 16157, 16880, 17103, 17587, 18760, 19720, 19962, 21514, 22680, 23800, 24104, 26280, 28591, 29179, 30337, 31880, 32500, 33170, 33829, 35150, 37370, 38568, 40546, 42357, 45119, 45624, 46855, 48680, 49240, 51033, 52378, 54500, 55461, 57395, 59179, 60600, 63440], 'utterance': ['h#', 'sh', 'iy', 'hv', 'ae', 'dcl', 'd', 'y', 'er', 'dcl', 'd', 'aa', 'r', 'kcl', 'k', 's', 'uw', 'dx', 'ih', 'ng', 'gcl', 'g', 'r', 'iy', 's', 'iy', 'w', 'aa', 'sh', 'epi', 'w', 'aa', 'dx', 'er', 'q', 'ao', 'l', 'y', 'iy', 'axr', 'h#']}, 'word_detail': {'start': [9640, 12783, 17103, 18760, 24104, 29179, 31880, 38568, 45624, 52378, 55461], 'stop': [12783, 17103, 18760, 24104, 29179, 31880, 38568, 45119, 51033, 55461, 60600], 'utterance': ['she', 'had', 'your', 'dark', 'suit', 'in', 'greasy', 'wash', 'water', 'all', 'year']}, 'dialect_region': 'dr1', 'sentence_type': 'sa', 'speaker_id': 'aks0', 'id': 'sa1'}
+    
+#     # 1. Define text pipeline:
+#     @sb.utils.data_pipeline.takes("text", "phonetic_detail", "word_detail", "audio")
+#     @sb.utils.data_pipeline.provides(
+#         "phn_list_target",
+#         "phn_encoded_target",
+#         "phn_encoded_target_lens",
+#         "phn_list_canonical",
+#         "phn_encoded_canonical",
+#         "phn_encoded_canonical_lens",
+#         "phn_list_perceived",
+#         "phn_encoded_perceived",
+#         "phn_encoded_perceived_lens",
+#         "wrd",
+#         "sig"
+#     )
+#     def text_pipeline(text: str, phonetic_detail: dict, word_detail: dict, audio: dict):
+#         # Convert perceived phonemes to 40 phonemes
+#         # Use word sequence to get the canonical phonemes
+#         # phonetic_detail is a dict key,
+        
+#         ## Perceived phonemes
+#         phonemes = phonetic_detail["utterance"]
+#                 # convert to 40 phonemes using timit2cmu mapping
+#         # clean the phonemes
+#         phn_list_perceived = [simplify_phoneme(p) for p in phonemes]
+#         phn_list_perceived = [timit2cmu.get(p, p) for p in phn_list_perceived]
+
+#         # 
+
+#         ## Canonical phonemes and Wrd
+#         # apply word detail to get the canonical phonemes and wrd
+#         word_phonemes = word_detail["utterance"] # list of words
+#         # get the canonical phonemes for each word
+#         canonical_phonemes = [sentence_to_phoneme(word) for word in word_phonemes]
+#         # flatten the list
+#         canonical_phonemes = [p for sublist in canonical_phonemes for p in sublist]
+#         # simplify the phonemes
+#         canonical_phonemes = [simplify_phoneme(p) for p in canonical_phonemes]
+#         canonical_phonemes = [timit2cmu.get(p, p) for p in canonical_phonemes]
+#         phn_list_canonical = canonical_phonemes
+
+#         ## Wrd
+#         wrd = word_detail["utterance"]
+
+#         ## Target  == Perceived
+#         phn_list_target = phn_list_perceived
+        
+#         # Encode the phonemes
+#         phn_encoded_target = label_encoder.encode_sequence(phn_list_target)
+#         phn_encoded_canonical = label_encoder.encode_sequence(canonical_phonemes)
+#         phn_encoded_perceived = label_encoder.encode_sequence(phn_list_perceived)
+
+#         # Yield the results
+#         yield phn_list_target
+#         yield phn_encoded_target
+#         yield phn_list_canonical
+#         yield phn_encoded_canonical
+#         yield phn_list_perceived
+#         yield phn_encoded_perceived
+#         yield wrd
+#         # Audio waveform to sig
+#         waveform = torch.tensor(audio["array"]).float()
+#         sr = audio["sampling_rate"]
+#         if sr != hparams["sample_rate"]:
+#             resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=hparams["sample_rate"])
+#             waveform = resampler(waveform)
+#         if waveform.ndim > 1:
+#             waveform = waveform.mean(dim=0)  # Convert to mono
+#         yield waveform
+
+#     sb.dataio.dataset.add_dynamic_item([train_data_sb, valid_data_sb, test_data_sb], text_pipeline)
+
+#     # 3. Fit encoder:
+#     # Load or compute the label encoder
+#     # get hparams. label_encoder_file, if not set create one
+#     if "label_encoder_file" in hparams:
+#         lab_enc_file = hparams["label_encoder_file"]
+#         special_labels = {
+#             "blank_label": hparams["blank_index"],
+#         }
+        
+#         label_encoder.load_or_create(
+#             path=lab_enc_file,
+#             from_didatasets=[train_data_sb, valid_data_sb, test_data_sb],
+#             output_key="phn_list_target",
+#             special_labels=special_labels,
+#             sequence_input=True,
+#         )
+#     else:
+#         lab_enc_file = os.path.join(hparams["save_folder"], "label_encoder.txt")
+
+#         special_labels = {
+#             "blank_label": hparams["blank_index"],
+#         }
+        
+#         label_encoder.load_or_create(
+#             path=lab_enc_file,
+#             from_didatasets=[train_data_sb, valid_data_sb, test_data_sb],
+#             output_key="phn_list_target",
+#             special_labels=special_labels,
+#             sequence_input=True,
+#         )
+#     # 4. Set output: # use raw phoneme encoding
+#     sb.dataio.dataset.set_output_keys(
+#         [train_data_sb],
+#         [
+#             "id",
+#             "phn_encoded_target",
+#             "phn_encoded_target_lens",
+#             "phn_encoded_canonical",
+#             "phn_encoded_canonical_lens",
+#             "phn_encoded_perceived",
+#             "phn_encoded_perceived_lens",
+#             "phn_list_target",
+#             "phn_list_canonical",
+#             "phn_list_perceived",
+#             "wrd",
+#             "sig"
+#         ]
+#     )
+#     sb.dataio.dataset.set_output_keys(
+#         [valid_data_sb, test_data_sb],
+#         [
+#             "id",
+#             "phn_encoded_target",
+#             "phn_encoded_target_lens",
+#             "phn_encoded_canonical",
+#             "phn_encoded_canonical_lens",
+#             "phn_encoded_perceived",
+#             "phn_encoded_perceived_lens",
+#             "phn_list_target",
+#             "phn_list_canonical",
+#             "phn_list_perceived",
+#             "wrd",
+#             "sig"
+#         ]
+#     )
+
+#     return train_data_sb, valid_data_sb, test_data_sb, label_encoder
 
 if __name__ == "__main__":
     # CLI:
@@ -947,8 +1132,7 @@ if __name__ == "__main__":
     with open(hparams_file) as fin:
         hparams = load_hyperpyyaml(fin, overrides)
     # Initialize ddp (useful only for multi-GPU DDP training)
-    #sb.utils.distributed.ddp_init_group(run_opts)
-
+    sb.utils.distributed.ddp_init_group(run_opts)
     # Create experiment directory
     sb.create_experiment_directory(
         experiment_directory=hparams["output_folder"],
@@ -988,20 +1172,19 @@ if __name__ == "__main__":
     )
     
     # Training/validation loop
-    try:
-        asr_brain.fit(
-            asr_brain.hparams.epoch_counter,
-            train_data,
-            valid_data,
-            train_loader_kwargs=hparams["train_dataloader_opts"],
-            valid_loader_kwargs=hparams["valid_dataloader_opts"],
-        )
-    except StopIteration:
-        print("Training stopped early due to no improvement.")
+    # try:
+    #     asr_brain.fit(
+    #         asr_brain.hparams.epoch_counter,
+    #         train_data,
+    #         valid_data,
+    #         train_loader_kwargs=hparams["train_dataloader_opts"],
+    #         valid_loader_kwargs=hparams["valid_dataloader_opts"],
+    #     )
+    # except StopIteration:
+    #     print("Training stopped early due to no improvement.")
     # Test
     asr_brain.evaluate(
         test_data,
         test_loader_kwargs=hparams["test_dataloader_opts"],
         min_key="PER",
     )
- 
