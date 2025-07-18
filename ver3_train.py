@@ -61,7 +61,7 @@ def make_attn_mask(wavs, wav_lens):
 # Define training procedure
 # Mono ASR model
 class ASR(sb.Brain):
-    def __init__(self, *args, patience=20, **kwargs):
+    def __init__(self, *args, patience=30, **kwargs):
         super().__init__(*args, **kwargs)
         self.patience = patience
         self.no_improve_epochs = 0
@@ -181,6 +181,7 @@ class ASR(sb.Brain):
             mpd_f1 = self.mpd_metrics.summarize("mpd_f1")
 
         if stage == sb.Stage.VALID:
+            # Log stats
             self.hparams.train_logger.log_stats(
                 stats_meta={
                     "epoch": epoch,
@@ -195,6 +196,7 @@ class ASR(sb.Brain):
                     "mpd_f1": mpd_f1
                 },
             )
+            # Save best 3 Models
             improved = False
             # Save best 3 PER models (lower is better)
             if per < self.best_per or len(self.best_per_list) < 3:
@@ -241,7 +243,7 @@ class ASR(sb.Brain):
             else:
                 self.no_improve_epochs += 1
             # Logging
-            
+
             wandb.log({
                 "epoch": epoch,
                 "train_loss": self.train_loss,
@@ -375,8 +377,7 @@ class ASR(sb.Brain):
         if self.checkpointer is not None:
             # TODO: support recover best on PER or mpd_f1 or averaged model of best PER and mpd_f1
             self.checkpointer.recover_if_possible(
-                important_keys=["PER", "mpd_f1"],
-                #min_key="PER",
+                min_key="PER",
                 #max_key="mpd_f1",
             )
 
@@ -707,187 +708,6 @@ def dataio_prep_for_llm(hparams):
     
     return train_data, valid_data, test_data, label_encoder
 
-def dataio_prep_for_llm_v2(hparams):
-    """This function prepares the datasets to be used in the brain class.
-    It also defines the data processing pipeline through user-defined functions."""
-    data_folder = hparams["data_folder_save"]
-    # 1. Declarations:
-    train_data = sb.dataio.dataset.DynamicItemDataset.from_json(
-        json_path=hparams["train_annotation"],
-        replacements={"data_root": data_folder},
-    )
-    if hparams["sorting"] == "ascending":
-        # we sort training data to speed up training and get better results.
-        train_data = train_data.filtered_sorted(sort_key="duration")
-        # when sorting do not shuffle in dataloader ! otherwise is pointless
-        hparams["train_dataloader_opts"]["shuffle"] = False
-
-    elif hparams["sorting"] == "descending":
-        train_data = train_data.filtered_sorted(
-            sort_key="duration", reverse=True
-        )
-        # when sorting do not shuffle in dataloader ! otherwise is pointless
-        hparams["train_dataloader_opts"]["shuffle"] = False
-
-    elif hparams["sorting"] == "random":
-        pass
-
-    else:
-        raise NotImplementedError(
-            "sorting must be random, ascending or descending"
-        )
-
-    valid_data = sb.dataio.dataset.DynamicItemDataset.from_json(
-        json_path=hparams["valid_annotation"],
-        replacements={"data_root": data_folder},
-    )
-    valid_data = valid_data.filtered_sorted(sort_key="duration")
-
-    test_data = sb.dataio.dataset.DynamicItemDataset.from_json(
-        json_path=hparams["test_annotation"],
-        replacements={"data_root": data_folder},
-    )
-    test_data = test_data.filtered_sorted(sort_key="duration")
-
-    datasets = [train_data, valid_data, test_data]
-    label_encoder = sb.dataio.encoder.CTCTextEncoder()
-    
-    # 2. Define audio pipeline:
-    @sb.utils.data_pipeline.takes("wav")
-    @sb.utils.data_pipeline.provides("sig")
-    def audio_pipeline(wav):
-        # sig = sb.dataio.dataio.read_audio(wav)
-        # # sample rate change to 16000, e,g, using librosa
-        # sig = torch.Tensor(librosa.core.load(wav, hparams["sample_rate"])[0])
-        # Use wav2vec processor to do normalization
-        waveform, sr = torchaudio.load(wav)  # waveform: [1, T]
-
-        # Optional: resample to match model sample rate
-        target_sr = hparams["sample_rate"]
-        if sr != target_sr:
-            resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=target_sr)
-            waveform = resampler(waveform)
-
-        # Convert to mono if stereo
-        if waveform.shape[0] > 1:
-            waveform = waveform.mean(dim=0, keepdim=True)
-
-        # Apply feature extractor (expecting 1D numpy array)
-        sig = hparams["perceived_ssl"].feature_extractor(
-            waveform.squeeze(0).numpy(),  # convert to 1D numpy
-            sampling_rate=target_sr
-        ).input_values[0]
-
-        sig = torch.Tensor(sig)
-        return sig
-
-    sb.dataio.dataset.add_dynamic_item(datasets, audio_pipeline)
-        
-    # 3. Define text pipeline:
-    @sb.utils.data_pipeline.takes("perceived_train_target")
-    @sb.utils.data_pipeline.provides(
-        "phn_list_target",
-        "phn_encoded_list_target",
-        "phn_encoded_target",
-        "wrd"
-    )
-    def text_pipeline_train(phn):
-        phn_list = phn.strip().split()
-        yield phn_list
-        phn_encoded_list = label_encoder.encode_sequence(phn_list)
-        yield phn_encoded_list
-        phn_encoded = torch.LongTensor(phn_encoded_list)
-        yield phn_encoded
-
-    @sb.utils.data_pipeline.takes("perceived_train_target", "canonical_aligned", "perceived_aligned")
-    @sb.utils.data_pipeline.provides(
-        "phn_list_target",
-        "phn_encoded_list_target",
-        "phn_encoded_target",
-        "phn_list_canonical",
-        "phn_encoded_list_canonical",
-        "phn_encoded_canonical",
-        "phn_list_perceived",
-        "phn_encoded_list_perceived",
-        "phn_encoded_perceived",
-    )
-    def text_pipeline_test(target, canonical, perceived):
-        phn_list_target = target.strip().split()
-        yield phn_list_target
-        phn_encoded_list_target = label_encoder.encode_sequence(phn_list_target)
-        yield phn_encoded_list_target
-        phn_encoded_target = torch.LongTensor(phn_encoded_list_target)
-        yield phn_encoded_target
-        phn_list_canonical = canonical.strip().split()
-        # remove extra spaces
-        yield phn_list_canonical
-        phn_encoded_list_canonical = label_encoder.encode_sequence(phn_list_canonical)
-        yield phn_encoded_list_canonical
-        phn_encoded_canonical = torch.LongTensor(phn_encoded_list_canonical)
-        yield phn_encoded_canonical
-        phn_list_perceived = perceived.strip().split()
-        yield phn_list_perceived
-        phn_encoded_list_perceived = label_encoder.encode_sequence(phn_list_perceived)
-        yield phn_encoded_list_perceived
-        phn_encoded_perceived = torch.LongTensor(phn_encoded_list_perceived)
-        yield phn_encoded_perceived
-
-    # sb.dataio.dataset.add_dynamic_item([train_data], text_pipeline_train)
-    sb.dataio.dataset.add_dynamic_item([train_data], text_pipeline_test)
-    sb.dataio.dataset.add_dynamic_item([valid_data, test_data], text_pipeline_test)
-
-    # 3. Fit encoder:
-    # Load or compute the label encoder
-    lab_enc_file = os.path.join(hparams["save_folder"], "label_encoder.txt")
-    special_labels = {
-        "blank_label": hparams["blank_index"],
-    }
-    label_encoder.load_or_create(
-        path=lab_enc_file,
-        from_didatasets=[train_data],
-        output_key="phn_list_target",
-        special_labels=special_labels,
-        sequence_input=True,
-    )
-
-    # 4. Set output: # use raw phoneme encoding
-    sb.dataio.dataset.set_output_keys(
-        [train_data],
-        ["id",
-         "sig", 
-         "phn_encoded_target",
-        "phn_encoded_canonical",
-        "phn_encoded_perceived",
-        "phn_list_target",
-        "phn_list_canonical",
-        "phn_list_perceived",
-        "wrd"  # word list, not used in training
-        ]
-    )
-    sb.dataio.dataset.set_output_keys(
-        [valid_data, test_data],
-        ["id",
-         "sig", 
-         "phn_encoded_target",
-        "phn_encoded_canonical",
-        "phn_encoded_perceived",
-        "phn_list_target",
-        "phn_list_canonical",
-        "phn_list_perceived",
-        "wrd"  # word list, not used in training
-        ]
-    )
-    
-    # 5. select samples from test_data to do on-training evaluation
-    # if given id_list, select the samples with the given id
-    # if not given, select 5 samples from test_data
-    if hparams.get("on_training_eval_id_list", None) is not None:
-        test_data_on_training = test_data.select(hparams.get("on_training_eval_id_list"))
-    else:
-        test_data_on_training = test_data.select(range(5))
-    
-    return train_data, valid_data, test_data, test_data_on_training, label_encoder
-
 # def dataio_prep_for_timit(hparams):
 #     """This function prepares the datasets to be used in the brain class.
 #     It also defines the data processing pipeline through user-defined functions."""
@@ -1141,8 +961,9 @@ if __name__ == "__main__":
     )
 
     # Dataset IO prep: creating Dataset objects and proper encodings for phones
-    train_data, valid_data, test_data, label_encoder = dataio_prep_for_llm(hparams)
+    # train_data, valid_data, test_data, label_encoder = dataio_prep_for_llm(hparams)
     # train_data, valid_data, test_data, label_encoder = dataio_prep_for_timit(hparams)
+    train_data, valid_data, test_data, label_encoder = dataio_prep_for_llm(hparams)
     # test_unit = test_data[0]
     # Trainer initialization
     asr_brain = ASR(
@@ -1172,16 +993,16 @@ if __name__ == "__main__":
     )
     
     # Training/validation loop
-    # try:
-    #     asr_brain.fit(
-    #         asr_brain.hparams.epoch_counter,
-    #         train_data,
-    #         valid_data,
-    #         train_loader_kwargs=hparams["train_dataloader_opts"],
-    #         valid_loader_kwargs=hparams["valid_dataloader_opts"],
-    #     )
-    # except StopIteration:
-    #     print("Training stopped early due to no improvement.")
+    try:
+        asr_brain.fit(
+            asr_brain.hparams.epoch_counter,
+            train_data,
+            valid_data,
+            train_loader_kwargs=hparams["train_dataloader_opts"],
+            valid_loader_kwargs=hparams["valid_dataloader_opts"],
+        )
+    except StopIteration:
+        print("Training stopped early due to no improvement.")
     # Test
     asr_brain.evaluate(
         test_data,

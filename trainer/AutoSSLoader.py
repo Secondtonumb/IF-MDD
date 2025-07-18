@@ -16,15 +16,18 @@ from speechbrain.lobes.models.huggingface_transformers.whisper import Whisper
 
 pretrained_models={
     "wav2vec2_base": "facebook/wav2vec2-base", # 768
+    "wav2vec2_base_jp": "rinna/japanese-wav2vec2-base", # 768
     "hubert_base": "facebook/hubert-base-ls960", # 768
     "wavlm_base": "microsoft/wavlm-base", # 768
+    "wavlm_base_jp": "rinna/japanese-wavlm-base", # 768
     "wavlm_base_plus": "microsoft/wavlm-base-plus", # 768
     "hubert_multilingual": "utter-project/mHuBERT-147", # 768
     "clap" : "laion/clap-htsat-fused", # 768
     "data2vec_base": "facebook/data2vec-audio-base", # 768
     
     "wav2vec2_large": "facebook/wav2vec2-large", # 1024
-    "hubert_large": "facebook/hubert-large-ls960", # 1024
+    "hubert_large": "facebook/hubert-large-ls960-ft", # 1024
+    "hubert_large_ll60k": "facebook/hubert-large-ll60k", # 1024
     "wavlm_large": "microsoft/wavlm-large-plus", # 1024
     "data2vec_large": "facebook/data2vec-audio-large", #1024
     

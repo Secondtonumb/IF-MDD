@@ -16,3 +16,4 @@ output_bpe_dict/
 speechbrain/
 
 exp/
+exp*/

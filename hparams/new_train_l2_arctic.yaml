@@ -3,35 +3,32 @@
 
 ## SSL features Selection
 pretrained_models_path: pretrained_models/
-pretrained_models:
-    {
-        "wav2vec2_base": "facebook/wav2vec2-base", # 768
-        "hubert_base": "facebook/hubert-base-ls960", # 768
-        "wavlm_base": "microsoft/wavlm-base", # 768
-        "wavlm_base_plus": "microsoft/wavlm-base-plus", # 768
-        "hubert_multilingual": "utter-project/mHuBERT-147", # 768
-        "data2vec_base": "facebook/data2vec-audio-base", # 768
-        "clap" : "laion/clap-htsat-fused", # 768
-        
-        "wav2vec2_large": "facebook/wav2vec2-large", # 1024
-        "hubert_large": "facebook/hubert-large-ls960", # 1024
-        "wavlm_large": "microsoft/wavlm-large-plus", # 1024
-        "data2vec_large": "facebook/data2vec-audio-large", #1024
-        "whisper_medium": "openai/whisper-medium", # 1024
-        "whisper_large_v3_turbo": "openai/whisper-large-v3-turbo", # 1280
-    }
+# pretrained_models:
+# {
+#     "wav2vec2_base": "facebook/wav2vec2-base", # 768
+#     "hubert_base": "facebook/hubert-base-ls960", # 768
+#     "wavlm_base": "microsoft/wavlm-base", # 768
+#     "wavlm_base_plus": "microsoft/wavlm-base-plus", # 768
+#     "hubert_multilingual": "utter-project/mHuBERT-147", # 768
+#     "clap" : "laion/clap-htsat-fused", # 768
+#     "data2vec_base": "facebook/data2vec-audio-base", # 768
+    
+#     "wav2vec2_large": "facebook/wav2vec2-large", # 1024
+#     "hubert_large": "facebook/hubert-large-ls960", # 1024
+#     "wavlm_large": "microsoft/wavlm-large-plus", # 1024
+#     "data2vec_large": "facebook/data2vec-audio-large", #1024
+#     "whisper_medium": "openai/whisper-medium", # 1024
+    
+#     "whisper_large_v3_turbo": "openai/whisper-large-v3-turbo", # 1280
+# }
+
 
 # select pretrained SSL models
-perceived_ssl_model: "clap" # in pretrained_models
+perceived_ssl_model: "hubert_multilingual" # in pretrained_models
 canonical_ssl_model: Null
-# 
-perceived_ssl_model_id: !ref <pretrained_models[clap]>
-canonical_ssl_model_id: Null
 
 # # models hidden size, varies by model
-ENCODER_DIM_Base: 768  # Dimension of the encoder output
-ENCODER_DIM_Large: 1024  # Dimension of the encoder output
-ENCODER_DIM_Whisper_Large_V3_Turbo: 1280  # Dimension
+ENCODER_DIM: 768
 
 # # How to fuse the features
 feature_fusion: "mono"        # Options: "mono" for single ssl, "dual_ssl_enc" for dual ssl encoder, "dual_loss" for single SSL dual ssl loss
@@ -40,19 +37,22 @@ blend_alpha: 0.5              # If using "blend" fusion
 # Input files
 # Data files
 data_folder_save: "./data"
-train_annotation: !ref <data_folder_save>/train_erj_spk_open_train-train_1.1.json
-valid_annotation: !ref <data_folder_save>/train_erj_spk_open_train-dev_1.1.json
-test_annotation: !ref <data_folder_save>/test_erj_spk_open_test_1.1.json
+train_annotation: !ref <data_folder_save>/train-train.json
+valid_annotation: !ref <data_folder_save>/train-dev.json
+test_annotation: !ref <data_folder_save>/test.json
 
 # generate training id for output folder
 # generate_training_id: !apply:trainer.generate_training_id.generate_training_id [!ref <perceived_ssl_model_id>, !ref <canonical_ssl_model_id>, !ref <feature_fusion>, !ref <prefix>]
 
 # output files
-output_folder: !ref exp/<perceived_ssl_model>_<canonical_ssl_model>_<feature_fusion>
+output_folder: !ref exp_l2arctic/<perceived_ssl_model>_<canonical_ssl_model>_<feature_fusion>
 wer_file: !ref <output_folder>/wer.txt
 mpd_file: !ref <output_folder>/mpd.txt
 save_folder: !ref <output_folder>/save
 train_log: !ref <output_folder>/train_log.txt
+
+on_training_test_wer_folder: !ref <output_folder>/on_training_test_wer
+on_training_test_mpd_folder: !ref <output_folder>/on_training_test_mpd
 
 # Modules (SpeechBrain lobes)
 modules:
@@ -62,21 +62,20 @@ modules:
   ctc_lin: !ref <ctc_lin>
 
 perceived_ssl: !apply:trainer.AutoSSLoader.AutoSSLLoader
-    source: !ref <perceived_ssl_model_id>
+    model_name: !ref <perceived_ssl_model>
     freeze: !ref <freeze_perceived_ssl>
     freeze_feature_extractor: !ref <freeze_perceived_feature_extractor>
     save_path: !ref <pretrained_models_path>
-    encoder_type: !name:speechbrain.lobes.models.huggingface_transformers.wav2vec2.Wav2Vec2
 
 canonical_ssl: !apply:trainer.AutoSSLoader.AutoSSLLoader
-    source: !ref <canonical_ssl_model_id>
+    model_name: !ref <canonical_ssl_model>
     freeze: !ref <freeze_canonical_ssl>
     freeze_feature_extractor: !ref <freeze_perceived_feature_extractor>
     save_path: !ref <pretrained_models_path>
 
 enc:
   !new:speechbrain.lobes.models.VanillaNN.VanillaNN
-    input_shape: [null, null, !ref <ENCODER_DIM_Base>]
+    input_shape: [null, null, !ref <ENCODER_DIM>]
     activation: !ref <activation>
     dnn_blocks: !ref <dnn_layers>
     dnn_neurons: !ref <dnn_neurons>
@@ -89,10 +88,10 @@ ctc_lin:  !new:speechbrain.nnet.linear.Linear
 activation: !name:torch.nn.LeakyReLU
 dnn_layers: 2
 dnn_neurons: 384  
-freeze_perceived_ssl: True
-freeze_canonical_ssl: True
-freeze_perceived_feature_extractor: False  # freeze the CNN extractor in wav2vec
-freeze_canonical_feature_extractor: False         # Freeze Whisper encoder?
+freeze_perceived_ssl: False
+freeze_canonical_ssl: False
+freeze_perceived_feature_extractor: True  # freeze the CNN extractor in wav2vec
+freeze_canonical_feature_extractor: True         # Freeze Whisper encoder?
 
 log_softmax: !new:speechbrain.nnet.activations.Softmax
     apply_log: True
@@ -101,8 +100,9 @@ ctc_cost: !name:speechbrain.nnet.losses.ctc_loss
     blank_index: !ref <blank_index>
 
 # Outputs
-output_neurons: 42 # l2arctic: 40phns(sil)+err+blank=42
+output_neurons: 3407 # l2arctic: 40phns(sil)+err+blank=42
 blank_index: 0
+
 
 model: !new:torch.nn.ModuleList
     - [!ref <enc>, !ref <ctc_lin>]
@@ -119,7 +119,7 @@ checkpointer: !new:speechbrain.utils.checkpoints.Checkpointer
         model: !ref <model>
         perceived_ssl: !ref <perceived_ssl>
         counter: !ref <epoch_counter>
-
+    
 # canonical_ssl: !ref <canonical_ssl>
 
 augmentation: !new:speechbrain.augment.time_domain.SpeedPerturb
@@ -147,14 +147,19 @@ seed: 1234
 __set_seed: !apply:torch.manual_seed [!ref <seed>]
 
 # training parameters
-number_of_epochs: 50
-batch_size: 32
+number_of_epochs: 100
+batch_size: 16
 lr: 0.0003
 sorting: ascending
-auto_mix_prec: False
 sample_rate: 16000
-gradient_accumulation: 1
+gradient_accumulation: 2
 lr_pretrained: 0.00001
+
+# Mix-Precision Training
+auto_mix_prec: true
+# or
+precision: fp16         # 支持 "fp32"、"fp16" 或 "bf16"
+eval_precision: fp16    # 推理同样切换到 FP16
 
 # Dataloader options
 train_dataloader_opts:
