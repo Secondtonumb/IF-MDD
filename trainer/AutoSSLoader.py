@@ -28,7 +28,7 @@ pretrained_models={
     "wav2vec2_large": "facebook/wav2vec2-large", # 1024
     "hubert_large": "facebook/hubert-large-ls960-ft", # 1024
     "hubert_large_ll60k": "facebook/hubert-large-ll60k", # 1024
-    "wavlm_large": "microsoft/wavlm-large-plus", # 1024
+    "wavlm_large": "microsoft/wavlm-large", # 1024
     "data2vec_large": "facebook/data2vec-audio-large", #1024
     
     "whisper_medium": "openai/whisper-medium", # 1024
@@ -43,6 +43,7 @@ def AutoSSLLoader(model_name, freeze, freeze_feature_extractor, save_path, encod
     save_path: str, the path to save the model
     encoder_type: str, the type of the encoder
     """    
+
     if model_name == None:
         print(f"model_name for SSL is None, return None")
         return None

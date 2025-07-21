@@ -25,13 +25,24 @@ import wandb
 import time
 import torchaudio
 from speechbrain.inference.text import GraphemeToPhoneme
-from g2p_en import G2p
+
 import re
 # simple_g2p  based on cmu dict
 # load G2P model
-g2p = G2p()
 
 sys.path.append("./trainer")
+
+# Placeholder: gather CTC-aligned representations for each token
+def gather_ctc_aligned_reps(encoded, targets, target_lens):
+    # Placeholder: ideally, implement alignment logic here
+    # For now, simply average pool the encoded features into L segments
+    B, T, D = encoded.size()
+    L = targets.size(1)
+    avg_len = T // L
+    reps = []
+    for i in range(L):
+        reps.append(encoded[:, i * avg_len : (i + 1) * avg_len].mean(dim=1))
+    return torch.stack(reps, dim=1)  # [B, L, D]
 
 def simplify_phoneme(p):
     return re.sub(r"\d", "", p).lower()  # e.g., 'AA1' -> 'aa'
@@ -79,7 +90,6 @@ class ASR(sb.Brain):
             self.modules.enc.to(self.device)
         if self.modules.ctc_lin is not None:
             self.modules.ctc_lin.to(self.device)
-        
 
     def check_gradients(self, loss):
         """Check if gradients are finite"""
@@ -87,6 +97,7 @@ class ASR(sb.Brain):
             print("Warning: loss is not finite, skipping step")
             return False
         return True
+    
     def compute_forward(self, batch, stage):
         "Given an input batch it computes the phoneme probabilities."
         batch = batch.to(self.device)
@@ -108,22 +119,21 @@ class ASR(sb.Brain):
 
         # output layer for ctc log-probabilities
         logits = self.modules.ctc_lin(x)
-        p_ctc = self.hparams.log_softmax(logits)
+        p_ctc = self.hparams.log_softmax(logits) # (B, T, C)
         return p_ctc, wav_lens
 
     def compute_objectives(self, predictions, batch, stage):
         "Given the network predictions and targets computed the NLL loss."
-
         p_ctc, wav_lens = predictions
-
         ids = batch.id
         targets, target_lens = batch.phn_encoded_target
+        # Additional: BCE loss on binary mispronunciation prediction
         if stage != sb.Stage.TRAIN:
             canonicals, canonical_lens = batch.phn_encoded_canonical
             perceiveds, perceived_lens = batch.phn_encoded_perceived
 
         loss_ctc = self.hparams.ctc_cost(p_ctc, targets, wav_lens, target_lens)
-        loss = loss_ctc
+        loss += loss_ctc
 
         # Record losses for posterity
         if stage != sb.Stage.TRAIN:
@@ -380,6 +390,164 @@ class ASR(sb.Brain):
                 min_key="PER",
                 #max_key="mpd_f1",
             )
+
+class ASR_with_misproBCE(ASR):
+    def __init__(self, *args, patience=30, **kwargs):
+        super().__init__(*args, patience=patience, **kwargs)
+        self_best_mispro_ce = float('inf')
+        # if self.modules.BCEloss is not None:
+        #     self.modules.BCEloss.to(self.device)
+            
+    def compute_objectives(self, predictions, batch, stage):
+        "Given the network predictions and targets computed the NLL loss."
+        loss = 0
+        p_ctc, wav_lens = predictions
+        ids = batch.id
+        targets, target_lens = batch.phn_encoded_target
+        mis_pro_labels, mis_pro_lens = batch.mispro_label
+        canonicals, canonical_lens = batch.phn_encoded_canonical
+        perceiveds, perceived_lens = batch.phn_encoded_perceived
+
+        sequence = sb.decoders.ctc_greedy_decode(
+            p_ctc, wav_lens, blank_id=self.hparams.blank_index
+        )
+        
+        
+        loss_ctc = self.hparams.ctc_cost(p_ctc, targets, wav_lens, target_lens)
+        loss_mirpro_BCElike_ctc = self.hparams.ctc_cost_mispro(
+            p_ctc, mis_pro_labels, wav_lens, mis_pro_lens
+        )
+        alpha = 0.8
+        loss += (alpha * loss_ctc + (1-alpha)*loss_mirpro_BCElike_ctc)
+        # loss += loss_ctc
+        
+        # Compute BCE loss for mispronunciation detection
+        
+        # Record losses for posterity
+        if stage != sb.Stage.TRAIN:
+            # Note: sb.decoders.ctc_greedy_decode will also remove padded tokens
+            # that is, it return a list of list with different lengths
+            sequence = sb.decoders.ctc_greedy_decode(
+                p_ctc, wav_lens, blank_id=self.hparams.blank_index
+            )
+            self.ctc_metrics.append(ids, p_ctc, targets, wav_lens, target_lens)
+
+            self.per_metrics.append(
+                ids=ids,
+                predict=sequence,
+                target=targets,
+                predict_len=None,
+                target_len=target_lens,
+                ind2lab=self.label_encoder.decode_ndim,
+            )
+            self.mpd_metrics.append(
+                ids=ids,
+                predict=sequence,
+                canonical=canonicals,
+                perceived=perceiveds,
+                predict_len=None,
+                canonical_len=canonical_lens,
+                perceived_len=perceived_lens,
+                ind2lab=self.label_encoder.decode_ndim,
+            )
+
+        return loss
+class ASR_with_misproBCE_proj(ASR):
+    def __init__(self, *args, patience=30, **kwargs):
+        super().__init__(*args, patience=patience, **kwargs)
+        # Add mispro_head module here if not already present
+        # encoded_dim should match the encoder output dimension
+        # This assumes self.modules.enc exists and has output dim
+        # If not available at init, you may need to set it later in model setup
+        if self.modules.mispro_head is not None:
+            self.modules.mispro_head.to(self.device)
+                
+
+    def compute_forward(self, batch, stage):
+        "Given an input batch it computes the phoneme probabilities."
+        batch = batch.to(self.device)
+        wavs, wav_lens = batch.sig
+        # phns_bos, _ = batch.phn_encoded_bos
+
+        if stage == sb.Stage.TRAIN:
+            if hasattr(self.hparams, "augmentation"):
+                wavs = self.hparams.augmentation(wavs)
+
+        # some wav2vec models (e.g. large-lv60) needs attention_mask
+        if self.modules.perceived_ssl.feature_extractor.return_attention_mask:
+            attn_mask = make_attn_mask(wavs, wav_lens)
+        else:
+            attn_mask = None
+
+        feats = self.modules.perceived_ssl(wavs)
+        encoder_out = self.modules.enc(feats)
+
+        # output layer for ctc log-probabilities
+        logits = self.modules.ctc_lin(encoder_out)
+        p_ctc = self.hparams.log_softmax(logits) # (B, T, C)
+        
+        
+        # Compute token-aligned mispronunciation logits
+        # We gather encoded frames aligned to targets via CTC alignment or attention.
+        # For now, we use a placeholder function `gather_ctc_aligned_reps`, to be implemented.
+        token_reps = gather_ctc_aligned_reps(
+            encoder_out, batch.phn_encoded_perceived[0], batch.phn_encoded_perceived[1]
+        )  # [B, L, D]
+        # import pdb; pdb.set_trace()  # Debugging line, remove in production
+        mispro_logits = self.modules.mispro_head(token_reps).squeeze(-1)  # [B, L]
+
+        return p_ctc, wav_lens, mispro_logits
+        
+        # return p_ctc, wav_lens
+    def compute_objectives(self, predictions, batch, stage):
+        
+        # Compute token-aligned mispronunciation logits
+        # We gather encoded frames aligned to targets via CTC alignment or attention.
+        # For now, we use a placeholder function `gather_ctc_aligned_reps`, to be implemented.
+        # Unpack predictions
+        p_ctc, wav_lens, mispro_logits = predictions
+        ids = batch.id
+        targets, target_lens = batch.phn_encoded_target
+        canonicals, canonical_lens = batch.phn_encoded_canonical
+        perceiveds, perceived_lens = batch.phn_encoded_perceived
+        # Additional: BCE loss on binary mispronunciation prediction
+        loss_ctc = self.hparams.ctc_cost(p_ctc, targets, wav_lens, target_lens)
+
+        # Compute BCE loss for mispronunciation detection
+        mispro_label, mispro_label_lens = batch.mispro_label  # assumed shape [B, L]
+        # import pdb; pdb.set_trace()  # Debugging line, remove in production
+        loss_bce = torch.nn.functional.binary_cross_entropy_with_logits(mispro_logits, mispro_label.float())
+        loss = loss_ctc + 0.5 * loss_bce
+
+        # Record losses for posterity
+        if stage != sb.Stage.TRAIN:
+            # Note: sb.decoders.ctc_greedy_decode will also remove padded tokens
+            # that is, it return a list of list with different lengths
+            sequence = sb.decoders.ctc_greedy_decode(
+                p_ctc, wav_lens, blank_id=self.hparams.blank_index
+            )
+            self.ctc_metrics.append(ids, p_ctc, targets, wav_lens, target_lens)
+
+            self.per_metrics.append(
+                ids=ids,
+                predict=sequence,
+                target=targets,
+                predict_len=None,
+                target_len=target_lens,
+                ind2lab=self.label_encoder.decode_ndim,
+            )
+            self.mpd_metrics.append(
+                ids=ids,
+                predict=sequence,
+                canonical=canonicals,
+                perceived=perceiveds,
+                predict_len=None,
+                canonical_len=canonical_lens,
+                perceived_len=perceived_lens,
+                ind2lab=self.label_encoder.decode_ndim,
+            )
+
+        return loss
 
 def dataio_prep(hparams):
     """This function prepares the datasets to be used in the brain class.
@@ -638,6 +806,7 @@ def dataio_prep_for_llm(hparams):
         "phn_list_perceived",
         "phn_encoded_list_perceived",
         "phn_encoded_perceived",
+        "mispro_label",
     )
     def text_pipeline_test(target, canonical, perceived):
         phn_list_target = target.strip().split()
@@ -659,10 +828,60 @@ def dataio_prep_for_llm(hparams):
         yield phn_encoded_list_perceived
         phn_encoded_perceived = torch.LongTensor(phn_encoded_list_perceived)
         yield phn_encoded_perceived
+        
+        mispro_label = [1 if p != c else 0 for p, c in zip(phn_list_perceived, phn_list_canonical)]
+        mispro_label = torch.LongTensor(mispro_label)
+        # def align_mispro_to_target(canonical_aligned, perceived_aligned, perceived_target, sil_label="sil"):
+        #     # 保证都是 list，如果是 str 则 split
+        #     can = canonical_aligned if isinstance(canonical_aligned, list) else canonical_aligned.strip().split()
+        #     per = perceived_aligned if isinstance(perceived_aligned, list) else perceived_aligned.strip().split()
+        #     tgt = perceived_target if isinstance(perceived_target, list) else perceived_target.strip().split()
+
+        #     assert len(can) == len(per), "canonical and perceived must be aligned"
+
+        #     # Step 1: 生成误读标签
+        #     mispro_labels = [1 if p != c else 0 for p, c in zip(per, can)]
+
+        #     # Step 2: scan perceived_aligned and align to perceived_target
+        #     mapped_labels = []
+        #     i = 0  # pointer in perceived_aligned
+        #     j = 0  # pointer in perceived_target
+
+        #     while i < len(per) and j < len(tgt):
+        #         current_target_phoneme = tgt[j]
+
+        #         group_labels = []
+        #         # Match all repeated phonemes (e.g., "sil sil sil")
+        #         while i < len(per) and per[i] == current_target_phoneme:
+        #             group_labels.append(mispro_labels[i])
+        #             i += 1
+
+        #         # Special handling for silence expansion
+        #         if current_target_phoneme == sil_label:
+        #             while i < len(per) and per[i] == sil_label:
+        #                 group_labels.append(mispro_labels[i])
+        #                 i += 1
+
+        #         # fallback if not matched
+        #         if not group_labels and i < len(per):
+        #             group_labels.append(mispro_labels[i])
+        #             i += 1
+
+        #         mapped_labels.append(int(any(group_labels)))
+        #         j += 1
+
+        #     assert len(mapped_labels) == len(tgt), f"Mismatch! mapped={len(mapped_labels)} vs target={len(tgt)}"
+        #     return tgt, mapped_labels
+        
+        # _, mispro_label = align_mispro_to_target(phn_list_canonical, phn_list_perceived, phn_list_target)
+        
+        # convert to tensor
+        yield mispro_label
 
     # sb.dataio.dataset.add_dynamic_item([train_data], text_pipeline_train)
     sb.dataio.dataset.add_dynamic_item([train_data], text_pipeline_test)
     sb.dataio.dataset.add_dynamic_item([valid_data, test_data], text_pipeline_test)
+
 
     # 3. Fit encoder:
     # Load or compute the label encoder
@@ -689,7 +908,8 @@ def dataio_prep_for_llm(hparams):
         "phn_list_target",
         "phn_list_canonical",
         "phn_list_perceived",
-        "wrd"  # word list, not used in training
+        "wrd",  # word list, not used in training
+        "mispro_label"  # mispronunciation label
         ]
     )
     sb.dataio.dataset.set_output_keys(
@@ -702,247 +922,12 @@ def dataio_prep_for_llm(hparams):
         "phn_list_target",
         "phn_list_canonical",
         "phn_list_perceived",
-        "wrd"  # word list, not used in training
+        "wrd",  # word list, not used in training
+        "mispro_label"  # mispronunciation label
         ]
     )
     
     return train_data, valid_data, test_data, label_encoder
-
-# def dataio_prep_for_timit(hparams):
-#     """This function prepares the datasets to be used in the brain class.
-#     It also defines the data processing pipeline through user-defined functions."""
-    
-#     # split train_dev_data into train and valid
-#     local_data_folder = hparams["timit_local_data_folder"]
-#     label_encoder = sb.dataio.encoder.CTCTextEncoder()
-
-#     # 0. Load TIMIT dataset
-#     from datasets import load_dataset
-#     train_dev_data = load_dataset("timit_asr",data_dir=local_data_folder,split="train")
-#     train_dev_data = train_dev_data.train_test_split(test_size=0.1, seed=42)
-#     train_data = train_dev_data["train"]
-#     valid_data = train_dev_data["test"]
-#     # Keep audio column so we can use the waveform
-#     # Do NOT remove "audio" column since we need raw audio
-    
-#     test_data = load_dataset(
-#         "timit_asr",
-#         data_dir=local_data_folder,
-#         split="test") 
-
-#     # remove id column 
-#     train_data = train_data.remove_columns(["id"])
-#     valid_data = valid_data.remove_columns(["id"])
-#     test_data = test_data.remove_columns(["id"])
-
-#     # convert Dataset into speechbrain Dataset
-#     train_data_sb = sb.dataio.dataset.DynamicItemDataset.from_arrow_dataset(train_data)
-#     valid_data_sb = sb.dataio.dataset.DynamicItemDataset.from_arrow_dataset(valid_data)
-#     test_data_sb = sb.dataio.dataset.DynamicItemDataset.from_arrow_dataset(test_data)
-
-#     timit2cmu = {
-#         # Vowels & diphthongs
-#         "aa": "aa", "ae": "ae", "ah": "ah",
-#         "ao": "aa", "aw": "aw", "ay": "ay",
-#         "eh": "eh", "er": "er", "ey": "ey",
-#         "ih": "ih", "iy": "iy", "ow": "ow",
-#         "oy": "oy", "uh": "uh", "uw": "uw",
-#         "axr": "er",
-#         "ix": "ih",
-#         "ux": "uw",
-#         "em": "m",
-#         "en": "n",
-#         "eng": "ng",
-#         "nx": "n",
-#         "hv": "hh",
-#         "ax": "ah",
-#         "ix": "iy",
-#         "ax-h": "ah",
-        
-    
-#         # Consonants
-#         "b": "b", "bcl": "b",
-#         "ch": "ch",
-#         "d": "d", "dcl": "d",
-#         "dh": "dh", "dx": "d",
-#         "f": "f",
-#         "g": "g", "gcl": "g",
-#         "hh": "hh", "hv": "hh",
-#         "jh": "jh",
-#         "k": "k", "kcl": "k",
-#         "l": "l", "el": "l",
-#         "m": "m", "em": "m",
-#         "n": "n", "en": "n", "nx": "n",
-#         "ng": "ng",
-#         "p": "p", "pcl": "p",
-#         "r": "r",
-#         "s": "s",
-#         "sh": "sh",
-#         "t": "t", "tcl": "t",
-#         "th": "th",
-#         "v": "v",
-#         "w": "w",
-#         "y": "y",
-#         "z": "z",
-#         "zh": "zh",
-
-#         # Silences/closures / fillers
-#         "pau": "sil", "h#": "sil", "epi": "sil",
-#         "cl": "sil", "q": "sil"
-        
-#     }
-#     # convert phoneme labels to 40 phonemes
-#     # (Pdb) test_data
-#     # Dataset({
-#     # features: ['file', 'audio', 'text', 'phonetic_detail', 'word_detail', 'dialect_region', 'sentence_type', 'speaker_id', 'id'],
-#     # num_rows: 1600
-#     # })
-#     # (Pdb) dataset_test["phonetic_detail"][0]
-#     # {'start': [0, 9640, 11240, 12783, 14078, 16157, 16880, 17103, 17587, 18760, 19720, 19962, 21514, 22680, 23800, 24104, 26280, 28591, 29179, 30337, 31880, 32500, 33170, 33829, 35150, 37370, 38568, 40546, 42357, 45119, 45624, 46855, 48680, 49240, 51033, 52378, 54500, 55461, 57395, 59179, 60600], 'stop': [9640, 11240, 12783, 14078, 16157, 16880, 17103, 17587, 18760, 19720, 19962, 21514, 22680, 23800, 24104, 26280, 28591, 29179, 30337, 31880, 32500, 33170, 33829, 35150, 37370, 38568, 40546, 42357, 45119, 45624, 46855, 48680, 49240, 51033, 52378, 54500, 55461, 57395, 59179, 60600, 63440], 'utterance': ['h#', 'sh', 'iy', 'hv', 'ae', 'dcl', 'd', 'y', 'er', 'dcl', 'd', 'aa', 'r', 'kcl', 'k', 's', 'uw', 'dx', 'ih', 'ng', 'gcl', 'g', 'r', 'iy', 's', 'iy', 'w', 'aa', 'sh', 'epi', 'w', 'aa', 'dx', 'er', 'q', 'ao', 'l', 'y', 'iy', 'axr', 'h#']}
-#     # (Pdb)  dataset_test["word_detail"][0]
-#     # {'start': [9640, 12783, 17103, 18760, 24104, 29179, 31880, 38568, 45624, 52378, 55461], 'stop': [12783, 17103, 18760, 24104, 29179, 31880, 38568, 45119, 51033, 55461, 60600], 'utterance': ['she', 'had', 'your', 'dark', 'suit', 'in', 'greasy', 'wash', 'water', 'all', 'year']}
-#     # (Pdb)  dataset_test[0]
-#     # {'file': '/common/db/TIMIT/timit/test/dr1/faks0/sa1.wav', 'audio': {'path': '/common/db/TIMIT/timit/test/dr1/faks0/sa1.wav', 'array': array([9.15527344e-05, 1.52587891e-04, 6.10351562e-05, ...,   2.44140625e-04, 3.05175781e-04, 2.13623047e-04]), 'sampling_rate': 16000}, 'text': 'She had your dark suit in greasy wash water all year.', 'phonetic_detail': {'start': [0, 9640, 11240, 12783, 14078, 16157, 16880, 17103, 17587, 18760, 19720, 19962, 21514, 22680, 23800, 24104, 26280, 28591, 29179, 30337, 31880, 32500, 33170, 33829, 35150, 37370, 38568, 40546, 42357, 45119, 45624, 46855, 48680, 49240, 51033, 52378, 54500, 55461, 57395, 59179, 60600], 'stop': [9640, 11240, 12783, 14078, 16157, 16880, 17103, 17587, 18760, 19720, 19962, 21514, 22680, 23800, 24104, 26280, 28591, 29179, 30337, 31880, 32500, 33170, 33829, 35150, 37370, 38568, 40546, 42357, 45119, 45624, 46855, 48680, 49240, 51033, 52378, 54500, 55461, 57395, 59179, 60600, 63440], 'utterance': ['h#', 'sh', 'iy', 'hv', 'ae', 'dcl', 'd', 'y', 'er', 'dcl', 'd', 'aa', 'r', 'kcl', 'k', 's', 'uw', 'dx', 'ih', 'ng', 'gcl', 'g', 'r', 'iy', 's', 'iy', 'w', 'aa', 'sh', 'epi', 'w', 'aa', 'dx', 'er', 'q', 'ao', 'l', 'y', 'iy', 'axr', 'h#']}, 'word_detail': {'start': [9640, 12783, 17103, 18760, 24104, 29179, 31880, 38568, 45624, 52378, 55461], 'stop': [12783, 17103, 18760, 24104, 29179, 31880, 38568, 45119, 51033, 55461, 60600], 'utterance': ['she', 'had', 'your', 'dark', 'suit', 'in', 'greasy', 'wash', 'water', 'all', 'year']}, 'dialect_region': 'dr1', 'sentence_type': 'sa', 'speaker_id': 'aks0', 'id': 'sa1'}
-    
-#     # 1. Define text pipeline:
-#     @sb.utils.data_pipeline.takes("text", "phonetic_detail", "word_detail", "audio")
-#     @sb.utils.data_pipeline.provides(
-#         "phn_list_target",
-#         "phn_encoded_target",
-#         "phn_encoded_target_lens",
-#         "phn_list_canonical",
-#         "phn_encoded_canonical",
-#         "phn_encoded_canonical_lens",
-#         "phn_list_perceived",
-#         "phn_encoded_perceived",
-#         "phn_encoded_perceived_lens",
-#         "wrd",
-#         "sig"
-#     )
-#     def text_pipeline(text: str, phonetic_detail: dict, word_detail: dict, audio: dict):
-#         # Convert perceived phonemes to 40 phonemes
-#         # Use word sequence to get the canonical phonemes
-#         # phonetic_detail is a dict key,
-        
-#         ## Perceived phonemes
-#         phonemes = phonetic_detail["utterance"]
-#                 # convert to 40 phonemes using timit2cmu mapping
-#         # clean the phonemes
-#         phn_list_perceived = [simplify_phoneme(p) for p in phonemes]
-#         phn_list_perceived = [timit2cmu.get(p, p) for p in phn_list_perceived]
-
-#         # 
-
-#         ## Canonical phonemes and Wrd
-#         # apply word detail to get the canonical phonemes and wrd
-#         word_phonemes = word_detail["utterance"] # list of words
-#         # get the canonical phonemes for each word
-#         canonical_phonemes = [sentence_to_phoneme(word) for word in word_phonemes]
-#         # flatten the list
-#         canonical_phonemes = [p for sublist in canonical_phonemes for p in sublist]
-#         # simplify the phonemes
-#         canonical_phonemes = [simplify_phoneme(p) for p in canonical_phonemes]
-#         canonical_phonemes = [timit2cmu.get(p, p) for p in canonical_phonemes]
-#         phn_list_canonical = canonical_phonemes
-
-#         ## Wrd
-#         wrd = word_detail["utterance"]
-
-#         ## Target  == Perceived
-#         phn_list_target = phn_list_perceived
-        
-#         # Encode the phonemes
-#         phn_encoded_target = label_encoder.encode_sequence(phn_list_target)
-#         phn_encoded_canonical = label_encoder.encode_sequence(canonical_phonemes)
-#         phn_encoded_perceived = label_encoder.encode_sequence(phn_list_perceived)
-
-#         # Yield the results
-#         yield phn_list_target
-#         yield phn_encoded_target
-#         yield phn_list_canonical
-#         yield phn_encoded_canonical
-#         yield phn_list_perceived
-#         yield phn_encoded_perceived
-#         yield wrd
-#         # Audio waveform to sig
-#         waveform = torch.tensor(audio["array"]).float()
-#         sr = audio["sampling_rate"]
-#         if sr != hparams["sample_rate"]:
-#             resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=hparams["sample_rate"])
-#             waveform = resampler(waveform)
-#         if waveform.ndim > 1:
-#             waveform = waveform.mean(dim=0)  # Convert to mono
-#         yield waveform
-
-#     sb.dataio.dataset.add_dynamic_item([train_data_sb, valid_data_sb, test_data_sb], text_pipeline)
-
-#     # 3. Fit encoder:
-#     # Load or compute the label encoder
-#     # get hparams. label_encoder_file, if not set create one
-#     if "label_encoder_file" in hparams:
-#         lab_enc_file = hparams["label_encoder_file"]
-#         special_labels = {
-#             "blank_label": hparams["blank_index"],
-#         }
-        
-#         label_encoder.load_or_create(
-#             path=lab_enc_file,
-#             from_didatasets=[train_data_sb, valid_data_sb, test_data_sb],
-#             output_key="phn_list_target",
-#             special_labels=special_labels,
-#             sequence_input=True,
-#         )
-#     else:
-#         lab_enc_file = os.path.join(hparams["save_folder"], "label_encoder.txt")
-
-#         special_labels = {
-#             "blank_label": hparams["blank_index"],
-#         }
-        
-#         label_encoder.load_or_create(
-#             path=lab_enc_file,
-#             from_didatasets=[train_data_sb, valid_data_sb, test_data_sb],
-#             output_key="phn_list_target",
-#             special_labels=special_labels,
-#             sequence_input=True,
-#         )
-#     # 4. Set output: # use raw phoneme encoding
-#     sb.dataio.dataset.set_output_keys(
-#         [train_data_sb],
-#         [
-#             "id",
-#             "phn_encoded_target",
-#             "phn_encoded_target_lens",
-#             "phn_encoded_canonical",
-#             "phn_encoded_canonical_lens",
-#             "phn_encoded_perceived",
-#             "phn_encoded_perceived_lens",
-#             "phn_list_target",
-#             "phn_list_canonical",
-#             "phn_list_perceived",
-#             "wrd",
-#             "sig"
-#         ]
-#     )
-#     sb.dataio.dataset.set_output_keys(
-#         [valid_data_sb, test_data_sb],
-#         [
-#             "id",
-#             "phn_encoded_target",
-#             "phn_encoded_target_lens",
-#             "phn_encoded_canonical",
-#             "phn_encoded_canonical_lens",
-#             "phn_encoded_perceived",
-#             "phn_encoded_perceived_lens",
-#             "phn_list_target",
-#             "phn_list_canonical",
-#             "phn_list_perceived",
-#             "wrd",
-#             "sig"
-#         ]
-#     )
-
-#     return train_data_sb, valid_data_sb, test_data_sb, label_encoder
 
 if __name__ == "__main__":
     # CLI:
@@ -966,7 +951,13 @@ if __name__ == "__main__":
     train_data, valid_data, test_data, label_encoder = dataio_prep_for_llm(hparams)
     # test_unit = test_data[0]
     # Trainer initialization
-    asr_brain = ASR(
+    # asr_brain = ASR(
+    #     modules=hparams["modules"],
+    #     hparams=hparams,
+    #     run_opts=run_opts,
+    #     checkpointer=hparams["checkpointer"],
+    # )
+    asr_brain = ASR_with_misproBCE_proj(
         modules=hparams["modules"],
         hparams=hparams,
         run_opts=run_opts,
@@ -980,8 +971,14 @@ if __name__ == "__main__":
     perceived_ssl_model = hparams.get("perceived_ssl_model", "Null")
     canonical_ssl_model = hparams.get("canonical_ssl_model", "Null")    
     feature_fusion = hparams.get("feature_fusion", "Null")
-    run_id = time.strftime("%Y%m%d-%H%M%S") + "_"
+    
+    run_id = time.strftime("%Y%m%d-%H%M%S") 
     run_name = f"{perceived_ssl_model}_{canonical_ssl_model}_{feature_fusion}"
+    # if overrides.is given append its values to run_name
+    if isinstance(overrides, dict):
+        overrides = [f"{k}={v}" for k, v in overrides.items()]
+        run_name += "_" + "_".join(overrides)
+    
     run_id = f"{run_name}_{run_id}"
     # wandb init group by hparams perceived_ssl_model, canonical_ssl_model, feature_fusion
     
@@ -992,7 +989,7 @@ if __name__ == "__main__":
         resume="allow"
     )
     
-    # Training/validation loop
+    # # Training/validation loop
     try:
         asr_brain.fit(
             asr_brain.hparams.epoch_counter,
@@ -1007,5 +1004,8 @@ if __name__ == "__main__":
     asr_brain.evaluate(
         test_data,
         test_loader_kwargs=hparams["test_dataloader_opts"],
-        min_key="PER",
+        # min_key="PER",
+        max_key="mpd_f1",  # use max_key for mpd_f1
     )
+
+# === Add placeholder gather_ctc_aligned_reps at top of file ===

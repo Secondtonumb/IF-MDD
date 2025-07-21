@@ -1,5 +1,5 @@
 # Hyperparameters toggles
-# prefix: ""
+prefix: ""
 
 ## SSL features Selection
 pretrained_models_path: pretrained_models/
@@ -24,7 +24,7 @@ pretrained_models_path: pretrained_models/
 
 
 # select pretrained SSL models
-perceived_ssl_model: "hubert_multilingual" # in pretrained_models
+perceived_ssl_model: "wavlm_base" # in pretrained_models
 canonical_ssl_model: Null
 
 # # models hidden size, varies by model
@@ -45,13 +45,13 @@ test_annotation: !ref <data_folder_save>/test_erj_spk_open_test_1.1.json
 # generate_training_id: !apply:trainer.generate_training_id.generate_training_id [!ref <perceived_ssl_model_id>, !ref <canonical_ssl_model_id>, !ref <feature_fusion>, !ref <prefix>]
 
 # output files
-output_folder: !ref exp/<perceived_ssl_model>_<canonical_ssl_model>_<feature_fusion>
-wer_file: !ref <output_folder>/wer.txt
+output_folder: !ref exp/<perceived_ssl_model>_<canonical_ssl_model>_<feature_fusion>_<prefix>
+per_file: !ref <output_folder>/per.txt
 mpd_file: !ref <output_folder>/mpd.txt
 save_folder: !ref <output_folder>/save
 train_log: !ref <output_folder>/train_log.txt
 
-on_training_test_wer_folder: !ref <output_folder>/on_training_test_wer
+on_training_test_per_folder: !ref <output_folder>/on_training_test_per
 on_training_test_mpd_folder: !ref <output_folder>/on_training_test_mpd
 
 # Modules (SpeechBrain lobes)
@@ -60,6 +60,7 @@ modules:
   perceived_ssl: !ref <perceived_ssl>
   enc: !ref <enc>
   ctc_lin: !ref <ctc_lin>
+  mispro_head: !ref <mispro_head>
 
 perceived_ssl: !apply:trainer.AutoSSLoader.AutoSSLLoader
     model_name: !ref <perceived_ssl_model>
@@ -84,6 +85,10 @@ ctc_lin:  !new:speechbrain.nnet.linear.Linear
     input_size: !ref <dnn_neurons>
     n_neurons: !ref <output_neurons>  # 40 phonemes + 1 blank + 1 err
 
+mispro_head: !new:speechbrain.nnet.linear.Linear
+    input_size: !ref <dnn_neurons>
+    n_neurons: 1  # Binary classification for mispronunciation detection
+
 # Model parameters
 activation: !name:torch.nn.LeakyReLU
 dnn_layers: 2
@@ -99,13 +104,15 @@ log_softmax: !new:speechbrain.nnet.activations.Softmax
 ctc_cost: !name:speechbrain.nnet.losses.ctc_loss
     blank_index: !ref <blank_index>
 
+ctc_cost_mispro: !name:speechbrain.nnet.losses.ctc_loss
+    blank_index: !ref <blank_index>
+
 # Outputs
 output_neurons: 42 # l2arctic: 40phns(sil)+err+blank=42
 blank_index: 0
 
-
 model: !new:torch.nn.ModuleList
-    - [!ref <enc>, !ref <ctc_lin>]
+    - [!ref <enc>, !ref <ctc_lin>, !ref <mispro_head>]
 
 adam_opt_class: !name:torch.optim.Adam
     lr: !ref <lr>
@@ -139,11 +146,10 @@ ctc_stats: !name:speechbrain.utils.metric_stats.MetricStats
 
 per_stats: !name:speechbrain.utils.metric_stats.ErrorRateStats
 
-
 # # TIMIT
 # timit_local_data_folder: "/common/db/TIMIT"  # Path to TIMIT datase
 
-seed: 1234
+seed: 3047
 __set_seed: !apply:torch.manual_seed [!ref <seed>]
 
 # training parameters

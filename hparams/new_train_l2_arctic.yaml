@@ -1,5 +1,5 @@
 # Hyperparameters toggles
-# prefix: ""
+prefix: ""
 
 ## SSL features Selection
 pretrained_models_path: pretrained_models/
@@ -45,8 +45,8 @@ test_annotation: !ref <data_folder_save>/test.json
 # generate_training_id: !apply:trainer.generate_training_id.generate_training_id [!ref <perceived_ssl_model_id>, !ref <canonical_ssl_model_id>, !ref <feature_fusion>, !ref <prefix>]
 
 # output files
-output_folder: !ref exp_l2arctic/<perceived_ssl_model>_<canonical_ssl_model>_<feature_fusion>
-wer_file: !ref <output_folder>/wer.txt
+output_folder: !ref exp_l2arctic/<perceived_ssl_model>_<canonical_ssl_model>_<feature_fusion>_<prefix>
+per_file: !ref <output_folder>/per.txt
 mpd_file: !ref <output_folder>/mpd.txt
 save_folder: !ref <output_folder>/save
 train_log: !ref <output_folder>/train_log.txt
@@ -56,10 +56,11 @@ on_training_test_mpd_folder: !ref <output_folder>/on_training_test_mpd
 
 # Modules (SpeechBrain lobes)
 modules:
-  canonical_ssl: !ref <canonical_ssl>
-  perceived_ssl: !ref <perceived_ssl>
-  enc: !ref <enc>
-  ctc_lin: !ref <ctc_lin>
+    canonical_ssl: !ref <canonical_ssl>
+    perceived_ssl: !ref <perceived_ssl>
+    enc: !ref <enc>
+    ctc_lin: !ref <ctc_lin>
+    mispro_head: !ref <mispro_head>
 
 perceived_ssl: !apply:trainer.AutoSSLoader.AutoSSLLoader
     model_name: !ref <perceived_ssl_model>
@@ -84,6 +85,10 @@ ctc_lin:  !new:speechbrain.nnet.linear.Linear
     input_size: !ref <dnn_neurons>
     n_neurons: !ref <output_neurons>  # 40 phonemes + 1 blank + 1 err
 
+mispro_head: !new:speechbrain.nnet.linear.Linear
+    input_size: !ref <dnn_neurons>
+    n_neurons: 1  # Binary classification for mispronunciation detection
+
 # Model parameters
 activation: !name:torch.nn.LeakyReLU
 dnn_layers: 2
@@ -99,10 +104,12 @@ log_softmax: !new:speechbrain.nnet.activations.Softmax
 ctc_cost: !name:speechbrain.nnet.losses.ctc_loss
     blank_index: !ref <blank_index>
 
+ctc_cost_mispro: !name:speechbrain.nnet.losses.ctc_loss
+    blank_index: !ref <blank_index>
+
 # Outputs
 output_neurons: 3407 # l2arctic: 40phns(sil)+err+blank=42
 blank_index: 0
-
 
 model: !new:torch.nn.ModuleList
     - [!ref <enc>, !ref <ctc_lin>]
@@ -143,7 +150,7 @@ per_stats: !name:speechbrain.utils.metric_stats.ErrorRateStats
 # # TIMIT
 # timit_local_data_folder: "/common/db/TIMIT"  # Path to TIMIT datase
 
-seed: 1234
+seed: 3047
 __set_seed: !apply:torch.manual_seed [!ref <seed>]
 
 # training parameters
@@ -164,12 +171,12 @@ eval_precision: fp16    # 推理同样切换到 FP16
 # Dataloader options
 train_dataloader_opts:
     batch_size: !ref <batch_size>
-    num_workers: !ref <batch_size>
+    num_workers: 0
 
 valid_dataloader_opts:
     batch_size: !ref <batch_size>
-    num_workers: !ref <batch_size>
+    num_workers: 0
 
 test_dataloader_opts:
     batch_size: 1
-    num_workers: 1
+    num_workers: 0

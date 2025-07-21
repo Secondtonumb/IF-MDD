@@ -17,3 +17,8 @@ speechbrain/
 
 exp/
 exp*/
+
+hparams/
+
+__pycache__/
+*.o[0-9]*
