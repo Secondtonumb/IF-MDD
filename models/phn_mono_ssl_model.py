@@ -270,7 +270,7 @@ class PhnMonoSSLModel(sb.Brain):
         -------
         detached loss
         """
-        # import pdb; pdb.set_trace()
+
         if self.hparams.auto_mix_prec:
             self.pretrained_opt_class.zero_grad()
             self.adam_optimizer.zero_grad()
