@@ -580,7 +580,6 @@ class PhnMonoSSLModel_withcanoPhnEmb_Hybrid_CTC_Attention(PhnMonoSSLModel):
                     plt.close()
                     print(f"Saved attention map to {attn_file}")
                 
-                        
             self.ctc_metrics.append(ids, p_out, targets, wav_lens, target_lens)
 
             self.per_metrics.append(
@@ -747,205 +746,6 @@ class PhnMonoSSLModel_withcanoPhnEmb_Hybrid_CTC_Attention(PhnMonoSSLModel):
             )
 
         return loss
-    
-import torch.nn.functional as F
-
-def _extend_with_blanks_ctc(target, blank_id):
-    """Insert blanks between labels for a single target: y -> [b, y1, b, y2, ..., yL, b]."""
-    L = target.size(0)
-    ext = target.new_full((2 * L + 1,), blank_id)
-    ext[1::2] = target
-    return ext
-
-@torch.no_grad()
-def _ctc_posteriors_one(log_probs, target, T, L, blank_id):
-    """Compute CTC state posteriors for one sample.
-    log_probs: [T, C] (log-softmax)
-    target:   [L]
-    Returns gamma_tok: [T, L] (row-normalized over L)
-    """
-    target = target[:L]
-    y_ext = _extend_with_blanks_ctc(target, blank_id)  # [U]
-    U = y_ext.size(0)
-    device = log_probs.device
-
-    # Use tensor for negative infinity for consistency in stacking
-    neg_inf_t = log_probs.new_tensor(-1e9)
-    log_alpha = log_probs.new_full((T, U), neg_inf_t)
-    log_beta  = log_probs.new_full((T, U), neg_inf_t)
-
-    # init alpha
-    log_alpha[0, 0] = log_probs[0, blank_id]
-    if U > 1:
-        log_alpha[0, 1] = log_probs[0, y_ext[1]]
-
-    # forward
-    for t in range(1, T):
-        lp_t = log_probs[t]
-        for u in range(U):
-            stay = log_alpha[t-1, u]
-            prev = log_alpha[t-1, u-1] if u-1 >= 0 else neg_inf_t
-            prev2 = log_alpha[t-1, u-2] if (u-2 >= 0 and y_ext[u] != y_ext[u-2]) else neg_inf_t
-            log_alpha[t, u] = torch.logsumexp(torch.stack([stay, prev, prev2]), dim=0) + lp_t[y_ext[u]]
-
-    # init beta
-    log_beta[T-1, U-1] = log_probs[T-1, blank_id]
-    if U > 1:
-        log_beta[T-1, U-2] = log_probs[T-1, y_ext[U-2]]
-
-    # backward
-    for t in range(T-2, -1, -1):
-        lp_tp1 = log_probs[t+1]
-        for u in range(U-1, -1, -1):
-            stay = log_beta[t+1, u] + lp_tp1[y_ext[u]]
-            nxt  = log_beta[t+1, u+1] + lp_tp1[y_ext[u+1]] if u+1 < U else neg_inf_t
-            nxt2 = log_beta[t+1, u+2] + lp_tp1[y_ext[u+2]] if (u+2 < U and y_ext[u] != y_ext[u+2]) else neg_inf_t
-            log_beta[t, u] = torch.logsumexp(torch.stack([stay, nxt, nxt2]), dim=0)
-
-    log_Z = torch.logsumexp(log_alpha[T-1, -2:], dim=0)
-    log_gamma_ext = log_alpha[:T] + log_beta[:T] - log_Z  # [T, U]
-    gamma_ext = log_gamma_ext.exp()
-
-    # pick only non-blank (odd) positions => token dimension L
-    idx = torch.arange(1, U, 2, device=device)
-    gamma_tok = gamma_ext[:, idx]  # [T, L]
-    gamma_tok = gamma_tok / (gamma_tok.sum(dim=-1, keepdim=True) + 1e-8)
-    return gamma_tok
-
-@torch.no_grad()
-def ctc_posteriors_batch(log_probs, targets, in_lens, tgt_lens, blank_id):
-    """Fast batched CTC posteriors (gamma) computation on GPU.
-    Args:
-        log_probs: [B, T, C]  (log-softmax over classes)
-        targets:   [B, L_max] (int ids, padded)
-        in_lens:   [B]  (float ratio or int frames)
-        tgt_lens:  [B]  (int or ratio)
-        blank_id:  int
-    Returns:
-        gamma: [B, T, L_max]  (row-normalized over L, zeros on padding)
-    """
-    B, T_max, C = log_probs.size()
-    L_max = targets.size(1)
-
-    # ---- derive true lengths ----
-    if in_lens.dtype.is_floating_point:
-        T_real = torch.clamp((in_lens * T_max).round().long(), min=1, max=T_max)
-    else:
-        T_real = torch.clamp(in_lens.long(), min=1, max=T_max)
-
-    if tgt_lens.dtype.is_floating_point:
-        L_real = torch.clamp((tgt_lens * L_max).round().long(), min=1, max=L_max)
-    else:
-        L_real = torch.clamp(tgt_lens.long(), min=1, max=L_max)
-
-    # ---- build extended targets with blanks (batch) ----
-    # U_b = 2*L_b + 1, pad to U_max
-    U_max = int((L_real.max() * 2 + 1).item())
-    device = log_probs.device
-    neg_inf = -1e9
-
-    # y_ext_padded: [B, U_max]
-    y_ext_padded = torch.full((B, U_max), blank_id, dtype=targets.dtype, device=device)
-    u_mask = torch.zeros((B, U_max), dtype=torch.bool, device=device)
-    for b in range(B):
-        Lb = L_real[b].item()
-        Ub = 2 * Lb + 1
-        y_ext = torch.full((Ub,), blank_id, dtype=targets.dtype, device=device)
-        y_ext[1::2] = targets[b, :Lb]
-        y_ext_padded[b, :Ub] = y_ext
-        u_mask[b, :Ub] = True
-
-    # Gather log_probs for each (t,u)
-    # lp_tu[b,t,u] = log_probs[b,t, y_ext_padded[b,u]]
-    gather_idx = y_ext_padded.unsqueeze(1).expand(B, T_max, U_max)
-    lp_tu = torch.gather(log_probs, dim=2, index=gather_idx)  # [B,T,U_max]
-
-    # alpha / beta init
-    neg_inf_t = log_probs.new_tensor(neg_inf)
-    log_alpha = torch.full((B, T_max, U_max), neg_inf_t, device=device)
-    log_beta  = torch.full((B, T_max, U_max), neg_inf_t, device=device)
-
-    # init alpha at t=0
-    log_alpha[:, 0, 0] = log_probs[:, 0, blank_id]
-    has_u1 = u_mask[:, 1]
-    log_alpha[has_u1, 0, 1] = lp_tu[has_u1, 0, 1]
-
-    # Precompute mask for prev2 validity (y_u != y_{u-2})
-    same_label = torch.zeros((B, U_max), dtype=torch.bool, device=device)
-    same_label[:, 2:] = (y_ext_padded[:, 2:] == y_ext_padded[:, :-2])
-
-    # ---- forward pass over time (vectorized over batch & U) ----
-    for t in range(1, T_max):
-        prev = log_alpha[:, t-1, :]
-        stay = prev
-        prev1 = torch.roll(prev, shifts=1, dims=-1)
-        prev1[:, 0] = neg_inf_t
-        prev2 = torch.roll(prev, shifts=2, dims=-1)
-        prev2[:, :2] = neg_inf_t
-        # invalidate prev2 when labels equal
-        prev2 = torch.where(same_label, neg_inf_t, prev2)
-
-        three = torch.stack([stay, prev1, prev2], dim=0)  # [3,B,U]
-        log_alpha[:, t, :] = torch.logsumexp(three, dim=0) + lp_tu[:, t, :]
-        # mask u beyond Ub
-        log_alpha[:, t, :] = torch.where(u_mask, log_alpha[:, t, :], neg_inf_t)
-
-    # ---- backward pass ----
-    # init beta at last valid frame for each sample separately
-    # We'll do it at T_max-1 and rely on masks
-    log_beta[:, T_max-1, :] = neg_inf_t
-    log_beta[:, T_max-1, U_max-1] = log_probs[:, T_max-1, blank_id]
-    has_um2 = u_mask[:, -2]
-    log_beta[has_um2, T_max-1, U_max-2] = lp_tu[has_um2, T_max-1, U_max-2]
-
-    # iterate backwards in time
-    for t in range(T_max-2, -1, -1):
-        nxt = log_beta[:, t+1, :]
-        stay = nxt + lp_tu[:, t+1, :]
-        nxt1 = torch.roll(nxt, shifts=-1, dims=-1) + torch.roll(lp_tu[:, t+1, :], shifts=-1, dims=-1)
-        nxt1[:, -1] = neg_inf_t
-        nxt2 = torch.roll(nxt, shifts=-2, dims=-1) + torch.roll(lp_tu[:, t+1, :], shifts=-2, dims=-1)
-        nxt2[:, -2:] = neg_inf_t
-        nxt2 = torch.where(same_label, neg_inf_t, nxt2)
-
-        three = torch.stack([stay, nxt1, nxt2], dim=0)
-        log_beta[:, t, :] = torch.logsumexp(three, dim=0)
-        log_beta[:, t, :] = torch.where(u_mask, log_beta[:, t, :], neg_inf_t)
-
-    # ---- Z ----
-    # For each sample, last time index is T_real[b]-1, final states (U_b-1 and U_b-2)
-    log_Z = []
-    for b in range(B):
-        Tb = T_real[b].item() - 1
-        Ub = 2 * L_real[b].item() + 1
-        last = log_alpha[b, Tb, max(Ub-2, 0):Ub]
-        log_Z.append(torch.logsumexp(last, dim=0))
-    log_Z = torch.stack(log_Z, dim=0).unsqueeze(1).unsqueeze(1)  # [B,1,1]
-
-    log_gamma_ext = log_alpha + log_beta - log_Z
-    gamma_ext = log_gamma_ext.exp()
-
-    # take only odd indices (tokens) up to L_max
-    token_idx = torch.arange(1, U_max, 2, device=device)  # length <= L_max*2
-    gamma_tok = gamma_ext[:, :, token_idx]  # [B,T,<=L_max]
-    # pad/crop to L_max
-    if gamma_tok.size(-1) < L_max:
-        pad = L_max - gamma_tok.size(-1)
-        gamma_tok = F.pad(gamma_tok, (0, pad), value=0.0)
-    elif gamma_tok.size(-1) > L_max:
-        gamma_tok = gamma_tok[:, :, :L_max]
-
-    # mask rows and renormalize row-wise (per time step)
-    t_mask = (torch.arange(T_max, device=device)[None, :] >= T_real[:, None])  # [B,T]
-    l_mask = (torch.arange(L_max, device=device)[None, :] >= L_real[:, None])  # [B,L]
-
-    gamma_tok = gamma_tok.masked_fill(t_mask.unsqueeze(-1), 0.0)
-    gamma_tok = gamma_tok.masked_fill(l_mask.unsqueeze(1), 0.0)
-    gamma_tok = gamma_tok / (gamma_tok.sum(dim=-1, keepdim=True) + 1e-8)
-
-    return gamma_tok
-
-
 
 class PhnMonoSSLModel_withcanoPhnEmb_Hybrid_CTC_Attention_Ver2(PhnMonoSSLModel_withcanoPhnEmb_Hybrid_CTC_Attention):
     """PhnMonoSSLModel_withcanoPhnEmb_Hybrid_CTC_Attention_Ver2
@@ -993,17 +793,6 @@ class PhnMonoSSLModel_withcanoPhnEmb_Hybrid_CTC_Attention_Ver2(PhnMonoSSLModel_w
             padding=4
         )
         # TransformerDecoder for attention output， want the output time length align with target sequence time length
-
-        self.modules.TransformerDecoder = torch.nn.TransformerDecoder(
-            decoder_layer=torch.nn.TransformerDecoderLayer(
-                d_model=self.hparams.dnn_neurons,
-                nhead=4,
-                dim_feedforward=self.hparams.dnn_neurons * 4,
-                dropout=0.1
-            ),
-            num_layers=1,
-            norm=None
-        )
         
         self.modules.out_sequence = sb.nnet.linear.Linear(
             input_size=self.hparams.output_neurons,
@@ -1018,53 +807,63 @@ class PhnMonoSSLModel_withcanoPhnEmb_Hybrid_CTC_Attention_Ver2(PhnMonoSSLModel_w
             self.modules.attn_proj,
             self.modules.out_sequence,
             self.modules.cnn,
-            self.modules.TransformerDecoder,
         ]).to(self.device)
         
     def compute_forward(self, batch, stage):
         "Given an input batch it computes the phoneme probabilities."
         batch = batch.to(self.device)
         wavs, wav_lens = batch.sig
-        canonicals, canonical_lens = batch.phn_encoded_canonical
+        canonicals, canonical_lens = batch.phn_encoded_canonical # [B, T_c]
+        perceiveds, perceived_lens = batch.phn_encoded_perceived # [B, T_p]
 
         if stage == sb.Stage.TRAIN:
             if hasattr(self.hparams, "augmentation"):
                 wavs = self.hparams.augmentation(wavs)
 
-        feats = self.modules.perceived_ssl(wavs)
-        x = self.modules.enc(feats)
+        feats = self.modules.perceived_ssl(wavs) # [B, T, D]
+        x = self.modules.enc(feats) # [B, T, D]
 
         # output layer for ctc log-probabilities
-        logits = self.modules.ctc_lin(x)
-        p_ctc = self.hparams.log_softmax(logits)
+        logits = self.modules.ctc_lin(x) # [B, T, D]
+        p_ctc = self.hparams.log_softmax(logits) # [B, T, D]
 
         # Get canonical phoneme embeddings
-        canonical_embeds = self.modules.CanonicalPhonemeEmbedding(canonicals)
+        canonical_embeds = self.modules.CanonicalPhonemeEmbedding(canonicals) # [B, T_c, D]
         # Pass through LSTM
-        canonical_lstm_out, _ = self.modules.CanonicalPhonemeLSTM(canonical_embeds)
+        canonical_lstm_out, _ = self.modules.CanonicalPhonemeLSTM(canonical_embeds) # [B, T_c, D]
         # Apply linear transformation
-        canonical_out = self.modules.CanonicalPhonemeLinear(canonical_lstm_out)
+        canonical_out = self.modules.CanonicalPhonemeLinear(canonical_lstm_out) # [B, T_c, D]
 
-        # Prepare key padding mask for canonical_lstm_out
+        # ---- Build key padding mask for canonical sequence (True = pad) ----
+        device = canonical_lstm_out.device
+        # SpeechBrain length tensors are ratios in [0,1]; convert to absolute token lengths
+        max_S = canonical_lstm_out.size(1)
+        canon_token_lens = (canonical_lens.to(device).float() * max_S).round().clamp(max=max_S).long()  # [B]
+        key_padding_mask = torch.arange(max_S, device=device).unsqueeze(0) >= canon_token_lens.unsqueeze(1)  # [B, S], True = pad
 
-        # Use TransformerEncoderLayer as cross-attention
-        # Input x: [B, T, D], src_key_padding_mask: [B, S]
+        # ---- Query padding mask (True = pad) ----
+        device = x.device
+        T = x.size(1)
+        q_tok_lens = (wav_lens.to(device).float() * T).round().clamp(max=T).long()  # [B]
+        query_pad_mask = torch.arange(T, device=device).unsqueeze(0) >= q_tok_lens.unsqueeze(1)  # [B, T]
+
+        # 零掉 query 的 pad 位置
+        x_masked = x.masked_fill(query_pad_mask.unsqueeze(-1), 0.0)
+        # ---- Cross-attention with padding mask ----
         attn_output, attn_map = self.modules.cross_attention(
-            query=x,
+            query=x_masked,
             key=canonical_lstm_out,
             value=canonical_out,
+            attn_mask=None,
+            key_padding_mask=key_padding_mask,
         )  # [B, T, D]
-
         # Concatenate CTC and attention outputs
         concat_hidden = torch.cat((feats, attn_output), dim=-1)
         concat_hidden = self.modules.cnn(concat_hidden.transpose(1, 2)).transpose(1, 2)
-        
         # 
-        
         out_logits = self.modules.out_sequence(concat_hidden)
         
         p_ctc = self.hparams.log_softmax(out_logits)
-        
         # attn_output --> TransformerDecoder, 
         p_attn = self.hparams.log_softmax(self.modules.attn_proj(attn_output))
         
@@ -1081,13 +880,19 @@ class PhnMonoSSLModel_withcanoPhnEmb_Hybrid_CTC_Attention_Ver2(PhnMonoSSLModel_w
         perceiveds, perceived_lens = batch.phn_encoded_perceived 
         # len(perceiveds) == len(canonicals) != len(targets) 
 
-        
         # main CTC loss
         loss_ctc = self.hparams.ctc_cost(p_ctc, targets, wav_lens, target_lens)
+        # attention CTC loss for canonical phoneme
         loss_attn_ctc = self.hparams.ctc_cost(p_attn, targets, wav_lens, target_lens)
-
+        
+        loss_ctc_canonical= self.hparams.ctc_cost(p_ctc, canonicals, wav_lens, canonical_lens)
+        
+        loss_attn_ctc_canonical = self.hparams.ctc_cost(p_attn, canonicals, wav_lens, canonical_lens)
+        
         alpha = 0.5
-        loss = alpha * loss_ctc + (1 - alpha) * loss_attn_ctc
+        # loss = alpha * loss_ctc + (1 - alpha) * loss_attn_ctc
+        loss = alpha * loss_ctc + (1 - alpha) * loss_attn_ctc_canonical
+        # loss = loss_attn_ctc  # use attention CTC loss as main loss
 
         # Record losses for posterity
         if stage != sb.Stage.TRAIN:
@@ -1149,13 +954,13 @@ class PhnMonoSSLModel_withcanoPhnEmb_Hybrid_CTC_Attention_Ver2(PhnMonoSSLModel_w
                 import wandb
                 wandb.log({
                     "loss_ctc_head": loss_ctc.item(),
-                    "loss_attn_align": loss_attn_align.item(),
+                    "loss_ctc_attention": loss_attn_ctc.item(),
+                    "loss_ctc_attention_canonical": loss_attn_ctc_canonical.item(),
                 }, step=self.hparams.epoch_counter.current)
             except Exception:
                 pass
 
         return loss
-
 
 class PhnMonoSSLModel_withcanoPhnEmb_Hybrid_CTC_Attention_Ver3(PhnMonoSSLModel_withcanoPhnEmb_Hybrid_CTC_Attention):
     """PhnMonoSSLModel_withcanoPhnEmb_Hybrid_CTC_Attention_Ver2
@@ -1268,7 +1073,6 @@ class PhnMonoSSLModel_withcanoPhnEmb_Hybrid_CTC_Attention_Ver3(PhnMonoSSLModel_w
         # Concatenate CTC and attention outputs
         concat_hidden = torch.cat((feats, attn_output), dim=-1)
         concat_hidden = self.modules.cnn(concat_hidden.transpose(1, 2)).transpose(1, 2)
-        
         # 
         
         out_logits = self.modules.out_sequence(concat_hidden)
@@ -1335,7 +1139,6 @@ class PhnMonoSSLModel_withcanoPhnEmb_Hybrid_CTC_Attention_Ver3(PhnMonoSSLModel_w
 
         # Record losses for posterity
         if stage != sb.Stage.TRAIN:
-
             # Note: sb.decoders.ctc_greedy_decode will also remove padded tokens
             # that is, it return a list of list with different lengths
             sequence = sb.decoders.ctc_greedy_decode(
