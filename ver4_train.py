@@ -27,8 +27,10 @@ import torchaudio
 from speechbrain.inference.text import GraphemeToPhoneme
 from models.phn_mono_ssl_model import PhnMonoSSLModel, PhnMonoSSLModel_misproBCE
 from models.phn_dual_ssl_model import PhnDualSSLModel, PhnDualSSLModel_with_SimpleResidual
+from models.phn_dual_ssl_model import PhnDualSSLModel_Hybrid_CTC_Attention
 
 wandb.login(key="1e2455bc962bb682012326b2964a299ed63c3690")
+
 sys.path.append("./trainer")
 
 logger = logging.getLogger(__name__)
@@ -392,6 +394,7 @@ if __name__ == "__main__":
         "mono_ssl_model": PhnMonoSSLModel,
         "mono_ssl_model_misproBCE": PhnMonoSSLModel_misproBCE,
         "dual_ssl_model": PhnDualSSLModel,
+        # "dual_ssl_model_with_simple_residual": PhnDualSSLModel_with_SimpleResidual,
     }
     
     if hparams["feature_fusion"] == "mono":
@@ -402,6 +405,8 @@ if __name__ == "__main__":
         asr_brain_class = PhnDualSSLModel
     elif hparams["feature_fusion"] == "dual_ssl_enc_with_simple_residual":
         asr_brain_class = PhnDualSSLModel_with_SimpleResidual
+    elif hparams["feature_fusion"] == "dual_ssl_enc_hybrid_ctc_attention":
+        asr_brain_class = PhnDualSSLModel_Hybrid_CTC_Attention
     logger.info(f"Using ASR brain class: {asr_brain_class.__name__}")
     
     asr_brain = asr_brain_class(
@@ -423,9 +428,11 @@ if __name__ == "__main__":
     # use stem of model_type 
     model_stem = Path(model_type).stem 
     
+
     run_id = time.strftime("%Y%m%d-%H%M%S") 
     run_name = f"{perceived_ssl_model}_{canonical_ssl_model}_{feature_fusion}_{model_stem}"
     # if overrides.is given append its values to run_name
+    import pdb; pdb.set_trace()
     if isinstance(overrides, dict):
         overrides = [f"{k}={v}" for k, v in overrides.items()]
         run_name += "_" + "_".join(overrides)
