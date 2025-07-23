@@ -327,7 +327,6 @@ class PhnMonoSSLModel(sb.Brain):
         self.pretrained_opt_class = self.hparams.pretrained_opt_class(
             self.modules.perceived_ssl.parameters(), 
         )
-
         if self.checkpointer is not None:
             # if self.hparams.perceived_ssl is not None and not self.hparams.perceived_ssl.freeze:
             self.checkpointer.add_recoverable("adam_opt", self.adam_optimizer)
@@ -792,6 +791,11 @@ class PhnMonoSSLModel_withcanoPhnEmb_Hybrid_CTC_Attention_Ver2(PhnMonoSSLModel_w
             kernel_size=9,
             padding=4
         )
+        # Project SSL features to attention dimension for query
+        self.modules.q_proj = torch.nn.Linear(
+            in_features=self.hparams.ENCODER_DIM,
+            out_features=self.hparams.dnn_neurons
+        )
         # TransformerDecoder for attention output， want the output time length align with target sequence time length
         
         self.modules.out_sequence = sb.nnet.linear.Linear(
@@ -807,6 +811,7 @@ class PhnMonoSSLModel_withcanoPhnEmb_Hybrid_CTC_Attention_Ver2(PhnMonoSSLModel_w
             self.modules.attn_proj,
             self.modules.out_sequence,
             self.modules.cnn,
+            self.modules.q_proj,
         ]).to(self.device)
         
     def compute_forward(self, batch, stage):
@@ -820,19 +825,19 @@ class PhnMonoSSLModel_withcanoPhnEmb_Hybrid_CTC_Attention_Ver2(PhnMonoSSLModel_w
             if hasattr(self.hparams, "augmentation"):
                 wavs = self.hparams.augmentation(wavs)
 
-        feats = self.modules.perceived_ssl(wavs) # [B, T, D]
-        x = self.modules.enc(feats) # [B, T, D]
+        feats = self.modules.perceived_ssl(wavs) # [B, T, ENC_DIM]
+        x = self.modules.enc(feats) # [B, T, d_model]
 
         # output layer for ctc log-probabilities
         logits = self.modules.ctc_lin(x) # [B, T, D]
         p_ctc = self.hparams.log_softmax(logits) # [B, T, D]
 
         # Get canonical phoneme embeddings
-        canonical_embeds = self.modules.CanonicalPhonemeEmbedding(canonicals) # [B, T_c, D]
+        canonical_embeds = self.modules.CanonicalPhonemeEmbedding(canonicals) # [B, T_c, d_model]
         # Pass through LSTM
-        canonical_lstm_out, _ = self.modules.CanonicalPhonemeLSTM(canonical_embeds) # [B, T_c, D]
+        canonical_lstm_out, _ = self.modules.CanonicalPhonemeLSTM(canonical_embeds) # [B, T_c, d_model]
         # Apply linear transformation
-        canonical_out = self.modules.CanonicalPhonemeLinear(canonical_lstm_out) # [B, T_c, D]
+        canonical_out = self.modules.CanonicalPhonemeLinear(canonical_lstm_out) # [B, T_c, d_model]
 
         # ---- Build key padding mask for canonical sequence (True = pad) ----
         device = canonical_lstm_out.device
@@ -842,13 +847,20 @@ class PhnMonoSSLModel_withcanoPhnEmb_Hybrid_CTC_Attention_Ver2(PhnMonoSSLModel_w
         key_padding_mask = torch.arange(max_S, device=device).unsqueeze(0) >= canon_token_lens.unsqueeze(1)  # [B, S], True = pad
 
         # ---- Query padding mask (True = pad) ----
-        device = x.device
-        T = x.size(1)
+        device = feats.device
+        T = feats.size(1)
         q_tok_lens = (wav_lens.to(device).float() * T).round().clamp(max=T).long()  # [B]
         query_pad_mask = torch.arange(T, device=device).unsqueeze(0) >= q_tok_lens.unsqueeze(1)  # [B, T]
 
+        # # ---- Build query from SSL feats (pre-CTC encoder) ----
+        # q_raw = feats  # [B, T, ENC_DIM], keep richer temporal structure
+        # q_proj = self.modules.q_proj(q_raw)  # [B, T, d_model]
+
+        # # zero-out padded query positions
+        # q_masked = q_proj.masked_fill(query_pad_mask.unsqueeze(-1), 0.0)
         # 零掉 query 的 pad 位置
         x_masked = x.masked_fill(query_pad_mask.unsqueeze(-1), 0.0)
+
         # ---- Cross-attention with padding mask ----
         attn_output, attn_map = self.modules.cross_attention(
             query=x_masked,
@@ -856,7 +868,7 @@ class PhnMonoSSLModel_withcanoPhnEmb_Hybrid_CTC_Attention_Ver2(PhnMonoSSLModel_w
             value=canonical_out,
             attn_mask=None,
             key_padding_mask=key_padding_mask,
-        )  # [B, T, D]
+        )  # [B, T, d_model]
         # Concatenate CTC and attention outputs
         concat_hidden = torch.cat((feats, attn_output), dim=-1)
         concat_hidden = self.modules.cnn(concat_hidden.transpose(1, 2)).transpose(1, 2)
@@ -926,7 +938,7 @@ class PhnMonoSSLModel_withcanoPhnEmb_Hybrid_CTC_Attention_Ver2(PhnMonoSSLModel_w
                     print(f"Saved attention map to {attn_file}")
                 
             self.ctc_metrics.append(ids, p_ctc, targets, wav_lens, target_lens)
-
+            
             self.per_metrics.append(
                 ids=ids,
                 predict=sequence,
@@ -935,6 +947,7 @@ class PhnMonoSSLModel_withcanoPhnEmb_Hybrid_CTC_Attention_Ver2(PhnMonoSSLModel_w
                 target_len=target_lens,
                 ind2lab=self.label_encoder.decode_ndim,
             )
+
             
             self.mpd_metrics.append(
                 ids=ids,
