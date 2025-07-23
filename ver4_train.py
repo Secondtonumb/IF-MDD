@@ -25,7 +25,8 @@ import wandb
 import time
 import torchaudio
 from speechbrain.inference.text import GraphemeToPhoneme
-from models.phn_mono_ssl_model import PhnMonoSSLModel, PhnMonoSSLModel_misproBCE
+from models.phn_mono_ssl_model import PhnMonoSSLModel,PhnMonoSSLModel_misproBCE, PhnMonoSSLModel_withcanoPhnEmb_Hybrid_CTC_Attention, PhnMonoSSLModel_withcanoPhnEmb_Hybrid_CTC_Attention_Ver2        
+from models.phn_mono_ssl_model import PhnMonoSSLModel_withcanoPhnEmb_Hybrid_CTC_Attention_Ver3
 from models.phn_dual_ssl_model import PhnDualSSLModel, PhnDualSSLModel_with_SimpleResidual
 
 wandb.login(key="1e2455bc962bb682012326b2964a299ed63c3690")
@@ -398,6 +399,12 @@ if __name__ == "__main__":
         asr_brain_class = PhnMonoSSLModel
     elif hparams["feature_fusion"] == "mono_misproBCE":
         asr_brain_class = PhnMonoSSLModel_misproBCE
+    elif hparams["feature_fusion"] == "mono_with_canoPhnEmb_Hybrid_CTC_Attention":
+        asr_brain_class = PhnMonoSSLModel_withcanoPhnEmb_Hybrid_CTC_Attention
+    elif hparams["feature_fusion"] == "mono_att_ver2":
+        asr_brain_class = PhnMonoSSLModel_withcanoPhnEmb_Hybrid_CTC_Attention_Ver2
+    elif hparams["feature_fusion"] == "mono_att_ver3":  
+        asr_brain_class = PhnMonoSSLModel_withcanoPhnEmb_Hybrid_CTC_Attention_Ver3
     elif hparams["feature_fusion"] == "dual_ssl_enc":
         asr_brain_class = PhnDualSSLModel
     elif hparams["feature_fusion"] == "dual_ssl_enc_with_simple_residual":

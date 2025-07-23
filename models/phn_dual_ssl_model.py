@@ -916,6 +916,7 @@ class PhnDualSSLModel_Hybrid_CTC_Attention(sb.Brain):
         loss_ctc_per = self.hparams.ctc_cost(p_ctc_per, targets, wav_lens, target_lens)
         loss_ctc_and_attn = self.hparams.ctc_cost(p_ctc, targets, wav_lens, target_lens)
         
+        # Tobe fix
         loss = self.hparams.blend_alpha * loss_ctc_can + (1 - self.hparams.blend_alpha) * loss_ctc_per + loss_ctc_and_attn
         # Log both CTC losses to wandb
 
