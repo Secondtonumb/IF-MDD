@@ -884,14 +884,13 @@ class PhnMonoSSLModel_withcanoPhnEmb_Hybrid_CTC_Attention_Ver2(PhnMonoSSLModel_w
         loss_ctc = self.hparams.ctc_cost(p_ctc, targets, wav_lens, target_lens)
         # attention CTC loss for canonical phoneme
         loss_attn_ctc = self.hparams.ctc_cost(p_attn, targets, wav_lens, target_lens)
+    
         
-        loss_ctc_canonical= self.hparams.ctc_cost(p_ctc, canonicals, wav_lens, canonical_lens)
-        
-        loss_attn_ctc_canonical = self.hparams.ctc_cost(p_attn, canonicals, wav_lens, canonical_lens)
-        
-        alpha = 0.5
-        # loss = alpha * loss_ctc + (1 - alpha) * loss_attn_ctc
-        loss = alpha * loss_ctc + (1 - alpha) * loss_attn_ctc_canonical
+        if hasattr(self.hparams, "loss_lambda"):
+            lam = self.hparams.loss_lambda
+        else:
+            lam = 0.5  # default value if not specified
+        loss = lam * loss_ctc + (1 - lam) * loss_attn_ctc
         # loss = loss_attn_ctc  # use attention CTC loss as main loss
 
         # Record losses for posterity
@@ -955,7 +954,6 @@ class PhnMonoSSLModel_withcanoPhnEmb_Hybrid_CTC_Attention_Ver2(PhnMonoSSLModel_w
                 wandb.log({
                     "loss_ctc_head": loss_ctc.item(),
                     "loss_ctc_attention": loss_attn_ctc.item(),
-                    "loss_ctc_attention_canonical": loss_attn_ctc_canonical.item(),
                 }, step=self.hparams.epoch_counter.current)
             except Exception:
                 pass
