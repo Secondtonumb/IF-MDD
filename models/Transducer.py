@@ -1,0 +1,445 @@
+#!/usr/bin/env/python3
+"""Recipe for training a phoneme recognizer with
+Transducer loss on the TIMIT dataset.
+
+To run this recipe, do the following:
+> python train.py hparams/train.yaml --data_folder /path/to/TIMIT
+
+
+Authors
+ * Abdel Heba 2020
+ * Mirco Ravanelli 2020
+ * Ju-Chieh Chou 2020
+"""
+import os
+import sys
+
+from hyperpyyaml import load_hyperpyyaml
+import os
+
+import torch
+import torch.nn
+
+import speechbrain as sb
+from hyperpyyaml import load_hyperpyyaml
+from mpd_eval_v3 import MpdStats
+
+import speechbrain as sb
+from speechbrain.utils.distributed import if_main_process, run_on_main
+from speechbrain.utils.logger import get_logger
+import wandb
+logger = get_logger(__name__)
+
+
+class TransducerMDD(sb.Brain):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # self.        super().__init__(*args, **kwargs)
+        self.patience = 20
+        
+        self.no_improve_epochs = 0
+        self.last_improved_epoch = 0
+        
+        self.best_per_list = []  # List of (PER, epoch, ckpt_name)
+        self.best_mpd_f1_list = []  # List of (mpd_f1, epoch, ckpt_name)
+        self.best_per = float('inf')
+        self.best_mpd_f1 = float('-inf')
+        
+        self.best_per_seq_list = []  # List of (PER_seq, epoch, ckpt_name)
+        self.best_mpd_f1_seq_list = []
+        self.best_per_seq = float('inf')
+        self.best_mpd_f1_seq = float('-inf')
+            
+        self.best_valid_loss = float('inf')
+        self.best_valid_loss_list = []  # List of (valid_loss, epoch, ckpt_name)label_encoder.add_label("<eos>")
+    
+    def evaluate_batch(self, batch, stage):
+        """Computations needed for validation/test batches"""
+        predictions = self.compute_forward(batch, stage=stage)
+        loss = self.compute_objectives(predictions, batch, stage=stage)
+        return loss.detach()
+    
+    def on_stage_start(self, stage, epoch):
+        "Gets called when a stage (either training, va lidation, test) starts."
+        # self.ctc_metrics = self.hparams.ctc_stats()
+        # self.seq_metrics = self.hparams.seqlabel_stats()
+        # if hasattr(self.hparams, "augmentation"):
+        #     self.modules.wav2vec2.model.config.apply_spec_augment = True
+        self.transducer_metrics = self.hparams.transducer_stats()
+
+        if stage != sb.Stage.TRAIN:
+            self.per_metrics = self.hparams.per_stats()
+            
+            # self.per_metrics_seq = self.hparams.per_stats()
+            self.mpd_metrics = MpdStats()
+            # self.mpd_metrics_seq = MpdStats()
+            
+    def compute_forward(self, batch, stage):
+        "Given an input batch it computes the phoneme probabilities."
+        batch = batch.to(self.device)
+        wavs, wav_lens = batch.sig
+        phns, phn_lens = batch.phn_encoded_target
+        targets_bos, target_lens_bos = batch.phn_encoded_target_bos
+        targets_eos, target_lens_eos = batch.phn_encoded_target_eos
+        
+        canonicals, canonical_lens = batch.phn_encoded_canonical
+        canonicals_bos, canonical_lens_bos = batch.phn_encoded_canonical_bos
+        canonicals_eos, canonical_lens_eos = batch.phn_encoded_canonical_eos
+        perceiveds, perceived_lens = batch.phn_encoded_perceived
+        perceiveds_bos, perceived_lens_bos = batch.phn_encoded_perceived_bos
+        perceiveds_eos, perceived_lens_eos = batch.phn_encoded_perceived_eos
+        
+        if sb.Stage.TRAIN == stage and hasattr(self.hparams, "wav_augment"):
+            # Apply augmentation to the wavs
+            wavs, wav_lens = self.hparams.wav_augment(wavs, wav_lens)
+            phns = self.hparams.wav_augment.replicate_labels(phns)
+            phn_lens = self.hparams.wav_augment.replicate_labels(phn_lens)
+            targets_bos = self.hparams.wav_augment.replicate_labels(targets_bos)
+            target_lens_bos = self.hparams.wav_augment.replicate_labels(target_lens_bos)
+
+        # Model computations
+        feats = self.modules.wav2vec2(wavs, wav_lens)
+        x = self.modules.enc(feats)
+        x = self.modules.enc_lin(x)
+
+        # Prepend bos token at the beginning
+        y_in = sb.dataio.dataio.prepend_bos_token(
+            phns, self.hparams.blank_index
+        )
+        e_in = self.modules.emb(y_in)
+        h, _ = self.modules.dec(e_in)
+        h = self.modules.dec_lin(h)
+        # Joint network
+        # add labelseq_dim to the encoder tensor: [B,T,H_enc] => [B,T,1,H_enc]
+        # add timeseq_dim to the decoder tensor: [B,U,H_dec] => [B,1,U,H_dec]
+        joint = self.modules.Tjoint(x.unsqueeze(2), h.unsqueeze(1))
+
+        # output layer for seq2seq log-probabilities
+        logits = self.modules.output(joint)
+
+        if stage == sb.Stage.VALID:
+            hyps, _, _, _ = self.hparams.Greedysearcher(x)
+            return logits, wav_lens, hyps
+
+        elif stage == sb.Stage.TEST:
+            (
+                best_hyps,
+                best_scores,
+                nbest_hyps,
+                nbest_scores,
+            ) = self.hparams.Beamsearcher(x)
+            return logits, wav_lens, best_hyps
+        return logits, wav_lens
+
+    def compute_objectives(self, predictions, batch, stage):
+        "Given the network predictions and targets computed the loss."
+        current_epoch = self.hparams.epoch_counter.current
+        valid_search_interval = self.hparams.valid_search_interval
+        
+        ids = batch.id
+        wavs, wav_lens = batch.sig
+        phns, phn_lens = batch.phn_encoded_target
+        targets_bos, target_lens_bos = batch.phn_encoded_target_bos
+        targets_eos, target_lens_eos = batch.phn_encoded_target_eos
+        
+        canonicals, canonical_lens = batch.phn_encoded_canonical
+        canonicals_bos, canonical_lens_bos = batch.phn_encoded_canonical_bos
+        canonicals_eos, canonical_lens_eos = batch.phn_encoded_canonical_eos
+        perceiveds, perceived_lens = batch.phn_encoded_perceived
+        perceiveds_bos, perceived_lens_bos = batch.phn_encoded_perceived_bos
+        perceiveds_eos, perceived_lens_eos = batch.phn_encoded_perceived_eos
+
+
+        if stage == sb.Stage.TRAIN and hasattr(self.hparams, "wav_augment"):
+            wavs, wav_lens = self.hparams.wav_augment(wavs, wav_lens)
+            phns = self.hparams.wav_augment.replicate_labels(phns)
+            phn_lens = self.hparams.wav_augment.replicate_labels(phn_lens)
+            targets_bos = self.hparams.wav_augment.replicate_labels(targets_bos)
+            target_lens_bos = self.hparams.wav_augment.replicate_labels(target_lens_bos)
+            targets_eos = self.hparams.wav_augment.replicate_labels(targets_eos)
+            target_lens_eos = self.hparams.wav_augment.replicate_labels(target_lens_eos)
+
+        if stage == sb.Stage.TRAIN:
+            predictions, wav_lens = predictions
+        else:
+            predictions, wav_lens, hyps = predictions
+
+        # Transducer loss use logits from RNN-T model.
+        loss = self.hparams.compute_cost(predictions, phns, wav_lens, phn_lens)
+        self.transducer_metrics.append(
+            ids, predictions, phns, wav_lens, phn_lens
+        )
+
+             
+        if stage != sb.Stage.TRAIN:
+            if current_epoch % valid_search_interval == 0 or (
+                    stage == sb.Stage.TEST
+                ):
+                self.per_metrics.append(
+                    ids, hyps, phns, None, phn_lens, self.label_encoder.decode_ndim
+                )
+                
+                self.mpd_metrics.append(
+                    ids=ids,
+                    predict=hyps,
+                    canonical=canonicals,
+                    perceived=perceiveds,
+                    predict_len=None,
+                    canonical_len=canonical_lens,
+                    perceived_len=perceived_lens,
+                    ind2lab=self.label_encoder.decode_ndim,
+                )
+                # Log to wandb if available (VALID stage only)
+        current_epoch = self.hparams.epoch_counter.current          
+        valid_search_interval = self.hparams.valid_search_interval
+        if current_epoch % valid_search_interval == 0 or (
+            stage == sb.Stage.TEST
+        ):
+            try:
+                import wandb
+                wandb.log({
+                    "loss": loss.item(),
+                }, step=self.hparams.epoch_counter.current)
+            except Exception:
+                pass
+        return loss
+    
+    def on_stage_end(self, stage, stage_loss, epoch):
+        """Gets called at the end of a epoch."""
+        if stage == sb.Stage.TRAIN:
+            self.train_loss = stage_loss
+
+        if stage == sb.Stage.VALID:
+            current_epoch = self.hparams.epoch_counter.current
+            valid_search_interval = self.hparams.valid_search_interval
+            if (
+                current_epoch % valid_search_interval == 0
+            ):
+                per = self.per_metrics.summarize("error_rate")
+                mpd_f1 = self.mpd_metrics.summarize("f1")
+                old_lr_adam, new_lr_adam = self.hparams.lr_annealing_adam(per)
+                old_lr_wav2vec, new_lr_wav2vec = self.hparams.lr_annealing_wav2vec(
+                    per
+                )
+                sb.nnet.schedulers.update_learning_rate(
+                    self.adam_optimizer, new_lr_adam
+                )
+                sb.nnet.schedulers.update_learning_rate(
+                    self.wav2vec_optimizer, new_lr_wav2vec
+                )
+
+                self.hparams.train_logger.log_stats(
+                    stats_meta={
+                        "epoch": epoch,
+                        "lr_adam": old_lr_adam,
+                        "lr_wav2vec": old_lr_wav2vec,
+                    },
+                    train_stats={"loss": self.train_loss},
+                    valid_stats={"loss": stage_loss, "PER": per, "mpd_f1": self.mpd_metrics.summarize("f1")},
+                )
+                # self.checkpointer.save_and_keep_only(
+                #     meta={"PER": per}, min_keys=["PER"], max_keys=["mpd_f1"]
+                # )
+                improved = False
+                
+                def save_best_model(metric_name, current_value, best_value, best_list, ckpt_prefix, 
+                                meta_key, key_type, is_higher_better):
+                    should_save = (current_value > best_value if is_higher_better else current_value < best_value) or len(best_list) < 3
+                    
+                    if should_save:
+                        ckpt_name = f"{ckpt_prefix}_{epoch:03d}_{current_value:.4f}.ckpt"
+                        meta = {"epoch": epoch, metric_name: current_value, meta_key: current_value}
+
+                        meta.update({"PER": per, "mpd_f1": mpd_f1})
+                        
+                        self.checkpointer.save_and_keep_only(
+                            meta=meta,
+                            name=ckpt_name,
+                            num_to_keep=5,
+                            **{key_type: [meta_key]}
+                        )
+                        
+                        best_list.append((current_value, epoch, ckpt_name))
+                        best_list.sort(key=lambda x: -x[0] if is_higher_better else x[0])
+                        best_list[:] = best_list[:3]
+                        return best_list[0][0], True
+                    return best_value, False
+                                # Save models for each metric
+                self.best_per, per_improved = save_best_model(
+                    "per", per, self.best_per, self.best_per_list, 
+                    "best_per_joint", "best_PER", "min_keys", False)
+                
+                self.best_mpd_f1, mpd_improved = save_best_model(
+                    "mpd_f1", mpd_f1, self.best_mpd_f1, self.best_mpd_f1_list,
+                    "best_mpdf1_joint", "best_mpd_f1", "max_keys", True)
+                
+                improved = per_improved or mpd_improved 
+                # Early stopping logic: only track best valid loss, do not save checkpoint for valid loss
+                if stage_loss < self.best_valid_loss or len(self.best_valid_loss_list) < 10:
+                    ckpt_name = f"best_valid_loss_{epoch:03d}_{stage_loss:.4f}.ckpt"
+                    # Do NOT save checkpoint for valid loss (just update stats)
+                    self.best_valid_loss_list.append((stage_loss, epoch, ckpt_name))
+                    self.best_valid_loss_list = sorted(self.best_valid_loss_list, key=lambda x: x[0])[:10]
+                    self.best_valid_loss = self.best_valid_loss_list[0][0]
+                    improved = True
+
+                if improved:
+                    self.no_improve_epochs = 0
+                    self.last_improved_epoch = epoch
+                else:
+                    self.no_improve_epochs += 1
+                                # Logging
+                wandb.log({
+                    "epoch": epoch,
+                    "train_loss": self.train_loss,
+                    "valid_loss": stage_loss,
+                    "PER": per,
+                    "mpd_f1": mpd_f1,
+
+                }, step=epoch)
+                # Early stop if patience exceeded
+                if self.no_improve_epochs >= self.patience:
+                    print(f"Early stopping at epoch {epoch} (no improvement for {self.patience} epochs)")
+                    raise StopIteration
+
+        if stage == sb.Stage.TEST:
+            per = self.per_metrics.summarize("error_rate")
+            mpd_f1 = self.mpd_metrics.summarize("mpd_f1")
+            self.hparams.train_logger.log_stats(
+                stats_meta={"Epoch loaded": self.hparams.epoch_counter.current},
+                test_stats={"loss": stage_loss, "PER": per, "mpd_f1": mpd_f1},
+            )
+            if if_main_process():
+                with open(
+                    self.hparams.test_wer_file, "w", encoding="utf-8"
+                ) as w:
+                    w.write("Transducer loss stats:\n")
+                    self.transducer_metrics.write_stats(w)
+                    w.write("\nPER stats:\n")
+                    self.per_metrics.write_stats(w)
+                    print(
+                        "Transducer and PER stats written to file",
+                        self.hparams.test_wer_file,
+                    )
+                with open(
+                    self.hparams.test_mpd_file, "w", encoding="utf-8"
+                ) as w:
+                    w.write("MPD stats:\n")
+                    self.mpd_metrics.write_stats(w)
+                    print(
+                        "MPD stats written to file",
+                        self.hparams.test_mpd_file,
+                    )
+
+    def on_fit_start(self):
+        """Gets called at the beginning of ``fit()``, on multiple processes
+        if ``distributed_count > 0`` and backend is ddp.
+
+        Default implementation compiles the jit modules, initializes
+        optimizers, and loads the latest checkpoint to resume training.
+        """
+        # Run this *after* starting all processes since jit modules cannot be
+        # pickled.
+        self._compile()
+
+        # Wrap modules with parallel backend after jit
+        self._wrap_distributed()
+
+        # Initialize optimizers after parameters are configured
+        self.init_optimizers()
+
+        # Load latest checkpoint to resume training if interrupted
+        ## NOTE: make sure to use the "best" model to continual training
+        ## so we set the `min_key` argument
+        if self.checkpointer is not None:
+            # TODO: support recover best on PER or mpd_f1 or averaged model of best PER and mpd_f1
+            self.checkpointer.recover_if_possible(
+                # min_key="PER",
+                max_key="mpd_f1",
+            )
+    
+    def init_optimizers(self):
+        "Initializes the wav2vec2 optimizer and model optimizer"
+        self.wav2vec_optimizer = self.hparams.wav2vec_opt_class(
+            self.modules.wav2vec2.parameters()
+        )
+        self.adam_optimizer = self.hparams.adam_opt_class(
+            self.hparams.model.parameters()
+        )
+        if self.checkpointer is not None:
+            self.checkpointer.add_recoverable(
+                "wav2vec_opt", self.wav2vec_optimizer
+            )
+            self.checkpointer.add_recoverable("adam_opt", self.adam_optimizer)
+
+        self.optimizers_dict = {
+            "wav2vec": self.wav2vec_optimizer,
+            "adam": self.adam_optimizer,
+        }
+        
+    def fit_batch(self, batch):
+        """Fit one batch, override to do multiple updates.
+
+        The default implementation depends on a few methods being defined
+        with a particular behavior:
+
+        * ``compute_forward()``
+        * ``compute_objectives()``
+
+        Also depends on having optimizers passed at initialization.
+
+        Arguments
+        ---------
+        batch : list of torch.Tensors
+            Batch of data to use for training. Default implementation assumes
+            this batch has two elements: inputs and targets.
+
+        Returns
+        -------
+        detached loss
+        """
+        def check_gradients(loss):
+            """Check if gradients are finite"""
+            if not torch.isfinite(loss):
+                print("Warning: loss is not finite, skipping step")
+                return False
+            return True
+        if self.hparams.auto_mix_prec:
+            import pdb; pdb.set_trace()
+            # Use automatic mixed precision training
+            self.adam_optimizer.zero_grad()
+            self.wav2vec_optimizer.zero_grad()
+
+            with torch.amp.autocast("cuda"):
+                outputs = self.compute_forward(batch, sb.Stage.TRAIN)
+                loss = self.compute_objectives(outputs, batch, sb.Stage.TRAIN)
+            # normalize the loss by gradient_accumulation and scale for mixed precision
+            self.scaler.scale(loss / self.hparams.gradient_accumulation).backward()
+            self.scaler.unscale_(self.adam_optimizer)
+            self.scaler.unscale_(self.wav2vec_optimizer)
+            
+            if check_gradients(loss):
+                self.scaler.step(self.wav2vec_optimizer)
+                self.scaler.step(self.adam_optimizer)
+                
+            self.scaler.update()
+
+        else:
+            
+            outputs = self.compute_forward(batch, sb.Stage.TRAIN)
+            
+            loss = self.compute_objectives(outputs, batch, sb.Stage.TRAIN)
+            # normalize the loss by gradient_accumulation step
+            (loss / self.hparams.gradient_accumulation).backward()
+
+            if self.step % self.hparams.gradient_accumulation == 0:
+                # gradient clipping & early stop if loss is not fini
+                
+                if check_gradients(loss):
+                    self.wav2vec_optimizer.step()
+                    self.adam_optimizer.step()
+
+                self.wav2vec_optimizer.zero_grad()
+                self.adam_optimizer.zero_grad()    
+
+        return loss.detach().cpu()

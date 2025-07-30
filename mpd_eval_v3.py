@@ -108,7 +108,7 @@ class MpdStats(MetricStats):
         print_mpd_details(self.scores, self.summary, filestream)
 
 
-def mpd_eval_on_dataset(in_json, mpd_file=sys.stdout, per_file=None):
+def mpd_eval_on_dataset(in_json, mpd_file=sys.stdout, per_file=None, with_sil=True):
 
     if per_file:
         error_rate_stats = ErrorRateStats()
@@ -127,7 +127,7 @@ def mpd_eval_on_dataset(in_json, mpd_file=sys.stdout, per_file=None):
         hyp = [s for s in wav_data["hyp"].split() if s!= "sil"]
         # hyp = wav_data["hyp"].split()
         wer_details = wer_details_for_batch(ids=[wav_id],
-                                           refs=[[s for s in cano_phns if s != "sil"]],
+                                           refs=cano_phns,
                                            hyps=[hyp],
                                            compute_alignments=True)[0]
         ## let's be clear about the two alignments' names, rename the keys
@@ -143,7 +143,7 @@ def mpd_eval_on_dataset(in_json, mpd_file=sys.stdout, per_file=None):
 
         if per_file:
             error_rate_stats.append(ids=[wav_id],
-                                    target=[[s for s in cano_phns if s != "sil"]],
+                                    target=[cano_phns],
                                     predict=[hyp])
 
     if per_file:

@@ -203,7 +203,6 @@ class ASR(sb.Brain):
                     self.hparams.mpd_file,
                 )
 
-
     def fit_batch(self, batch):
         """Fit one batch, override to do multiple updates.
 
@@ -619,7 +618,7 @@ if __name__ == "__main__":
 
     # Dataset IO prep: creating Dataset objects and proper encodings for phones
     train_data, valid_data, test_data, label_encoder = dataio_prep(hparams)
-    
+    # import pdb; pdb.set_trace()
     # Trainer initialization
     asr_brain = ASR(
         modules=hparams["modules"],
