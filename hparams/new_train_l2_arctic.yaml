@@ -171,12 +171,12 @@ eval_precision: fp16    # 推理同样切换到 FP16
 # Dataloader options
 train_dataloader_opts:
     batch_size: !ref <batch_size>
-    num_workers: 0
+    num_workers: 16
 
 valid_dataloader_opts:
     batch_size: !ref <batch_size>
-    num_workers: 0
+    num_workers: 16
 
 test_dataloader_opts:
     batch_size: 1
-    num_workers: 0
+    num_workers: 1
