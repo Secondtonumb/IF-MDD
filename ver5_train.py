@@ -41,6 +41,7 @@ from speechbrain.inference.text import GraphemeToPhoneme
 from models.phn_mono_ssl_model import PhnMonoSSLModel
 from models.Transformer import TransformerMDD, TransformerMDD_dual_ctc
 from models.Transformer_TP import TransformerMDD_TP
+from models.Transformer_TP_ver2 import TransformerMDD_TP_ver2
 # from models.Transducer import TransducerMDD
 
 # from models.phn_mono_ssl_model_ver2 import Hybrid_CTC_Attention, Hybrid_CTC_Attention_ver2
@@ -763,7 +764,9 @@ if __name__ == "__main__":
         asr_brain_class = PhnMonoSSLModel
     elif hparams["feature_fusion"] == "TransformerMDD_TP":
         asr_brain_class = TransformerMDD_TP
-        
+    elif hparams["feature_fusion"] == "TransformerMDD_TP_ver2":
+        asr_brain_class = TransformerMDD_TP_ver2
+
     logger.info(f"Using ASR brain class: {asr_brain_class.__name__}")
     
     asr_brain = asr_brain_class(
