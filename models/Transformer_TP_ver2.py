@@ -1,3 +1,4 @@
+# Same Logits as Transformer_TP but the decoder out heads target is aligned perceived phoneme
 import os
 
 import torch
@@ -37,7 +38,7 @@ import torch.nn.functional as F
 from utils.layers.utils import make_pad_mask
 from utils.plot.plot_attn import plot_attention
 
-class TransformerMDD_TP(sb.Brain):
+class TransformerMDD_TP_ver2(sb.Brain):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # self.        super().__init__(*args, **kwargs)
@@ -526,7 +527,7 @@ class TransformerMDD_TP(sb.Brain):
         if sb.Stage.TRAIN == stage:
             enc_out, hidden, dec_out = self.modules.TransASR(
                 src=feats_enc,
-                tgt=targets_bos,
+                tgt=perceiveds_bos,
                 wav_len=wav_lens,
                 pad_idx=0, 
             )
@@ -581,7 +582,7 @@ class TransformerMDD_TP(sb.Brain):
             with torch.no_grad():
                 enc_out, hidden, dec_out = self.modules.TransASR(
                     src=feats_enc,
-                    tgt=targets_bos,
+                    tgt=perceiveds_bos,
                     wav_len=wav_lens,
                     pad_idx=0,  
                 )
@@ -721,7 +722,7 @@ class TransformerMDD_TP(sb.Brain):
         # Caculate the loss for CTC and seq2seq outputs
         # loss_ctc = self.hparams.ctc_cost(p_ctc_feat, targets, wav_lens, target_lens)
         loss_ctc = self.hparams.ctc_cost(p_ctc_feat, targets, wav_lens, target_lens)
-        loss_dec_out = self.hparams.seq_cost(p_dec_out, targets_eos, target_lens_eos)
+        loss_dec_out = self.hparams.seq_cost(p_dec_out, perceiveds_eos, perceived_lens_eos)
         loss_mispro = self.hparams.mispro_cost(inputs=h_mispro,
                                                targets=mispro_label, 
                                                length=mispro_label_lens)
@@ -792,7 +793,7 @@ class TransformerMDD_TP(sb.Brain):
                 self.per_metrics_seq.append(
                     ids=ids,
                     predict=sequence_decoder_out,
-                    target=targets,
+                    target=perceiveds,
                     predict_len=None,
                     target_len=target_lens,
                     ind2lab=self.label_encoder.decode_ndim,

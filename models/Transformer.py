@@ -726,8 +726,6 @@ class TransformerMDD(sb.Brain):
                 wandb.log({
                     "loss": loss.item(),
                 }, step=self.hparams.epoch_counter.current)
-                # if loss_ga is not None:
-                #     wandb.log({"loss_ga": loss_ga.item()}, step=self.hparams.epoch_counter.current)
                 if loss_dec_out is not None:
                     wandb.log({"loss_dec_out": loss_dec_out.item()}, step=self.hparams.epoch_counter.current)
                 if loss_ctc is not None:
@@ -925,7 +923,7 @@ class TransformerMDD(sb.Brain):
                             "PER_seq": per_seq, "mpd_f1_seq": mpd_f1_seq},
             )
             # 
-            with open(self.hparams.per_file, "w") as w:
+            with open(self.hparams.per_fileni shi z, "w") as w:
                 w.write("CTC loss stats:\n")
                 self.ctc_metrics.write_stats(w)
                 w.write("\nPER stats:\n")
