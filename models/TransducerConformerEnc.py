@@ -5,8 +5,7 @@ import torch.nn
 
 import speechbrain as sb
 from hyperpyyaml import load_hyperpyyaml
-# from mpd_eval_v3 import MpdStats
-from mpd_eval_v4 import MpdStats  # Updated import for mpd_eval_v4
+from mpd_eval_v3 import MpdStats
 
 
 import wandb
@@ -24,13 +23,18 @@ import pdb
 from speechbrain.decoders import S2STransformerBeamSearcher, CTCScorer, ScorerBuilder
 from speechbrain.lobes.models.transformer.TransformerASR import TransformerASR
 
+from speechbrain.decoders.utils import (
+    _update_mem,
+    inflate_tensor,
+    mask_by_condition,
+)
 
 import torch.nn as nn
 import torch.nn.functional as F
 
 from utils.layers.utils import make_pad_mask
 
-class Hybrid_CTC_Attention_SB(sb.Brain):
+class TransducerMDDConformerEnc(sb.Brain):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # self.        super().__init__(*args, **kwargs)
@@ -48,74 +52,10 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
         self.best_mpd_f1_seq_list = []
         self.best_per_seq = float('inf')
         self.best_mpd_f1_seq = float('-inf')
-        
-        # self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        # if self.modules.perceived_ssl is not None:
-        #     self.modules.perceived_ssl.to(self.device)
-        # if self.modules.canonical_ssl is not None:
-        #     self.modules.canonical_ssl.to(self.device)
-        # if self.modules.TransASR is not None:
-        #     self.modules.TransASR.to(self.device)
-        # if self.modules.ctc_lin is not None:
-        #     self.modules.ctc_lin.to(self.device)
-        # if self.modules.d_out is not None:
-        #     self.modules.d_out.to(self.device)
-        # if self.modules.enc is not None:
-        #     self.modules.enc.to(self.device)
             
         self.best_valid_loss = float('inf')
         self.best_valid_loss_list = []  # List of (valid_loss, epoch, ckpt_name)label_encoder.add_label("<eos>")
     
-        
-        # self.enc = self.modules.enc.to(self.device)
-        # self.guided_attn_loss = GuidedAttentionLoss(sigma=0.2)
-        
-        # self.TransASR = TransformerASR(
-        #     tgt_vocab=44,
-        #     input_size=768,
-        #     d_model=384,
-        #     nhead=8,
-        #     num_encoder_layers=1,
-        #     d_ffn=1024,
-        #     dropout=0.1,
-        #     max_length=1000,
-        #     output_hidden_states=True,
-        #     normalize_before=False,
-        #     activation=torch.nn.GELU,
-        # ).to(self.device)
-            
-        # self.ctc_lin = sb.nnet.linear.Linear(
-        #     input_shape=[None, None, 384],
-        #     n_neurons=42,
-        # ).to(self.device)
-
-        # self.d_out = sb.nnet.linear.Linear(
-        #     input_shape=[None, None, 384],
-        #     n_neurons=44, 
-        # ).to(self.device)
-
-        # self.ctc_scorer = CTCScorer(
-        #     ctc_fc=self.ctc_lin,
-        #     blank_index=0,
-        #     eos_index=43,
-        # )
-        
-        # self.scorer = ScorerBuilder(
-        #     full_scorers=[self.ctc_scorer],
-        #     weights={'ctc': 1}
-        # )
-        self.ARdecoder = sb.decoders.seq2seq.S2STransformerGreedySearcher(
-                modules=[self.modules.TransASR, self.modules.d_out],
-                bos_index=41,
-                eos_index=42,
-                min_decode_ratio=0.1,
-                max_decode_ratio=0.6,
-        )
-        
-        # self.valid_searcher 
-        
-                # scorer=self.scorer,
-                # beam_size=5,
     def evaluate_batch(self, batch, stage):
         """Computations needed for validation/test batches"""
         predictions = self.compute_forward(batch, stage=stage)
@@ -125,20 +65,19 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
     def on_stage_start(self, stage, epoch):
         "Gets called when a stage (either training, va lidation, test) starts."
         self.ctc_metrics = self.hparams.ctc_stats()
-        self.seq_metrics = self.hparams.seqlabel_stats()
+        self.transducer_metrics = self.hparams.transducer_stats()
+        # self.seq_metrics = self.hparams.seqlabel_stats()
         if hasattr(self.hparams, "augmentation"):
             self.modules.perceived_ssl.model.config.apply_spec_augment = True
 
         if stage != sb.Stage.TRAIN:
             self.per_metrics = self.hparams.per_stats()
-            self.per_metrics_seq = self.hparams.per_stats()
+            # self.per_metrics_seq = self.hparams.per_stats()
             self.mpd_metrics = MpdStats()
-            self.mpd_metrics_seq = MpdStats()
-
+            # self.mpd_metrics_seq = MpdStats()
    
     def compute_forward(self, batch, stage):
         batch = batch.to(self.device)
-        
         wavs, wav_lens = batch.sig
         targets, target_lens = batch.phn_encoded_target
         targets_bos, target_lens_bos = batch.phn_encoded_target_bos
@@ -150,90 +89,64 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
         perceiveds, perceived_lens = batch.phn_encoded_perceived
         perceiveds_bos, perceived_lens_bos = batch.phn_encoded_perceived_bos
         perceiveds_eos, perceived_lens_eos = batch.phn_encoded_perceived_eos
-        # pdb.set_trace()
+        
         feats = self.modules.perceived_ssl(wavs)  # [B, T_s, ENC_DIM]
-        # Add Enc
-        # feats = self.modules.enc(feats)  # [B, T_s, D]
+        from speechbrain.lobes.models.transformer.Transformer import PositionalEncoding
+        from speechbrain.nnet.attention import RelPosEncXL
         
-        # enc_out, hidden, dec_out = self.modules.TransASR(
-        #     src=feats,
-        #     tgt=targets_bos,
-        #     wav_len=wav_lens,
-        #     pad_idx=0, 
-        # )
-        # # CTC head
-        # h_ctc_feat = self.modules.ctc_lin(enc_out)  # [B, T_s, C]
-        # p_ctc_logits = self.hparams.log_softmax(h_ctc_feat)  # Log probabilities
+        x = self.modules.enc(feats)  # [B, T_s, ENC_DIM]
+        pos_emb = RelPosEncXL(x.shape[-1]).make_pe(seq_len=x.shape[1]).to(self.device) # [1, 2*T_s-1, ENC_DIM]
+        
+        x, hs = self.modules.Confenc(x, pos_embs=pos_emb)  # [B, T_s, ENC_DIM]
+        # PosEnc = PositionalEncoding(x.shape[-1]).to(self.device)
 
-        # # seq2seq head
-        # h_seq_feat = self.modules.d_out(dec_out)  # [B, T_p+1, C]
-        # p_seq_logits = self.hparams.log_softmax(h_seq_feat)  # Log probabilities
+        x = self.modules.enc_lin(x)  # [B, T_s, ENC_DIM]
         
-        # h_ctc_logits = self.modules.ctc_lin(feats)  # [B, T_s, C]
-        # p_ctc_feat = self.hparams.log_softmax(h_ctc_logits)  # Log probabilities
+        e_in = self.modules.emb(targets_bos)  # [B, T_p+1, ENC_DIM]
+        h, _ = self.modules.dec(e_in)
+        h = self.modules.dec_lin(h)  # [B, T_p+1, ENC_DIM]
+        
+        # Joint network
+        joint = self.modules.Tjoint(x.unsqueeze(2), h.unsqueeze(1)) 
+        logits = self.modules.output(joint)  # [B, T_p+1, T_s, C]
+        
         current_epoch = self.hparams.epoch_counter.current
         hyps = None
         attn_map = None
 
         if sb.Stage.TRAIN == stage:
-            enc_out, hidden, dec_out = self.modules.TransASR(
-                src=feats,
-                tgt=targets_bos,
-                wav_len=wav_lens,
-                pad_idx=0, 
-            )
-            # CTC head
-            h_ctc_feat = self.modules.ctc_lin(enc_out)  # [B, T_s, C]
-            p_ctc_logits = self.hparams.log_softmax(h_ctc_feat)  # Log probabilities
-
-            # seq2seq head
-            h_seq_feat = self.modules.d_out(dec_out)  # [B, T_p+1, C]
-            p_seq_logits = self.hparams.log_softmax(h_seq_feat)  # Log probabilities
-
-        else:
-            with torch.no_grad():
-                enc_out, hidden, dec_out = self.modules.TransASR(
-                    src=feats,
-                    tgt=targets_bos,
-                    wav_len=wav_lens,
-                    pad_idx=0,  # Assuming 0 is the padding index
-                )
-                h_ctc_feat = self.modules.ctc_lin(enc_out)  # [B, T_s, C]
-                p_ctc_logits = self.hparams.log_softmax(h_ctc_feat)  # Log probabilities
-
-                # seq2seq head
-                h_seq_feat = self.modules.d_out(dec_out)  # [B, T_p+1, C]
-                p_seq_logits = self.hparams.log_softmax(h_seq_feat)  # Log probabilities
-                
-                hyps = None
-                attn_map = None
-        
+            hyps, top_lengths, top_scores, top_log_probs = self.hparams.Greedysearcher(x)
+            
+        elif sb.Stage.VALID == stage:
+            # pdb.set_trace()
             valid_search_interval = self.hparams.valid_search_interval
             if current_epoch % valid_search_interval == 0:
-                hyps, top_lengths, top_scores, top_log_probs = self.hparams.valid_search(enc_out.detach(), wav_lens)
-                attn_map = None
-            if stage == sb.Stage.TEST:
-                hyps, top_lengths, top_scores, top_log_probs = self.hparams.test_search(enc_out.detach(), wav_lens)
-                attn_map = None
+                hyps, top_lengths, top_scores, top_log_probs = self.hparams.Greedysearcher(x)
+            return {"p_out": logits,
+                    "wav_lens": wav_lens,  # [B]
+                    "hyps": hyps,
+            }
+        elif stage == sb.Stage.TEST:
+            hyps, top_lengths, top_scores, top_log_probs = self.hparams.BeamSearcher(x)
+            return {"p_out": logits,
+                    "wav_lens": wav_lens,  # [B]
+                    "hyps": hyps,
+            }
         return {
-            "p_ctc_feat": p_ctc_logits,  # [B, T_s, C]
-            "p_dec_out": p_seq_logits,  # [B, T_p+1, C]
-            "feats": feats,  # [B, T_s, D]
-            "attn_map": attn_map,  # [B, T_p+1, T_s] or similar
-            "hyps": hyps,  # [B, T_p+1] or None if not applicable
+            "p_out": logits,
+            "wav_lens": wav_lens,  # [B]
         }
         
     def compute_objectives(self, predictions, batch, stage):
         "Computes the loss for the model."
-        self.label_encoder.ignore_len
         current_epoch = self.hparams.epoch_counter.current
         valid_search_interval = self.hparams.valid_search_interval
         
-        p_ctc_feat = predictions["p_ctc_feat"]
-        p_dec_out = predictions["p_dec_out"]
-        feats = predictions["feats"]
-        attn_map = predictions["attn_map"]
-        hyps = predictions.get("hyps", [])  # [B, T_p+1] or None if not applicable
+        p_out = predictions["p_out"]
+        
+        wav_lens = predictions["wav_lens"]
+        if len(predictions) == 3:
+            hyps = predictions["hyps"]  # [B, T_p+1] or None if not applicable
 
         wavs, wav_lens = batch.sig
         targets, target_lens = batch.phn_encoded_target
@@ -248,83 +161,31 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
         perceiveds_eos, perceived_lens_eos = batch.phn_encoded_perceived_eos
         ids = batch.id
         
-        # Caculate the loss for CTC and seq2seq outputs
-        # loss_ctc = self.hparams.ctc_cost(p_ctc_feat, targets, wav_lens, target_lens)
-        loss_ctc = self.hparams.ctc_cost(p_ctc_feat, targets, wav_lens, target_lens)
-        if stage == sb.Stage.TRAIN:
-            # # TODO: Better to Train CELoss without BOS / EOS
-            # pdb.set_trace()
-            # loss_dec_out = torch.tensor(0.0, device=self.device)
+        loss = self.hparams.transducer_cost(p_out, targets, wav_lens, target_lens)
+        self.transducer_metrics.append(ids, p_out, targets, wav_lens, target_lens)
 
-            loss_dec_out = sb.nnet.losses.kldiv_loss(
-                p_dec_out,
-                targets_eos,
-                length=target_lens_eos,
-                label_smoothing=0.1,
-                reduction="batchmean",
-            )
-
-        else: 
-            # During inference, don't compute attention loss
-            # loss_dec_out = torch.tensor(0.0, device=self.device)
-            loss_dec_out = sb.nnet.losses.kldiv_loss(
-                p_dec_out,
-                targets_eos,
-                length=target_lens_eos,
-                label_smoothing=0.1,
-                reduction="batchmean",
-            )
-        # ---- Guided Attention Loss ----
-
-        loss = (
-            self.hparams.ctc_weight * loss_ctc
-            + (1 - self.hparams.ctc_weight) * loss_dec_out
-        )
-        
         if stage != sb.Stage.TRAIN:
             if current_epoch % valid_search_interval == 0 or (
                     stage == sb.Stage.TEST
                 ):
                     # Record losses for posterit
                     # Traditional CTC greedy decoding
-                sequence = sb.decoders.ctc_greedy_decode(
-                    p_ctc_feat, wav_lens, blank_id=self.hparams.blank_index
-                )
-                sequence_decoder_out = hyps  # [B, T_p+1]
-                
-                # print(f"GT: \n {self.label_encoder.decode_ndim(targets[-1])}")
-                # print(f"CTC Greedy Decoding: \n {self.label_encoder.decode_ndim(sequence[-1])}")
-                # print(f"Attention Decoder Greedy Decoding: \n {self.label_encoder.decode_ndim(sequence_decoder_out[-1])}")
 
-                self.ctc_metrics.append(ids, p_ctc_feat, targets, wav_lens, target_lens)
-                self.seq_metrics.append(ids, log_probabilities=p_dec_out, targets=targets_eos, length=target_lens_eos)
-                
-                # self.ctc_metrics_fuse.append(ids, sequence_decoder_out, targets, wav_lens, target_lens)
-                
+                sequence_decoder_out = hyps  # [B, T_p+1]
                 # CTC-only results
                 self.per_metrics.append(
                     ids=ids,
-                    predict=sequence,
+                    predict=hyps,
                     target=targets,
                     predict_len=None,
                     target_len=target_lens,
                     ind2lab=self.label_encoder.decode_ndim,
                 )
                     
-                # seq2seq results
-                self.per_metrics_seq.append(
-                    ids=ids,
-                    predict=sequence_decoder_out,
-                    target=targets,
-                    predict_len=None,
-                    target_len=target_lens,
-                    ind2lab=self.label_encoder.decode_ndim,
-                )
-                
                 # MPD metrics
                 self.mpd_metrics.append(
                     ids=ids,
-                    predict=sequence,
+                    predict=hyps,
                     canonical=canonicals,
                     perceived=perceiveds,
                     predict_len=None,
@@ -333,16 +194,6 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
                     ind2lab=self.label_encoder.decode_ndim,
                 )
                 
-                self.mpd_metrics_seq.append(
-                    ids=ids,
-                    predict=sequence_decoder_out,
-                    canonical=canonicals,
-                    perceived=perceiveds,
-                    predict_len=None,
-                    canonical_len=canonical_lens,
-                    perceived_len=perceived_lens,
-                    ind2lab=self.label_encoder.decode_ndim,
-                )
             
         # Log to wandb if available (VALID stage only)
         current_epoch = self.hparams.epoch_counter.current          
@@ -357,10 +208,6 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
                 }, step=self.hparams.epoch_counter.current)
                 # if loss_ga is not None:
                 #     wandb.log({"loss_ga": loss_ga.item()}, step=self.hparams.epoch_counter.current)
-                if loss_dec_out is not None:
-                    wandb.log({"loss_dec_out": loss_dec_out.item()}, step=self.hparams.epoch_counter.current)
-                if loss_ctc is not None:
-                    wandb.log({"loss_ctc_head": loss_ctc.item()}, step=self.hparams.epoch_counter.current)
             except Exception:
                 pass
         return loss
@@ -407,18 +254,13 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
                 per = self.per_metrics.summarize("error_rate")
                 mpd_f1 = self.mpd_metrics.summarize("mpd_f1")
                 
-                per_seq = self.per_metrics_seq.summarize("error_rate")
-                mpd_f1_seq = self.mpd_metrics_seq.summarize("mpd_f1")
                 current_epoch = self.hparams.epoch_counter.current
                 valid_search_interval = self.hparams.valid_search_interval
                 # Log stats
                 valid_stats = {
                     "loss": stage_loss,
-                    "ctc_loss": self.ctc_metrics.summarize("average"),
                     "PER": per,
                     "mpd_f1": mpd_f1,
-                    "PER_seq": per_seq,
-                    "mpd_f1_seq": mpd_f1_seq,
                 }
             
                 self.hparams.train_logger.log_stats(
@@ -439,10 +281,7 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
                     if should_save:
                         ckpt_name = f"{ckpt_prefix}_{epoch:03d}_{current_value:.4f}.ckpt"
                         meta = {"epoch": epoch, metric_name: current_value, meta_key: current_value}
-                        if metric_name.endswith("_seq"):
-                            meta.update({"PER_seq": per_seq, "mpd_f1_seq": mpd_f1_seq})
-                        else:
-                            meta.update({"PER": per, "mpd_f1": mpd_f1})
+                        meta.update({"PER": per, "mpd_f1": mpd_f1})
                         
                         self.checkpointer.save_and_keep_only(
                             meta=meta,
@@ -462,19 +301,7 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
                     "per", per, self.best_per, self.best_per_list, 
                     "best_per_joint", "best_PER", "min_keys", False)
                 
-                self.best_mpd_f1, mpd_improved = save_best_model(
-                    "mpd_f1", mpd_f1, self.best_mpd_f1, self.best_mpd_f1_list,
-                    "best_mpdf1_joint", "best_mpd_f1", "max_keys", True)
-                
-                self.best_per_seq, per_seq_improved = save_best_model(
-                    "per_seq", per_seq, self.best_per_seq, self.best_per_seq_list,
-                    "best_per_seq_joint", "best_PER_seq", "min_keys", False)
-                
-                self.best_mpd_f1_seq, mpd_seq_improved = save_best_model(
-                    "mpd_f1_seq", mpd_f1_seq, self.best_mpd_f1_seq, self.best_mpd_f1_seq_list,
-                    "best_mpd_f1_seq_joint", "best_mpd_f1_seq", "max_keys", True)
-                
-                improved = per_improved or mpd_improved or per_seq_improved or mpd_seq_improved
+                improved = per_improved 
 
                 # Early stopping logic: only track best valid loss, do not save checkpoint for valid loss
                 if stage_loss < self.best_valid_loss or len(self.best_valid_loss_list) < 10:
@@ -496,11 +323,8 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
                     "epoch": epoch,
                     "train_loss": self.train_loss,
                     "valid_loss": stage_loss,
-                    "ctc_loss": self.ctc_metrics.summarize("average"),
                     "PER": per,
                     "mpd_f1": mpd_f1,
-                    "PER_seq": per_seq,
-                    "mpd_f1_seq": mpd_f1_seq,
                 }, step=epoch)
                 # Early stop if patience exceeded
                 if self.no_improve_epochs >= self.patience:
@@ -511,11 +335,10 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
             per = self.per_metrics.summarize("error_rate")
             mpd_f1 = self.mpd_metrics.summarize("mpd_f1")
             
-            per_seq = self.per_metrics_seq.summarize("error_rate")
-            mpd_f1_seq = self.mpd_metrics_seq.summarize("mpd_f1")
+
             self.hparams.train_logger.log_stats(
                 stats_meta={"Epoch loaded": self.hparams.epoch_counter.current},
-                test_stats={"loss": stage_loss, "PER": per, "mpd_f1": mpd_f1},
+                test_stats={"loss": stage_loss, "PER": per, "mpd_f1": mpd_f1,} 
             )
             # 
             with open(self.hparams.per_file, "w") as w:
@@ -534,24 +357,6 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
                     "MPD results and stats written to file",
                     self.hparams.mpd_file,
                 )
-            # if not files for joint decoding, create files
-            if hasattr(self, 'per_metrics_seq_file'):
-                with open(self.per_metrics_seq_file, "w") as w:
-                    w.write("Joint CTC-Attention PER stats:\n")
-                    self.per_metrics_seq.write_stats(w)
-                    print(
-                        "Joint CTC-Attention PER stats written to file",
-                        self.per_metrics_seq,
-                    )
-            if hasattr(self, 'mpd_metrics_seq'):
-                self.mpd_metrics_seq = self.hparams.mpd_file.replace(".txt", "_joint.txt")
-                with open(self.mpd_metrics_seq, "w") as m:
-                    m.write("Joint CTC-Attention MPD results and stats:\n")
-                    self.mpd_metrics_seq.write_stats(m)
-                    print(
-                        "Joint CTC-Attention MPD results and stats written to file",
-                        self.mpd_metrics_seq,
-                    )
 
     def init_optimizers(self):
 
@@ -568,6 +373,11 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
             
     def on_evaluate_start(self, max_key=None, min_key=None):
         return super().on_evaluate_start(max_key, min_key)
+
+    def on_fit_batch_end(self, batch, outputs, loss, should_step):
+        """At the end of the optimizer step, apply noam annealing."""
+        if should_step:
+            self.hparams.noam_annealing(self.adam_optimizer)
 
     def fit_batch(self, batch):
         """Fit one batch, override to do multiple updates.
@@ -634,3 +444,4 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
                 self.adam_optimizer.zero_grad()    
 
         return loss.detach().cpu()
+

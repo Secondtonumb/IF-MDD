@@ -181,3 +181,7 @@ test_dataloader_opts:
     num_workers: 1
 
 loss_lambda: 0.5
+ga_lambda: 1  # lambda for guided attention loss
+
+# guided attention loss parameters
+ga_sigma: 0.4  # Standard deviation for the Gaussian distribution in guided attention loss

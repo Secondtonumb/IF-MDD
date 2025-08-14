@@ -126,6 +126,7 @@ checkpointer: !new:speechbrain.utils.checkpoints.Checkpointer
         model: !ref <model>
         perceived_ssl: !ref <perceived_ssl>
         counter: !ref <epoch_counter>
+        
     
 # canonical_ssl: !ref <canonical_ssl>
 
@@ -179,4 +180,6 @@ valid_dataloader_opts:
 
 test_dataloader_opts:
     batch_size: 1
-    num_workers: 1
+    num_workers: 0
+
+loss_lambda: 0.5

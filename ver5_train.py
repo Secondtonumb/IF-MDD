@@ -38,11 +38,11 @@ from speechbrain.inference.text import GraphemeToPhoneme
 #     HMA_attn_ctc_to_mispro_ver2_1_perceived,
 #     HMA_attn_ctc_to_mispro_ver2_2)
 
-from models.phn_mono_ssl_model import PhnMonoSSLModel
-from models.Transformer import TransformerMDD, TransformerMDD_dual_ctc
-from models.Transformer_TP import TransformerMDD_TP
-from models.Transformer_TP_ver2 import TransformerMDD_TP_ver2
-# from models.Transducer import TransducerMDD
+from models.Transformer import TransformerMDD, TransformerMDD_with_extra_loss, TransformerMDD_dual_path
+from models.Transformer_PhnForward import TransformerMDD_PhnForward
+from models.TransformerMHA import TransformerMDDMHA
+from models.Transducer import TransducerMDD
+from models.TransducerConformerEnc import TransducerMDDConformerEnc
 
 # from models.phn_mono_ssl_model_ver2 import Hybrid_CTC_Attention, Hybrid_CTC_Attention_ver2
 
@@ -341,7 +341,8 @@ class LLMDataIOPrep(BaseDataIOPrep):
             yield phn_encoded_perceived_eos
 
             mispro_label = [1 if p != c else 0 for p, c in zip(phn_list_perceived, phn_list_canonical)]
-            mispro_label = torch.LongTensor(mispro_label)
+
+        
             yield mispro_label
 
         return text_pipeline_test
@@ -555,6 +556,8 @@ class TimestampDataIOPrepforHybridCTCAttn(TimestampDataIOPrep):
             "phn_encoded_perceived_eos",
             
             "mispro_label",
+            "mispro_label_bos",
+            "mispro_label_eos",
             "mispro_label_framewise",
             "phn_encoded_target_bin",
         )
@@ -570,7 +573,7 @@ class TimestampDataIOPrepforHybridCTCAttn(TimestampDataIOPrep):
             if waveform.shape[0] > 1:
                 waveform = waveform.mean(dim=0, keepdim=True)
 
-            sig = self.hparams["wav2vec2"].feature_extractor(
+            sig = self.hparams["perceived_ssl"].feature_extractor(
                 waveform.squeeze(0).numpy(),
                 sampling_rate=target_sr
             ).input_values[0]
@@ -654,9 +657,19 @@ class TimestampDataIOPrepforHybridCTCAttn(TimestampDataIOPrep):
             phn_encoded_perceived_eos = torch.LongTensor(phn_encoded_list_perceived_eos)
             yield phn_encoded_perceived_eos
 
+            
             mispro_label = [1 if p != c else 0 for p, c in zip(phn_list_perceived, phn_list_canonical)]
+            # append a dummy phn for eos
+            mispro_label_bos = [0] + mispro_label
+            mispro_label_eos = mispro_label + [0]  # append a dummy for eos
             mispro_label = torch.LongTensor(mispro_label)
+            mispro_label_bos = torch.LongTensor(mispro_label_bos)
+            mispro_label_eos = torch.LongTensor(mispro_label_eos)
+
+
             yield mispro_label
+            yield mispro_label_bos
+            yield mispro_label_eos
             
             # Frame-wise mispronunciation labels
             mispro_label_framewise = torch.zeros(len(sig), dtype=torch.long)
@@ -720,7 +733,7 @@ class TimestampDataIOPrepforHybridCTCAttn(TimestampDataIOPrep):
             "wrd",
             "target_start_frames", "target_end_frames", 
             "canonical_start_frames", "canonical_end_frames",
-            "mispro_label", "mispro_label_framewise", "phn_encoded_target_bin",
+            "mispro_label", "mispro_label_bos", "mispro_label_eos", "mispro_label_framewise", "phn_encoded_target_bin",
             "phn_list_target_bos", "phn_encoded_list_target_bos", "phn_encoded_target_bos",
             "phn_list_target_eos", "phn_encoded_list_target_eos", "phn_encoded_target_eos",
             "phn_list_canonical_bos", "phn_encoded_list_canonical_bos", "phn_encoded_canonical_bos",
@@ -756,17 +769,64 @@ if __name__ == "__main__":
     # DataPrep = TimestampDataIOPrepforHybridCTCAttn(hparams)
     DataPrep = LLMDataIOPrep(hparams)
     train_data, valid_data, test_data, label_encoder = DataPrep.prepare()
+    # Model Selection
     if hparams["feature_fusion"] == "TransformerMDD":
         asr_brain_class = TransformerMDD
     elif hparams["feature_fusion"] == "TransformerMDD_dual_ctc":
         asr_brain_class = TransformerMDD_dual_ctc
     elif hparams["feature_fusion"] == "PhnMonoSSL":
         asr_brain_class = PhnMonoSSLModel
-    elif hparams["feature_fusion"] == "TransformerMDD_TP":
-        asr_brain_class = TransformerMDD_TP
-    elif hparams["feature_fusion"] == "TransformerMDD_TP_ver2":
-        asr_brain_class = TransformerMDD_TP_ver2
-
+    elif hparams["feature_fusion"] == "mono_misproBCE":
+        asr_brain_class = PhnMonoSSLModel_misproBCE
+    elif hparams["feature_fusion"] == "mono_att_MHA":
+        asr_brain_class = PhnMonoSSLModel_withcanoPhnEmb_HMA_CTC
+    elif hparams["feature_fusion"] == "mono_att_HMA_ctc_to_canonical":
+        asr_brain_class = HMA_attn_ctc_to_canonical
+    elif hparams["feature_fusion"] == "mono_att_MHA_guided_attn":  
+        asr_brain_class = PhnMonoSSLModel_withcanoPhnEmb_MHA_Guided_Attention_CTC
+    elif hparams["feature_fusion"] == "HMA_attn_ctc_to_mispro":
+        asr_brain_class = HMA_attn_ctc_to_mispro
+    elif hparams["feature_fusion"] == "HMA_attn_ctc_to_mispro_ver2":
+        asr_brain_class = HMA_attn_ctc_to_mispro_ver2
+    elif hparams["feature_fusion"] == "HMA_attn_ctc_to_mispro_ver2_1":
+        # Change Transformer Decoder to MHA decoder
+        asr_brain_class = HMA_attn_ctc_to_mispro_ver2_1
+    elif hparams["feature_fusion"] == "HMA_attn_ctc_to_mispro_ver2_1_perceived":
+        # Change Transformer Decoder to MHA decoder, and use perceived phoneme embeddings
+        asr_brain_class = HMA_attn_ctc_to_mispro_ver2_1_perceived
+    elif hparams["feature_fusion"] == "HMA_attn_ctc_to_mispro_ver2_2":
+        # Change Transformer Decoder to MHA decoder, and use mispronunciation BCE loss
+        asr_brain_class = HMA_attn_ctc_to_mispro_ver2_2
+    elif hparams["feature_fusion"] == "TransformerMDD":
+        asr_brain_class = TransformerMDD
+    elif hparams["feature_fusion"] == "TransformerMDD_with_extra_loss":
+        asr_brain_class = TransformerMDD_with_extra_loss
+    elif hparams["feature_fusion"] == "TransformerMDD_dual_path":
+        asr_brain_class = TransformerMDD_dual_path
+    elif hparams["feature_fusion"] == "TransducerMDD":
+        asr_brain_class = TransducerMDD
+    elif hparams["feature_fusion"] == "TransformerMDDMHA":
+        asr_brain_class = TransformerMDDMHA
+    elif hparams["feature_fusion"] == "TransformerMDD_PhnForward":
+        asr_brain_class = TransformerMDD_PhnForward
+    elif hparams["feature_fusion"] == "TransducerMDDConformerEnc":
+        asr_brain_class = TransducerMDDConformerEnc
+    elif hparams["feature_fusion"] == "PGMDD":
+        from models.phn_mono_ssl_model import PGMDD
+        asr_brain_class = PGMDD
+    elif hparams["feature_fusion"] == "hybrid_ctc_attention":
+        asr_brain_class = Hybrid_CTC_Attention
+    elif hparams["feature_fusion"] == "hybrid_ctc_attention_ver2":
+        asr_brain_class = Hybrid_CTC_Attention_ver2
+    elif hparams["feature_fusion"] == "SB":
+        asr_brain_class = Hybrid_CTC_Attention_SB
+    elif hparams["feature_fusion"] == "dual_ssl_enc":
+        asr_brain_class = PhnDualSSLModel
+    elif hparams["feature_fusion"] == "dual_ssl_enc_with_simple_residual":
+        asr_brain_class = PhnDualSSLModel_with_SimpleResidual
+    elif hparams["feature_fusion"] == "dual_ssl_enc_hybrid_ctc_attention":
+        asr_brain_class = PhnDualSSLModel_Hybrid_CTC_Attention
+    
     logger.info(f"Using ASR brain class: {asr_brain_class.__name__}")
     
     asr_brain = asr_brain_class(
@@ -776,30 +836,37 @@ if __name__ == "__main__":
         checkpointer=hparams["checkpointer"],
     )
     asr_brain.label_encoder = label_encoder
-    # import pdb; pdb.set_trace()
+    
+    # 
     from pathlib import Path
-    # wandb init group by hparams perceived_ssl_model, canonical_ssl_model, feature_fusion
+    # Wandb init group by hparams perceived_ssl_model, canonical_ssl_model, feature_fusion
+    prefix = hparams.get("prefix", "Null")
     perceived_ssl_model = hparams.get("perceived_ssl_model", "Null")
     canonical_ssl_model = hparams.get("canonical_ssl_model", "Null")    
     feature_fusion = hparams.get("feature_fusion", "Null")
     prefix = hparams.get("prefix", None)
     model_type = type(asr_brain).__name__  # e.g., ASR_with_misproBCE_proj
     model_stem = Path(model_type).stem 
+    
     run_id = time.strftime("%Y%m%d-%H%M%S") 
-    run_name = f"{perceived_ssl_model}_{canonical_ssl_model}_{feature_fusion}_{model_stem}_{prefix}"
-    # if overrides.is given append its values to run_name
-    if isinstance(overrides, dict):
-        overrides = [f"{k}={v}" for k, v in overrides.items()]
-        run_name += "_" + "_".join(overrides)
+    # import hyperpyyaml
+    run_name = f"{prefix}_{perceived_ssl_model}_{canonical_ssl_model}_{feature_fusion}"
+    # if isinstance(overrides, dict):
+    #     overrides = [f"{k}={v.strip()}" for k, v in overrides.items()]
+    #     run_name += "_" + "_".join(overrides)
     run_id = f"{run_name}_{run_id}"
+    
     # wandb init group by hparams perceived_ssl_model, canonical_ssl_model, feature_fusion
+    
     wandb.init(
-        project=hparams.get("wandb_project", "mdd-Trans"), 
+        project=hparams.get("wandb_project", model_type), 
         name=run_name,
         id=run_id,
         resume="allow"
     )
+
     # Training/validation loop
+
     try:
         asr_brain.fit(
             asr_brain.hparams.epoch_counter,
@@ -812,12 +879,21 @@ if __name__ == "__main__":
         print("Training stopped early due to no improvement.")
     
     # Test
-    asr_brain.evaluate(
-        test_data,
-        test_loader_kwargs=hparams["test_dataloader_opts"],
-        # min_key="PER",
-        max_key="mpd_f1", 
-    )
+    if hparams.get("evaluate_key", True):
+        key = hparams["evaluate_key"]
+        if key == "mpd_f1" or key == "mpd_f1_seq":
+            asr_brain.evaluate(
+                test_data,
+                test_loader_kwargs=hparams["test_dataloader_opts"],
+                max_key=key
+        )
+        elif key == "PER" or key == "PER_seq":
+            
+            asr_brain.evaluate(
+                test_data,
+                test_loader_kwargs=hparams["test_dataloader_opts"],
+                min_key=key,
+            )
     
     # select 10 test data for debug
     # import pdb; pdb.set_trace()
@@ -825,4 +901,31 @@ if __name__ == "__main__":
     # records = test_data.data_ids[:10]
 
     # test_data_ = test_data.filtered_sorted(key_test={"id": lambda x: x in records},)
-# === Add placeholder gather_ctc_aligned_reps at top of file ===
+    # === Add placeholder gather_ctc_aligned_reps at top of file ===
+
+    # DEBUG MODE
+    # train_record = test_data.data_ids[:1024]  # Select first 128 for debugging
+    # valid_record = valid_data.data_ids[:128]  # Select first 32 for debugging
+    # test_record = test_data.data_ids[:32]  # Select first 32 for debugging
+    # train_data_ = train_data.filtered_sorted(key_test={"id": lambda x: x in train_record},)
+    # valid_data_ = valid_data.filtered_sorted(key_test={"id": lambda x: x in valid_record},)
+    # test_data_ = test_data.filtered_sorted(key_test={"id": lambda x: x in test_record},)
+    
+    # try:
+    #     asr_brain.fit(
+    #         asr_brain.hparams.epoch_counter,
+    #         train_data_,
+    #         valid_data_,
+    #         train_loader_kwargs=hparams["train_dataloader_opts"],
+    #         valid_loader_kwargs=hparams["valid_dataloader_opts"],
+    #     )
+    # except StopIteration:
+    #     print("Training stopped early due to no improvement.")
+    
+    # # Test
+    # asr_brain.evaluate(
+    #     test_data_,
+    #     test_loader_kwargs=hparams["test_dataloader_opts"],
+    #     # min_key="PER",
+    #     max_key="mpd_f1_seq",  # use max_key for mpd_f1
+    # )

@@ -23,14 +23,26 @@ import pdb
 
 from speechbrain.decoders import S2STransformerBeamSearcher, CTCScorer, ScorerBuilder
 from speechbrain.lobes.models.transformer.TransformerASR import TransformerASR
+from speechbrain.lobes.models.transformer.Transformer import get_lookahead_mask, TransformerDecoder, TransformerEncoder, TransformerDecoderLayer, TransformerEncoderLayer
 
+from speechbrain.decoders.utils import (
+    _update_mem,
+    inflate_tensor,
+    mask_by_condition,
+)
 
 import torch.nn as nn
 import torch.nn.functional as F
 
 from utils.layers.utils import make_pad_mask
 
-class Hybrid_CTC_Attention_SB(sb.Brain):
+# import torch
+
+# # 当前 GPU 显存使用
+# print("Allocated:", torch.cuda.memory_allocated() / 1024**2, "MB")
+# print("Cached:", torch.cuda.memory_reserved() / 1024**2, "MB")
+
+class TransformerMDD_PhnForward(sb.Brain):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # self.        super().__init__(*args, **kwargs)
@@ -48,74 +60,10 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
         self.best_mpd_f1_seq_list = []
         self.best_per_seq = float('inf')
         self.best_mpd_f1_seq = float('-inf')
-        
-        # self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        # if self.modules.perceived_ssl is not None:
-        #     self.modules.perceived_ssl.to(self.device)
-        # if self.modules.canonical_ssl is not None:
-        #     self.modules.canonical_ssl.to(self.device)
-        # if self.modules.TransASR is not None:
-        #     self.modules.TransASR.to(self.device)
-        # if self.modules.ctc_lin is not None:
-        #     self.modules.ctc_lin.to(self.device)
-        # if self.modules.d_out is not None:
-        #     self.modules.d_out.to(self.device)
-        # if self.modules.enc is not None:
-        #     self.modules.enc.to(self.device)
             
         self.best_valid_loss = float('inf')
         self.best_valid_loss_list = []  # List of (valid_loss, epoch, ckpt_name)label_encoder.add_label("<eos>")
-    
-        
-        # self.enc = self.modules.enc.to(self.device)
-        # self.guided_attn_loss = GuidedAttentionLoss(sigma=0.2)
-        
-        # self.TransASR = TransformerASR(
-        #     tgt_vocab=44,
-        #     input_size=768,
-        #     d_model=384,
-        #     nhead=8,
-        #     num_encoder_layers=1,
-        #     d_ffn=1024,
-        #     dropout=0.1,
-        #     max_length=1000,
-        #     output_hidden_states=True,
-        #     normalize_before=False,
-        #     activation=torch.nn.GELU,
-        # ).to(self.device)
-            
-        # self.ctc_lin = sb.nnet.linear.Linear(
-        #     input_shape=[None, None, 384],
-        #     n_neurons=42,
-        # ).to(self.device)
 
-        # self.d_out = sb.nnet.linear.Linear(
-        #     input_shape=[None, None, 384],
-        #     n_neurons=44, 
-        # ).to(self.device)
-
-        # self.ctc_scorer = CTCScorer(
-        #     ctc_fc=self.ctc_lin,
-        #     blank_index=0,
-        #     eos_index=43,
-        # )
-        
-        # self.scorer = ScorerBuilder(
-        #     full_scorers=[self.ctc_scorer],
-        #     weights={'ctc': 1}
-        # )
-        self.ARdecoder = sb.decoders.seq2seq.S2STransformerGreedySearcher(
-                modules=[self.modules.TransASR, self.modules.d_out],
-                bos_index=41,
-                eos_index=42,
-                min_decode_ratio=0.1,
-                max_decode_ratio=0.6,
-        )
-        
-        # self.valid_searcher 
-        
-                # scorer=self.scorer,
-                # beam_size=5,
     def evaluate_batch(self, batch, stage):
         """Computations needed for validation/test batches"""
         predictions = self.compute_forward(batch, stage=stage)
@@ -126,6 +74,7 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
         "Gets called when a stage (either training, va lidation, test) starts."
         self.ctc_metrics = self.hparams.ctc_stats()
         self.seq_metrics = self.hparams.seqlabel_stats()
+        self.mispro_metrics = self.hparams.mispro_stats()
         if hasattr(self.hparams, "augmentation"):
             self.modules.perceived_ssl.model.config.apply_spec_augment = True
 
@@ -135,10 +84,8 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
             self.mpd_metrics = MpdStats()
             self.mpd_metrics_seq = MpdStats()
 
-   
     def compute_forward(self, batch, stage):
         batch = batch.to(self.device)
-        
         wavs, wav_lens = batch.sig
         targets, target_lens = batch.phn_encoded_target
         targets_bos, target_lens_bos = batch.phn_encoded_target_bos
@@ -150,39 +97,59 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
         perceiveds, perceived_lens = batch.phn_encoded_perceived
         perceiveds_bos, perceived_lens_bos = batch.phn_encoded_perceived_bos
         perceiveds_eos, perceived_lens_eos = batch.phn_encoded_perceived_eos
-        # pdb.set_trace()
-        feats = self.modules.perceived_ssl(wavs)  # [B, T_s, ENC_DIM]
-        # Add Enc
-        # feats = self.modules.enc(feats)  # [B, T_s, D]
         
-        # enc_out, hidden, dec_out = self.modules.TransASR(
-        #     src=feats,
-        #     tgt=targets_bos,
-        #     wav_len=wav_lens,
-        #     pad_idx=0, 
-        # )
-        # # CTC head
-        # h_ctc_feat = self.modules.ctc_lin(enc_out)  # [B, T_s, C]
-        # p_ctc_logits = self.hparams.log_softmax(h_ctc_feat)  # Log probabilities
+        feats = self.modules.perceived_ssl(wavs)  # [B, T_s, ENC_DIM] or [N_layers, B, T_s, ENC_DIM]
+        if len(feats.shape) == 4:
+            feats = feats[self.hparams.preceived_ssl_emb_layer] # [B, T_s, ENC_DIM]
 
-        # # seq2seq head
-        # h_seq_feat = self.modules.d_out(dec_out)  # [B, T_p+1, C]
-        # p_seq_logits = self.hparams.log_softmax(h_seq_feat)  # Log probabilities
-        
-        # h_ctc_logits = self.modules.ctc_lin(feats)  # [B, T_s, C]
-        # p_ctc_feat = self.hparams.log_softmax(h_ctc_logits)  # Log probabilities
         current_epoch = self.hparams.epoch_counter.current
         hyps = None
         attn_map = None
+        # Phoneme embedding
+        
+        canonical_emb = self.modules.canonical_emb(canonicals_bos)  # [B, T_p+1, Phn_ENC_DIM]
+        # Transformer Encoder for canonical phoneme embedding
+        canonical_emb, _ = self.modules.canonical_phn_TransEnc(
+            src=canonical_emb, 
+            src_key_padding_mask=make_pad_mask(canonical_lens_bos*canonical_emb.shape[1], maxlen=canonical_emb.shape[1]).to(self.device),
+        )
+        # feat_pos_emb (might not needed if feats already has positional encoding)
+        feats_posemb = self.modules.acoustic_prefuse(feats)  # [B, T_s, ENC_DIM]
+        # Fuse Acoustic features and P_canonical, [B, Y_p+1, ENC_DIM]
+        canophn_fuse, _, _ = self.hparams.FUSE_net(tgt=canonical_emb, 
+                        memory =feats_posemb,
+                        tgt_key_padding_mask=make_pad_mask(canonical_lens_bos*canonical_emb.shape[1], maxlen=canonical_emb.shape[1]).to(self.device),
+                        memory_key_padding_mask=make_pad_mask(wav_lens * feats_posemb.shape[1], maxlen=feats_posemb.shape[1]).to(self.device),
+                        ) # [B, T_p+1, ENC_DIM] or [N_layers, B, T_p+1, ENC_DIM]
 
+        # mispro_head on canonical phoneme embedding
+        mispro_head = self.modules.d_out_mispro(canophn_fuse)  # [B, T_p+1, 1]
+        p_mispro_head = torch.nn.functional.sigmoid(mispro_head)  # [B, T_p+1, 1]
+        
+        # Alternative approach: Use phoneme prediction confidence for mispronunciation detection
+        # Get phoneme logits from the fused features
+        phn_logits = self.modules.d_out(canophn_fuse)  # [B, T_p+1, vocab_size]
+        phn_probs = torch.nn.functional.softmax(phn_logits, dim=-1)  # [B, T_p+1, vocab_size]
+        
+        # Extract confidence for canonical phonemes
+        batch_size, seq_len = canonicals_bos.shape[:2]
+        canonical_confidences = torch.gather(
+            phn_probs, dim=-1, 
+            index=canonicals_bos.unsqueeze(-1)
+        ).squeeze(-1)  # [B, T_p+1]
+        
+        # Low confidence → high mispronunciation probability
+        confidence_based_mispro = 1.0 - canonical_confidences  # [B, T_p+1]
+        
         if sb.Stage.TRAIN == stage:
+            # Phoneme Recognition Hybrid CTC/Attention training
             enc_out, hidden, dec_out = self.modules.TransASR(
                 src=feats,
                 tgt=targets_bos,
-                wav_len=wav_lens,
-                pad_idx=0, 
+                wav_len=canonical_lens_bos,
+                pad_idx=0,
             )
-            # CTC head
+            # CTC head 
             h_ctc_feat = self.modules.ctc_lin(enc_out)  # [B, T_s, C]
             p_ctc_logits = self.hparams.log_softmax(h_ctc_feat)  # Log probabilities
 
@@ -191,6 +158,7 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
             p_seq_logits = self.hparams.log_softmax(h_seq_feat)  # Log probabilities
 
         else:
+            # Same decode for valid loss
             with torch.no_grad():
                 enc_out, hidden, dec_out = self.modules.TransASR(
                     src=feats,
@@ -207,7 +175,7 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
                 
                 hyps = None
                 attn_map = None
-        
+            # Inferecing with Greedy AR decoder
             valid_search_interval = self.hparams.valid_search_interval
             if current_epoch % valid_search_interval == 0:
                 hyps, top_lengths, top_scores, top_log_probs = self.hparams.valid_search(enc_out.detach(), wav_lens)
@@ -221,11 +189,13 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
             "feats": feats,  # [B, T_s, D]
             "attn_map": attn_map,  # [B, T_p+1, T_s] or similar
             "hyps": hyps,  # [B, T_p+1] or None if not applicable
+            "p_mispro_head": p_mispro_head,  # [B, T_p+1, 1]
+            "confidence_based_mispro": confidence_based_mispro,  # [B, T_p+1]
+            "canonical_confidences": canonical_confidences,  # [B, T_p+1]
         }
         
     def compute_objectives(self, predictions, batch, stage):
         "Computes the loss for the model."
-        self.label_encoder.ignore_len
         current_epoch = self.hparams.epoch_counter.current
         valid_search_interval = self.hparams.valid_search_interval
         
@@ -234,6 +204,9 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
         feats = predictions["feats"]
         attn_map = predictions["attn_map"]
         hyps = predictions.get("hyps", [])  # [B, T_p+1] or None if not applicable
+        p_mispro_head = predictions["p_mispro_head"]  # [B, T_p+1, 1]
+        confidence_based_mispro = predictions["confidence_based_mispro"]  # [B, T_p+1]
+        canonical_confidences = predictions["canonical_confidences"]  # [B, T_p+1]
 
         wavs, wav_lens = batch.sig
         targets, target_lens = batch.phn_encoded_target
@@ -246,41 +219,64 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
         perceiveds, perceived_lens = batch.phn_encoded_perceived
         perceiveds_bos, perceived_lens_bos = batch.phn_encoded_perceived_bos
         perceiveds_eos, perceived_lens_eos = batch.phn_encoded_perceived_eos
-        ids = batch.id
         
+        # mispro_label, mispro_label_lens = batch.mispro_label  # [B, T_p+1, ENC_DIM]
+        mispro_label_eos, mispro_label_eos_lens = batch.mispro_label_eos  # [B, T_p+1, ENC_DIM]
+        mispro_label_bos, mispro_label_bos_lens = batch.mispro_label_bos  # [B, T_p+1, ENC_DIM]
+        
+        ids = batch.id
+    
         # Caculate the loss for CTC and seq2seq outputs
-        # loss_ctc = self.hparams.ctc_cost(p_ctc_feat, targets, wav_lens, target_lens)
+
         loss_ctc = self.hparams.ctc_cost(p_ctc_feat, targets, wav_lens, target_lens)
-        if stage == sb.Stage.TRAIN:
-            # # TODO: Better to Train CELoss without BOS / EOS
-            # pdb.set_trace()
-            # loss_dec_out = torch.tensor(0.0, device=self.device)
-
-            loss_dec_out = sb.nnet.losses.kldiv_loss(
-                p_dec_out,
-                targets_eos,
-                length=target_lens_eos,
-                label_smoothing=0.1,
-                reduction="batchmean",
-            )
-
-        else: 
-            # During inference, don't compute attention loss
-            # loss_dec_out = torch.tensor(0.0, device=self.device)
-            loss_dec_out = sb.nnet.losses.kldiv_loss(
-                p_dec_out,
-                targets_eos,
-                length=target_lens_eos,
-                label_smoothing=0.1,
-                reduction="batchmean",
-            )
-        # ---- Guided Attention Loss ----
-
-        loss = (
-            self.hparams.ctc_weight * loss_ctc
-            + (1 - self.hparams.ctc_weight) * loss_dec_out
+        loss_dec_out = self.hparams.seq_cost(p_dec_out, targets_eos, length=target_lens_eos)
+        
+        loss_mispro_head = self.hparams.mispro_cost(
+            inputs=p_mispro_head.squeeze(-1),  # Remove last dimension to get [B, T_p+1]
+            targets=mispro_label_bos.float(),  # Ensure float for BCE
+            length=canonical_lens_bos
         )
         
+        # Confidence-based mispronunciation loss (your innovative idea!)
+        loss_confidence_mispro = self.hparams.mispro_cost(
+            inputs=confidence_based_mispro,  # [B, T_p+1]
+            targets=mispro_label_bos.float(),  # Ensure float for BCE
+            length=canonical_lens_bos
+        )
+
+        # Debug information (only print occasionally to avoid flooding logs)
+        # if stage == sb.Stage.TRAIN:  # Print ~0.1% of batches
+        #     print(f"DEBUG - mispro_head shape: {p_mispro_head.shape}")
+        #     print(f"DEBUG - mispro_label_bos shape: {mispro_label_bos.shape}")
+        #     print(f"DEBUG - mispro_label_bos sample: {mispro_label_bos[0][:5]}")  # First 5 elements of first batch
+        #     print(f"DEBUG - mispro_head sample: {p_mispro_head[0][:5].squeeze(-1)}")
+        #     print(f"DEBUG - confidence_based_mispro sample: {confidence_based_mispro[0][:5]}")
+        #     print(f"DEBUG - canonical_confidences sample: {canonical_confidences[0][:5]}")
+        #     print(f"DEBUG - mispro loss (classifier): {loss_mispro_head.item()}")
+        #     print(f"DEBUG - mispro loss (confidence): {loss_confidence_mispro.item()}")
+        #     print(f"DEBUG - canonical_lens_bos: {canonical_lens_bos[0]}")
+        #     # Check if labels are balanced
+        #     pos_ratio = mispro_label_bos.float().mean().item()
+        #     print(f"DEBUG - Positive label ratio: {pos_ratio:.3f}")
+
+        #     # Compare the two approaches
+        #     conf_vs_true = torch.corrcoef(torch.stack([
+        #         confidence_based_mispro[0][:int(canonical_lens_bos[0]*len(mispro_label_bos[0]))],
+        #         mispro_label_bos[0][:int(canonical_lens_bos[0]*len(mispro_label_bos[0]))].float()
+        #     ]))[0,1]
+        #     print(f"DEBUG - Confidence-truth correlation: {conf_vs_true:.3f}")
+
+
+        # Combine both losses (you can experiment with different weights)
+        # loss = loss_mispro_head  # Original approach
+        # loss = 0.5 * loss_mispro_head + 0.5 * loss_confidence_mispro  # Combined approach
+        # loss = self.hparams.blend_alpha * loss_ctc + (1 - self.hparams.blend_alpha) * loss_dec_out
+        # loss = loss_mispro_head + self.hparams.blend_alpha * loss_ctc + (1 - self.hparams.blend_alpha) * loss_dec_out
+        loss = loss_confidence_mispro + self.hparams.blend_alpha * loss_ctc + (1 - self.hparams.blend_alpha) * loss_dec_out + loss_mispro_head * 0
+        # loss = loss_mispro_head
+        # loss = loss_confidence_mispro 
+        # loss = 0.5 * loss_mispro_head + 0.5 * loss_confidence_mispro  # Final combined loss
+
         if stage != sb.Stage.TRAIN:
             if current_epoch % valid_search_interval == 0 or (
                     stage == sb.Stage.TEST
@@ -291,14 +287,21 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
                     p_ctc_feat, wav_lens, blank_id=self.hparams.blank_index
                 )
                 sequence_decoder_out = hyps  # [B, T_p+1]
-                
-                # print(f"GT: \n {self.label_encoder.decode_ndim(targets[-1])}")
-                # print(f"CTC Greedy Decoding: \n {self.label_encoder.decode_ndim(sequence[-1])}")
-                # print(f"Attention Decoder Greedy Decoding: \n {self.label_encoder.decode_ndim(sequence_decoder_out[-1])}")
 
                 self.ctc_metrics.append(ids, p_ctc_feat, targets, wav_lens, target_lens)
                 self.seq_metrics.append(ids, log_probabilities=p_dec_out, targets=targets_eos, length=target_lens_eos)
-                
+                # self.mispro_metrics.append(
+                #     ids, 
+                #     p_mispro_head.squeeze(-1), 
+                #     mispro_label_bos.float(), 
+                #     canonical_lens_bos
+                # )
+                self.mispro_metrics.append(
+                    ids, 
+                    confidence_based_mispro.squeeze(-1), 
+                    mispro_label_bos.float(), 
+                    canonical_lens_bos
+                )
                 # self.ctc_metrics_fuse.append(ids, sequence_decoder_out, targets, wav_lens, target_lens)
                 
                 # CTC-only results
@@ -361,6 +364,10 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
                     wandb.log({"loss_dec_out": loss_dec_out.item()}, step=self.hparams.epoch_counter.current)
                 if loss_ctc is not None:
                     wandb.log({"loss_ctc_head": loss_ctc.item()}, step=self.hparams.epoch_counter.current)
+                if loss_mispro_head is not None:
+                    wandb.log({"loss_mispro_head": loss_mispro_head.item()}, step=self.hparams.epoch_counter.current)
+                if loss_confidence_mispro is not None:
+                    wandb.log({"loss_confidence_mispro": loss_confidence_mispro.item()}, step=self.hparams.epoch_counter.current)
             except Exception:
                 pass
         return loss
@@ -388,8 +395,8 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
         if self.checkpointer is not None:
             # TODO: support recover best on PER or mpd_f1 or averaged model of best PER and mpd_f1
             self.checkpointer.recover_if_possible(
-                # min_key="PER",
-                max_key="mpd_f1",
+                min_key="PER",
+                # max_key="mpd_f1",
             )
 
     def on_stage_end(self, stage, stage_loss, epoch):
@@ -415,6 +422,8 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
                 valid_stats = {
                     "loss": stage_loss,
                     "ctc_loss": self.ctc_metrics.summarize("average"),
+                    "seq_loss": self.seq_metrics.summarize("average"),
+                    "mispro_loss": self.mispro_metrics.summarize("average"),
                     "PER": per,
                     "mpd_f1": mpd_f1,
                     "PER_seq": per_seq,
@@ -426,6 +435,7 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
                         "epoch": epoch,
                         "lr_adam": self.adam_optimizer.param_groups[0]["lr"],
                         "lr_pretrained": self.pretrained_opt_class.param_groups[0]["lr"],
+                        "lr_mispro": self.mispro_opt_class.param_groups[0]["lr"],
                     },
                     train_stats={"loss": self.train_loss},
                     valid_stats=valid_stats,
@@ -447,7 +457,7 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
                         self.checkpointer.save_and_keep_only(
                             meta=meta,
                             name=ckpt_name,
-                            num_to_keep=5,
+                            num_to_keep=self.hparams.max_save_models*4,
                             **{key_type: [meta_key]}
                         )
                         
@@ -460,19 +470,19 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
                 # Save models for each metric
                 self.best_per, per_improved = save_best_model(
                     "per", per, self.best_per, self.best_per_list, 
-                    "best_per_joint", "best_PER", "min_keys", False)
+                    "best_per", "best_PER", "min_keys", False)
                 
                 self.best_mpd_f1, mpd_improved = save_best_model(
                     "mpd_f1", mpd_f1, self.best_mpd_f1, self.best_mpd_f1_list,
-                    "best_mpdf1_joint", "best_mpd_f1", "max_keys", True)
+                    "best_mpdf1", "best_mpd_f1", "max_keys", True)
                 
                 self.best_per_seq, per_seq_improved = save_best_model(
                     "per_seq", per_seq, self.best_per_seq, self.best_per_seq_list,
-                    "best_per_seq_joint", "best_PER_seq", "min_keys", False)
+                    "best_per_seq", "best_PER_seq", "min_keys", False)
                 
                 self.best_mpd_f1_seq, mpd_seq_improved = save_best_model(
                     "mpd_f1_seq", mpd_f1_seq, self.best_mpd_f1_seq, self.best_mpd_f1_seq_list,
-                    "best_mpd_f1_seq_joint", "best_mpd_f1_seq", "max_keys", True)
+                    "best_mpd_f1_seq", "best_mpd_f1_seq", "max_keys", True)
                 
                 improved = per_improved or mpd_improved or per_seq_improved or mpd_seq_improved
 
@@ -497,6 +507,8 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
                     "train_loss": self.train_loss,
                     "valid_loss": stage_loss,
                     "ctc_loss": self.ctc_metrics.summarize("average"),
+                    "seq_loss": self.seq_metrics.summarize("average"),
+                    "mispro_loss": self.mispro_metrics.summarize("average"),
                     "PER": per,
                     "mpd_f1": mpd_f1,
                     "PER_seq": per_seq,
@@ -515,7 +527,9 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
             mpd_f1_seq = self.mpd_metrics_seq.summarize("mpd_f1")
             self.hparams.train_logger.log_stats(
                 stats_meta={"Epoch loaded": self.hparams.epoch_counter.current},
-                test_stats={"loss": stage_loss, "PER": per, "mpd_f1": mpd_f1},
+                test_stats={"loss": stage_loss, "PER": per, "mpd_f1": mpd_f1, 
+                            "PER_seq": per_seq, "mpd_f1_seq": mpd_f1_seq},
+
             )
             # 
             with open(self.hparams.per_file, "w") as w:
@@ -523,6 +537,9 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
                 self.ctc_metrics.write_stats(w)
                 w.write("\nPER stats:\n")
                 self.per_metrics.write_stats(w)
+                # write pure hypotheses at the end of the file 
+                # id1 <hyps>
+                # id2 <hyps>
                 print(
                     "CTC and PER stats written to file",
                     self.hparams.per_file,
@@ -534,24 +551,64 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
                     "MPD results and stats written to file",
                     self.hparams.mpd_file,
                 )
+                
+            records = [x for x in self.mpd_metrics.scores]
+            with open(self.hparams.output_folder + "/hyp", "w") as m:
+                m.write("Hyp tokens:\n")
+                for recs in records:
+                    idx = recs['key']
+                    ref = " ".join(recs['hypothesis'])
+                    m.write(f"{idx} {ref}\n")
+                print(
+                    "Hypothesis tokens written to file",
+                    self.hparams.output_folder + "/hyp",
+                )
+
+            # pdb.set_trace()
             # if not files for joint decoding, create files
-            if hasattr(self, 'per_metrics_seq_file'):
-                with open(self.per_metrics_seq_file, "w") as w:
-                    w.write("Joint CTC-Attention PER stats:\n")
-                    self.per_metrics_seq.write_stats(w)
-                    print(
-                        "Joint CTC-Attention PER stats written to file",
-                        self.per_metrics_seq,
-                    )
-            if hasattr(self, 'mpd_metrics_seq'):
-                self.mpd_metrics_seq = self.hparams.mpd_file.replace(".txt", "_joint.txt")
-                with open(self.mpd_metrics_seq, "w") as m:
-                    m.write("Joint CTC-Attention MPD results and stats:\n")
-                    self.mpd_metrics_seq.write_stats(m)
-                    print(
-                        "Joint CTC-Attention MPD results and stats written to file",
-                        self.mpd_metrics_seq,
-                    )
+            if not hasattr(self.hparams, 'per_seq_file'):
+                self.hparams.per_seq_file = self.hparams.per_file.replace(".txt", "_seq.txt")
+            with open(self.hparams.per_seq_file, "w") as w:
+                w.write("Joint CTC-Attention PER stats:\n")
+                self.seq_metrics.write_stats(w)
+                self.per_metrics_seq.write_stats(w)
+                print(
+                    "Joint CTC-Attention PER stats written to file",
+                    self.hparams.per_seq_file,
+                )
+            if not hasattr(self.hparams, 'mpd_seq_file'):
+                self.hparams.mpd_seq_file = self.hparams.mpd_file.replace(".txt", "_seq.txt")
+            with open(self.hparams.mpd_seq_file, "w") as m:
+                m.write("Joint CTC-Attention MPD results and stats:\n")
+                self.mpd_metrics_seq.write_stats(m)
+                print(
+                    "Joint CTC-Attention MPD results and stats written to file",
+                    self.hparams.mpd_seq_file,
+                )
+                records = [x for x in self.mpd_metrics_seq.scores]
+            with open(self.hparams.output_folder + "/ref", "w") as m:
+                for recs in records:
+                    idx = recs['key']
+                    ref = " ".join(recs['canonical'])
+                    m.write(f"{idx} {ref}\n")
+                print(
+                    "Canonical tokens written to file",
+                    self.hparams.output_folder + "/ref",
+                )
+            with open(self.hparams.output_folder + "/human_seq", "w") as m:
+                for recs in records:
+                    idx = recs['key'] 
+                    ref = " ".join(recs['perceived'])
+                    m.write(f"{idx} {ref}\n")
+                print(
+                    "Perceived tokens written to file",
+                    self.hparams.output_folder + "/human_seq",
+                )
+            with open(self.hparams.output_folder + "/hyp_joint", "w") as m:
+                for recs in records:
+                    idx = recs['key']
+                    ref = " ".join(recs['hypothesis'])
+                    m.write(f"{idx} {ref}\n")
 
     def init_optimizers(self):
 
@@ -561,13 +618,24 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
         self.pretrained_opt_class = self.hparams.pretrained_opt_class(
             self.modules.perceived_ssl.parameters(), 
         )
+        self.mispro_opt_class = self.hparams.mispro_opt_class(
+            self.hparams.model_mispro.parameters(),
+        )
         if self.checkpointer is not None:
             # if self.hparams.perceived_ssl is not None and not self.hparams.perceived_ssl.freeze:
             self.checkpointer.add_recoverable("adam_opt", self.adam_optimizer)
             self.checkpointer.add_recoverable("pretrained_opt", self.pretrained_opt_class)
+            self.checkpointer.add_recoverable("mispro_opt", self.mispro_opt_class)
             
     def on_evaluate_start(self, max_key=None, min_key=None):
         return super().on_evaluate_start(max_key, min_key)
+
+    def on_fit_batch_end(self, batch, outputs, loss, should_step):
+        """At the end of the optimizer step, apply noam annealing."""
+        if should_step:
+            self.hparams.noam_annealing(self.adam_optimizer)
+            # Also apply learning rate annealing to mispro optimizer
+            self.hparams.noam_annealing(self.mispro_opt_class)
 
     def fit_batch(self, batch):
         """Fit one batch, override to do multiple updates.
@@ -600,7 +668,7 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
             # Use automatic mixed precision training
             self.adam_optimizer.zero_grad()
             self.pretrained_opt_class.zero_grad()
-
+            self.mispro_opt_class.zero_grad()
             with torch.amp.autocast("cuda"):
                 outputs = self.compute_forward(batch, sb.Stage.TRAIN)
                 loss = self.compute_objectives(outputs, batch, sb.Stage.TRAIN)
@@ -608,10 +676,12 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
             self.scaler.scale(loss / self.hparams.gradient_accumulation).backward()
             self.scaler.unscale_(self.adam_optimizer)
             self.scaler.unscale_(self.pretrained_opt_class)
+            self.scaler.unscale_(self.mispro_opt_class)
             
             if check_gradients(loss):
                 self.scaler.step(self.pretrained_opt_class)
                 self.scaler.step(self.adam_optimizer)
+                self.scaler.step(self.mispro_opt_class)
                 
             self.scaler.update()
 
@@ -629,8 +699,11 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
                 if check_gradients(loss):
                     self.pretrained_opt_class.step()
                     self.adam_optimizer.step()
+                    self.mispro_opt_class.step()
 
                 self.pretrained_opt_class.zero_grad()
-                self.adam_optimizer.zero_grad()    
+                self.adam_optimizer.zero_grad()
+                self.mispro_opt_class.zero_grad()
 
         return loss.detach().cpu()
+
