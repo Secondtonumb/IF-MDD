@@ -16,8 +16,6 @@ from torch.nn.functional import kl_div
 from speechbrain.nnet.loss.guidedattn_loss import GuidedAttentionLoss
 import re
 
-from losses.BCE_Loss import BCELoss
-
 # Placeholder: gather CTC-aligned representations for each token
 def gather_ctc_aligned_reps(encoded, targets, target_lens):
     # Placeholder: ideally, implement alignment logic here
@@ -48,10 +46,6 @@ class PhnMonoSSLModel(sb.Brain):
             self.modules.perceived_ssl.to(self.device)
         if self.modules.canonical_ssl is not None:
             self.modules.canonical_ssl.to(self.device)
-        if self.modules.enc is not None:
-            self.modules.enc.to(self.device)
-        if self.modules.ctc_lin is not None:
-            self.modules.ctc_lin.to(self.device)
             
         self.best_valid_loss = float('inf')
         self.best_valid_loss_list = []  # List of (valid_loss, epoch, ckpt_name)

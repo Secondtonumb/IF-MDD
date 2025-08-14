@@ -6,7 +6,7 @@ import torch.nn
 import speechbrain as sb
 from hyperpyyaml import load_hyperpyyaml
 # from mpd_eval_v3 import MpdStats
-from mpd_eval_v4 import MpdStats  # Updated import for mpd_eval_v4
+from mpd_eval_v4 import MpdStats
 
 
 import wandb
@@ -23,14 +23,113 @@ import pdb
 
 from speechbrain.decoders import S2STransformerBeamSearcher, CTCScorer, ScorerBuilder
 from speechbrain.lobes.models.transformer.TransformerASR import TransformerASR
+from speechbrain.lobes.models.transformer.Transformer import get_lookahead_mask
 
+from speechbrain.decoders.utils import (
+    _update_mem,
+    inflate_tensor,
+    mask_by_condition,
+)
 
 import torch.nn as nn
 import torch.nn.functional as F
 
 from utils.layers.utils import make_pad_mask
 
-class Hybrid_CTC_Attention_SB(sb.Brain):
+# import torch
+
+# # 当前 GPU 显存使用
+# print("Allocated:", torch.cuda.memory_allocated() / 1024**2, "MB")
+# print("Cached:", torch.cuda.memory_reserved() / 1024**2, "MB")
+class MyTransformerDecoderLayer(nn.TransformerDecoderLayer):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def forward(self, tgt, memory,
+                tgt_mask=None,
+                memory_mask=None,
+                tgt_key_padding_mask=None,
+                memory_key_padding_mask=None,
+                return_attention=False,
+                **kwargs):
+        
+        # Self-attention
+        tgt2, self_attn_weights = self.self_attn(
+            tgt, tgt, tgt,
+            attn_mask=tgt_mask,
+            key_padding_mask=tgt_key_padding_mask,
+            need_weights=True,
+            average_attn_weights=False
+        )
+        tgt = tgt + self.dropout1(tgt2)
+        tgt = self.norm1(tgt)
+
+        # Cross-attention
+        tgt2, cross_attn_weights = self.multihead_attn(
+            tgt, memory, memory,
+            attn_mask=memory_mask,
+            key_padding_mask=memory_key_padding_mask,
+            need_weights=True,
+            average_attn_weights=False
+        )
+        tgt = tgt + self.dropout2(tgt2)
+        tgt = self.norm2(tgt)
+
+        # FFN
+        tgt2 = self.linear2(self.dropout(self.activation(self.linear1(tgt))))
+        tgt = tgt + self.dropout3(tgt2)
+        tgt = self.norm3(tgt)
+
+        if return_attention:
+            return tgt, self_attn_weights, cross_attn_weights
+        else:
+            return tgt
+
+class MyTransformerDecoder(nn.Module):
+    """Custom TransformerDecoder that can return attention weights from the last layer"""
+    def __init__(self, decoder_layer, num_layers, norm=None):
+        super().__init__()
+        # Store the first layer, and create copies for the rest
+        self.layers = nn.ModuleList([decoder_layer])
+        for _ in range(num_layers - 1):
+            new_layer = MyTransformerDecoderLayer(
+                d_model=decoder_layer.self_attn.embed_dim,
+                nhead=decoder_layer.self_attn.num_heads,
+                dim_feedforward=decoder_layer.linear1.out_features,
+                dropout=decoder_layer.dropout.p if hasattr(decoder_layer.dropout, 'p') else 0.1
+            )
+            self.layers.append(new_layer)
+        self.num_layers = num_layers
+        self.norm = norm
+
+    def forward(self, tgt, memory, tgt_mask=None, memory_mask=None,
+                tgt_key_padding_mask=None, memory_key_padding_mask=None):
+        output = tgt
+        self_attn_weights = None
+        cross_attn_weights = None
+
+        for i, mod in enumerate(self.layers):
+            if i == len(self.layers) - 1:  # Last layer
+                output, self_attn_weights, cross_attn_weights = mod(
+                    output, memory, tgt_mask=tgt_mask, memory_mask=memory_mask,
+                    tgt_key_padding_mask=tgt_key_padding_mask,
+                    memory_key_padding_mask=memory_key_padding_mask,
+                    return_attention=True
+                )
+            else:
+                output = mod(
+                    output, memory, tgt_mask=tgt_mask, memory_mask=memory_mask,
+                    tgt_key_padding_mask=tgt_key_padding_mask,
+                    memory_key_padding_mask=memory_key_padding_mask,
+                    return_attention=False
+                )
+
+        if self.norm is not None:
+            output = self.norm(output)
+
+        return output, self_attn_weights, cross_attn_weights
+
+class TransformerMDDMHA(sb.Brain):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # self.        super().__init__(*args, **kwargs)
@@ -38,7 +137,8 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
         
         self.no_improve_epochs = 0
         self.last_improved_epoch = 0
-        
+        # TODO: make this a hyperparameter
+        # self.check_pointer.find_checkpoint(min_key="PER", max_key="mpd_f1")
         self.best_per_list = []  # List of (PER, epoch, ckpt_name)
         self.best_mpd_f1_list = []  # List of (mpd_f1, epoch, ckpt_name)
         self.best_per = float('inf')
@@ -48,74 +148,10 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
         self.best_mpd_f1_seq_list = []
         self.best_per_seq = float('inf')
         self.best_mpd_f1_seq = float('-inf')
-        
-        # self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        # if self.modules.perceived_ssl is not None:
-        #     self.modules.perceived_ssl.to(self.device)
-        # if self.modules.canonical_ssl is not None:
-        #     self.modules.canonical_ssl.to(self.device)
-        # if self.modules.TransASR is not None:
-        #     self.modules.TransASR.to(self.device)
-        # if self.modules.ctc_lin is not None:
-        #     self.modules.ctc_lin.to(self.device)
-        # if self.modules.d_out is not None:
-        #     self.modules.d_out.to(self.device)
-        # if self.modules.enc is not None:
-        #     self.modules.enc.to(self.device)
             
         self.best_valid_loss = float('inf')
         self.best_valid_loss_list = []  # List of (valid_loss, epoch, ckpt_name)label_encoder.add_label("<eos>")
     
-        
-        # self.enc = self.modules.enc.to(self.device)
-        # self.guided_attn_loss = GuidedAttentionLoss(sigma=0.2)
-        
-        # self.TransASR = TransformerASR(
-        #     tgt_vocab=44,
-        #     input_size=768,
-        #     d_model=384,
-        #     nhead=8,
-        #     num_encoder_layers=1,
-        #     d_ffn=1024,
-        #     dropout=0.1,
-        #     max_length=1000,
-        #     output_hidden_states=True,
-        #     normalize_before=False,
-        #     activation=torch.nn.GELU,
-        # ).to(self.device)
-            
-        # self.ctc_lin = sb.nnet.linear.Linear(
-        #     input_shape=[None, None, 384],
-        #     n_neurons=42,
-        # ).to(self.device)
-
-        # self.d_out = sb.nnet.linear.Linear(
-        #     input_shape=[None, None, 384],
-        #     n_neurons=44, 
-        # ).to(self.device)
-
-        # self.ctc_scorer = CTCScorer(
-        #     ctc_fc=self.ctc_lin,
-        #     blank_index=0,
-        #     eos_index=43,
-        # )
-        
-        # self.scorer = ScorerBuilder(
-        #     full_scorers=[self.ctc_scorer],
-        #     weights={'ctc': 1}
-        # )
-        self.ARdecoder = sb.decoders.seq2seq.S2STransformerGreedySearcher(
-                modules=[self.modules.TransASR, self.modules.d_out],
-                bos_index=41,
-                eos_index=42,
-                min_decode_ratio=0.1,
-                max_decode_ratio=0.6,
-        )
-        
-        # self.valid_searcher 
-        
-                # scorer=self.scorer,
-                # beam_size=5,
     def evaluate_batch(self, batch, stage):
         """Computations needed for validation/test batches"""
         predictions = self.compute_forward(batch, stage=stage)
@@ -135,10 +171,8 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
             self.mpd_metrics = MpdStats()
             self.mpd_metrics_seq = MpdStats()
 
-   
     def compute_forward(self, batch, stage):
         batch = batch.to(self.device)
-        
         wavs, wav_lens = batch.sig
         targets, target_lens = batch.phn_encoded_target
         targets_bos, target_lens_bos = batch.phn_encoded_target_bos
@@ -150,31 +184,31 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
         perceiveds, perceived_lens = batch.phn_encoded_perceived
         perceiveds_bos, perceived_lens_bos = batch.phn_encoded_perceived_bos
         perceiveds_eos, perceived_lens_eos = batch.phn_encoded_perceived_eos
-        # pdb.set_trace()
-        feats = self.modules.perceived_ssl(wavs)  # [B, T_s, ENC_DIM]
-        # Add Enc
-        # feats = self.modules.enc(feats)  # [B, T_s, D]
         
-        # enc_out, hidden, dec_out = self.modules.TransASR(
-        #     src=feats,
-        #     tgt=targets_bos,
-        #     wav_len=wav_lens,
-        #     pad_idx=0, 
-        # )
-        # # CTC head
-        # h_ctc_feat = self.modules.ctc_lin(enc_out)  # [B, T_s, C]
-        # p_ctc_logits = self.hparams.log_softmax(h_ctc_feat)  # Log probabilities
+        feats = self.modules.perceived_ssl(wavs)  # [B, T_s, ENC_DIM] or [N_layers, B, T_s, ENC_DIM]
+        if len(feats.shape) == 4:
+            feats = feats[self.hparams.preceived_ssl_emb_layer] # [B, T_s, ENC_DIM]
 
-        # # seq2seq head
-        # h_seq_feat = self.modules.d_out(dec_out)  # [B, T_p+1, C]
-        # p_seq_logits = self.hparams.log_softmax(h_seq_feat)  # Log probabilities
-        
-        # h_ctc_logits = self.modules.ctc_lin(feats)  # [B, T_s, C]
-        # p_ctc_feat = self.hparams.log_softmax(h_ctc_logits)  # Log probabilities
         current_epoch = self.hparams.epoch_counter.current
         hyps = None
         attn_map = None
-
+        # Phoneme embedding
+        canonical_emb = self.modules.canonical_emb(canonicals_bos)  # [B, T_p+1, Phn_ENC_DIM]
+        # Transformer Encoder for canonical phoneme embedding
+        canonical_emb, _ = self.modules.canonical_phn_TransEnc(
+            src=canonical_emb, 
+            src_key_padding_mask=make_pad_mask(canonical_lens_bos*canonical_emb.shape[1], maxlen=canonical_emb.shape[1]).to(self.device),
+        )
+        # Fuse canonical and acoustic embeddings, should be a diagnoal 
+        # pdb.set_trace()
+        canophn_fuse, _, _ = self.hparams.FUSE_net(tgt=feats, 
+                              memory =canonical_emb,
+                              tgt_key_padding_mask=make_pad_mask(target_lens_bos * feats.shape[1], maxlen=feats.shape[1]).to(self.device),
+                              memory_key_padding_mask=make_pad_mask(canonical_lens_bos*canonical_emb.shape[1], maxlen=canonical_emb.shape[1]).to(self.device)
+                              )
+        
+        # feats = torch.cat((feats, self.hparams.canonical_emb), dim=-1)  # [B, T_s + T_p+1, ENC_DIM + Phn_ENC_DIM]
+        feats = torch.cat((canophn_fuse, feats), dim=-1)  # [B, T_s + T_p+1, ENC_DIM + Phn_ENC_DIM]
         if sb.Stage.TRAIN == stage:
             enc_out, hidden, dec_out = self.modules.TransASR(
                 src=feats,
@@ -225,7 +259,6 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
         
     def compute_objectives(self, predictions, batch, stage):
         "Computes the loss for the model."
-        self.label_encoder.ignore_len
         current_epoch = self.hparams.epoch_counter.current
         valid_search_interval = self.hparams.valid_search_interval
         
@@ -247,34 +280,12 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
         perceiveds_bos, perceived_lens_bos = batch.phn_encoded_perceived_bos
         perceiveds_eos, perceived_lens_eos = batch.phn_encoded_perceived_eos
         ids = batch.id
-        
+    
         # Caculate the loss for CTC and seq2seq outputs
-        # loss_ctc = self.hparams.ctc_cost(p_ctc_feat, targets, wav_lens, target_lens)
+
         loss_ctc = self.hparams.ctc_cost(p_ctc_feat, targets, wav_lens, target_lens)
-        if stage == sb.Stage.TRAIN:
-            # # TODO: Better to Train CELoss without BOS / EOS
-            # pdb.set_trace()
-            # loss_dec_out = torch.tensor(0.0, device=self.device)
+        loss_dec_out = self.hparams.seq_cost(p_dec_out, targets_eos, length=target_lens_eos)
 
-            loss_dec_out = sb.nnet.losses.kldiv_loss(
-                p_dec_out,
-                targets_eos,
-                length=target_lens_eos,
-                label_smoothing=0.1,
-                reduction="batchmean",
-            )
-
-        else: 
-            # During inference, don't compute attention loss
-            # loss_dec_out = torch.tensor(0.0, device=self.device)
-            loss_dec_out = sb.nnet.losses.kldiv_loss(
-                p_dec_out,
-                targets_eos,
-                length=target_lens_eos,
-                label_smoothing=0.1,
-                reduction="batchmean",
-            )
-        # ---- Guided Attention Loss ----
 
         loss = (
             self.hparams.ctc_weight * loss_ctc
@@ -291,10 +302,6 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
                     p_ctc_feat, wav_lens, blank_id=self.hparams.blank_index
                 )
                 sequence_decoder_out = hyps  # [B, T_p+1]
-                
-                # print(f"GT: \n {self.label_encoder.decode_ndim(targets[-1])}")
-                # print(f"CTC Greedy Decoding: \n {self.label_encoder.decode_ndim(sequence[-1])}")
-                # print(f"Attention Decoder Greedy Decoding: \n {self.label_encoder.decode_ndim(sequence_decoder_out[-1])}")
 
                 self.ctc_metrics.append(ids, p_ctc_feat, targets, wav_lens, target_lens)
                 self.seq_metrics.append(ids, log_probabilities=p_dec_out, targets=targets_eos, length=target_lens_eos)
@@ -386,7 +393,17 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
         ## NOTE: make sure to use the "best" model to continual training
         ## so we set the `min_key` argument
         if self.checkpointer is not None:
-            # TODO: support recover best on PER or mpd_f1 or averaged model of best PER and mpd_f1
+            # # TODO: support recover best on PER or mpd_f1 or averaged model of best PER and mpd_f1
+            # if self.hparams.resume_key:
+            #     if self.hparams.resume_key == "PER" or self.hparams.resume_key == "PER_seq":
+            #         self.checkpointer.load_checkpoint(
+            #             min_key=self.hparams.resume_key,
+            #         )
+            #     if self.hparams.resume_key == "mpd_f1" or self.hparams.resume_key == "mpd_f1_seq":
+            #         self.checkpointer.load_checkpoint(
+            #             max_key=self.hparams.resume_key,
+            #         )
+            # else:
             self.checkpointer.recover_if_possible(
                 # min_key="PER",
                 max_key="mpd_f1",
@@ -415,6 +432,7 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
                 valid_stats = {
                     "loss": stage_loss,
                     "ctc_loss": self.ctc_metrics.summarize("average"),
+                    "seq_loss": self.seq_metrics.summarize("average"),
                     "PER": per,
                     "mpd_f1": mpd_f1,
                     "PER_seq": per_seq,
@@ -441,8 +459,7 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
                         meta = {"epoch": epoch, metric_name: current_value, meta_key: current_value}
                         if metric_name.endswith("_seq"):
                             meta.update({"PER_seq": per_seq, "mpd_f1_seq": mpd_f1_seq})
-                        else:
-                            meta.update({"PER": per, "mpd_f1": mpd_f1})
+                        meta.update({"PER": per, "mpd_f1": mpd_f1})
                         
                         self.checkpointer.save_and_keep_only(
                             meta=meta,
@@ -460,20 +477,20 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
                 # Save models for each metric
                 self.best_per, per_improved = save_best_model(
                     "per", per, self.best_per, self.best_per_list, 
-                    "best_per_joint", "best_PER", "min_keys", False)
+                    "best_per", "best_PER", "min_keys", False)
                 
                 self.best_mpd_f1, mpd_improved = save_best_model(
                     "mpd_f1", mpd_f1, self.best_mpd_f1, self.best_mpd_f1_list,
-                    "best_mpdf1_joint", "best_mpd_f1", "max_keys", True)
-                
+                    "best_mpd_f1", "best_mpd_f1", "max_keys", True)
+
                 self.best_per_seq, per_seq_improved = save_best_model(
                     "per_seq", per_seq, self.best_per_seq, self.best_per_seq_list,
-                    "best_per_seq_joint", "best_PER_seq", "min_keys", False)
-                
+                    "best_per_seq", "best_PER_seq", "min_keys", False)
+
                 self.best_mpd_f1_seq, mpd_seq_improved = save_best_model(
                     "mpd_f1_seq", mpd_f1_seq, self.best_mpd_f1_seq, self.best_mpd_f1_seq_list,
-                    "best_mpd_f1_seq_joint", "best_mpd_f1_seq", "max_keys", True)
-                
+                    "best_mpd_f1_seq", "best_mpd_f1_seq", "max_keys", True)
+
                 improved = per_improved or mpd_improved or per_seq_improved or mpd_seq_improved
 
                 # Early stopping logic: only track best valid loss, do not save checkpoint for valid loss
@@ -515,7 +532,8 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
             mpd_f1_seq = self.mpd_metrics_seq.summarize("mpd_f1")
             self.hparams.train_logger.log_stats(
                 stats_meta={"Epoch loaded": self.hparams.epoch_counter.current},
-                test_stats={"loss": stage_loss, "PER": per, "mpd_f1": mpd_f1},
+                test_stats={"loss": stage_loss, "PER": per, "mpd_f1": mpd_f1, 
+                            "PER_seq": per_seq, "mpd_f1_seq": mpd_f1_seq},
             )
             # 
             with open(self.hparams.per_file, "w") as w:
@@ -534,25 +552,28 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
                     "MPD results and stats written to file",
                     self.hparams.mpd_file,
                 )
+            # pdb.set_trace()
             # if not files for joint decoding, create files
-            if hasattr(self, 'per_metrics_seq_file'):
-                with open(self.per_metrics_seq_file, "w") as w:
-                    w.write("Joint CTC-Attention PER stats:\n")
-                    self.per_metrics_seq.write_stats(w)
-                    print(
-                        "Joint CTC-Attention PER stats written to file",
-                        self.per_metrics_seq,
-                    )
-            if hasattr(self, 'mpd_metrics_seq'):
-                self.mpd_metrics_seq = self.hparams.mpd_file.replace(".txt", "_joint.txt")
-                with open(self.mpd_metrics_seq, "w") as m:
-                    m.write("Joint CTC-Attention MPD results and stats:\n")
-                    self.mpd_metrics_seq.write_stats(m)
-                    print(
-                        "Joint CTC-Attention MPD results and stats written to file",
-                        self.mpd_metrics_seq,
-                    )
-
+            if not hasattr(self.hparams, 'per_seq_file'):
+                self.hparams.per_seq_file = self.hparams.per_file.replace(".txt", "_seq.txt")
+            with open(self.hparams.per_seq_file, "w") as w:
+                w.write("Joint CTC-Attention PER stats:\n")
+                self.seq_metrics.write_stats(w)
+                self.per_metrics_seq.write_stats(w)
+                print(
+                    "Joint CTC-Attention PER stats written to file",
+                    self.hparams.per_seq_file,
+                )
+            if not hasattr(self.hparams, 'mpd_seq_file'):
+                self.hparams.mpd_seq_file = self.hparams.mpd_file.replace(".txt", "_seq.txt")
+            with open(self.hparams.mpd_seq_file, "w") as m:
+                m.write("Joint CTC-Attention MPD results and stats:\n")
+                self.mpd_metrics_seq.write_stats(m)
+                print(
+                    "Joint CTC-Attention MPD results and stats written to file",
+                    self.hparams.mpd_seq_file,
+                )
+            
     def init_optimizers(self):
 
         self.adam_optimizer = self.hparams.adam_opt_class(
@@ -568,6 +589,11 @@ class Hybrid_CTC_Attention_SB(sb.Brain):
             
     def on_evaluate_start(self, max_key=None, min_key=None):
         return super().on_evaluate_start(max_key, min_key)
+
+    def on_fit_batch_end(self, batch, outputs, loss, should_step):
+        """At the end of the optimizer step, apply noam annealing."""
+        if should_step:
+            self.hparams.noam_annealing(self.adam_optimizer)
 
     def fit_batch(self, batch):
         """Fit one batch, override to do multiple updates.

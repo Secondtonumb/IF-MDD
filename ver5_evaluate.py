@@ -18,7 +18,8 @@ import torch
 import logging
 import speechbrain as sb
 from hyperpyyaml import load_hyperpyyaml
-from mpd_eval_v3 import MpdStats
+# from mpd_eval_v3 import MpdStats
+from mpd_eval_v4 import MpdStats
 import librosa
 import json
 import wandb
@@ -37,6 +38,11 @@ from models.phn_mono_ssl_model_ver2 import (HMA_attn_ctc_to_mispro_ver2,
     HMA_attn_ctc_to_mispro_ver2_1_perceived,
     HMA_attn_ctc_to_mispro_ver2_2)
 
+
+from models.Transformer import TransformerMDD, TransformerMDD_with_extra_loss, TransformerMDD_dual_path
+from models.TransformerMHA import TransformerMDDMHA
+from models.Transducer import TransducerMDD
+from models.TransducerConformerEnc import TransducerMDDConformerEnc
 
 from models.phn_mono_ssl_model_ver2 import Hybrid_CTC_Attention, Hybrid_CTC_Attention_ver2
 
@@ -674,6 +680,7 @@ if __name__ == "__main__":
     DataPrep = TimestampDataIOPrepforHybridCTCAttn(hparams)
     train_data, valid_data, test_data, label_encoder = DataPrep.prepare()
     
+    # Model Selection
     if hparams["feature_fusion"] == "mono":
         asr_brain_class = PhnMonoSSLModel
     elif hparams["feature_fusion"] == "mono_misproBCE":
@@ -697,6 +704,18 @@ if __name__ == "__main__":
     elif hparams["feature_fusion"] == "HMA_attn_ctc_to_mispro_ver2_2":
         # Change Transformer Decoder to MHA decoder, and use mispronunciation BCE loss
         asr_brain_class = HMA_attn_ctc_to_mispro_ver2_2
+    elif hparams["feature_fusion"] == "TransformerMDD":
+        asr_brain_class = TransformerMDD
+    elif hparams["feature_fusion"] == "TransformerMDD_with_extra_loss":
+        asr_brain_class = TransformerMDD_with_extra_loss
+    elif hparams["feature_fusion"] == "TransformerMDD_dual_path":
+        asr_brain_class = TransformerMDD_dual_path
+    elif hparams["feature_fusion"] == "TransducerMDD":
+        asr_brain_class = TransducerMDD
+    elif hparams["feature_fusion"] == "TransformerMDDMHA":
+        asr_brain_class = TransformerMDDMHA
+    elif hparams["feature_fusion"] == "TransducerMDDConformerEnc":
+        asr_brain_class = TransducerMDDConformerEnc
     elif hparams["feature_fusion"] == "PGMDD":
         from models.phn_mono_ssl_model import PGMDD
         asr_brain_class = PGMDD
@@ -752,13 +771,56 @@ if __name__ == "__main__":
     
     # select 10 test data for debug
     # import pdb; pdb.set_trace()
-    records = test_data.data_ids[:10]
-    test_data_ = test_data.filtered_sorted(key_test={"id": lambda x: x in records},)
+    # records = test_data.data_ids[:10]
+    # test_data_ = test_data.filtered_sorted(key_test={"id": lambda x: x in records},)
     
-    asr_brain.evaluate(
-        test_data,
-        test_loader_kwargs=hparams["test_dataloader_opts"],
-        # min_key="PER",
-        max_key="mpd_f1",  # use max_key for mpd_f1
-    )
+    if hparams.get("evaluate_key", True):
+        key = hparams["evaluate_key"]
+        if key == "mpd_f1" or key == "mpd_f1_seq":
+            asr_brain.evaluate(
+                test_data,
+                test_loader_kwargs=hparams["test_dataloader_opts"],
+                max_key=key
+        )
+        elif key == "PER" or key == "PER_seq":
+            asr_brain.evaluate(
+                test_data,
+                test_loader_kwargs=hparams["test_dataloader_opts"],
+                min_key=key,
+            )
 # === Add placeholder gather_ctc_aligned_reps at top of file ===
+    # DEBUG MODE
+    train_record = test_data.data_ids[:1024]  # Select first 128 for debugging
+    valid_record = valid_data.data_ids[:128]  # Select first 32 for debugging
+    test_record = test_data.data_ids[:32]  # Select first 32 for debugging
+    train_data_ = train_data.filtered_sorted(key_test={"id": lambda x: x in train_record},)
+    valid_data_ = valid_data.filtered_sorted(key_test={"id": lambda x: x in valid_record},)
+    test_data_ = test_data.filtered_sorted(key_test={"id": lambda x: x in test_record},)
+    
+    # try:
+    #     asr_brain.fit(
+    #         asr_brain.hparams.epoch_counter,
+    #         train_data_,
+    #         valid_data_,
+    #         train_loader_kwargs=hparams["train_dataloader_opts"],
+    #         valid_loader_kwargs=hparams["valid_dataloader_opts"],
+    #     )
+    # except StopIteration:
+    #     print("Training stopped early due to no improvement.")
+    
+    # Test
+    # if hparams.get("evaluate_key", True):
+    #     key = hparams["evaluate_key"]
+    #     if key == "mpd_f1" or key == "mpd_f1_seq":
+    #         asr_brain.evaluate(
+    #             test_data_,
+    #             test_loader_kwargs=hparams["test_dataloader_opts"],
+    #             max_key=key
+    #     )
+    #     elif key == "PER" or key == "PER_seq":
+            
+    #         asr_brain.evaluate(
+    #             test_data_,
+    #             test_loader_kwargs=hparams["test_dataloader_opts"],
+    #             min_key=key,
+    #         )
