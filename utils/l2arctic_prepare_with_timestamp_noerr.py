@@ -7,9 +7,9 @@ from textgrid import TextGrid, IntervalTier
 import re
 import copy
 from collections import defaultdict
-import pdb
 
-SAMPLERATE = 16000
+
+SAMPLERATE = 44100
 phn_set="data/arpa_phonemes"
 def process_arpa_phoneme(path):
     with open(path, 'r') as f:
@@ -24,8 +24,8 @@ ARPA_PHONEMES = process_arpa_phoneme(phn_set)
 
 def prepare_l2arctic(
     data_folder,
-    save_json_train="train_erj.json",
-    save_json_test="test_erj.json",
+    save_json_train="train_l2arctic.json",
+    save_json_test="test_l2arctic.json",
     metadata_l2arctic="data/metadata_l2arctic",
     test_spks=['TLV', 'NJS', 'TNI', 'TXHC', 'ZHAA', 'YKWK',]
 ):
@@ -42,7 +42,7 @@ def prepare_l2arctic(
             name, dialect, gender = line.split()
             total_spks.append(name)
     train_spks = [x for x in total_spks if x not in test_spks]
-    
+
     spks_to_solve = [
         (save_json_train, train_spks),
         (save_json_test, test_spks)
@@ -66,6 +66,7 @@ def get_data_from_spk(data_folder, spk):
     wav_dir = os.path.join(data_folder, spk, 'wav')
     tg_dir = os.path.join(data_folder, spk, 'annotation')
     text_dir = os.path.join(data_folder, spk, 'transcript')
+
     spk_data = defaultdict(dict)
     for tg_file in glob(os.path.join(tg_dir, "*.TextGrid")):
 
@@ -78,7 +79,6 @@ def get_data_from_spk(data_folder, spk):
         basename = os.path.basename(tg_file).split(".")[0]
         wav_file = os.path.join(wav_dir, basename + ".wav")
         text_file = os.path.join(text_dir, basename + '.txt')
-        # pdb.set_trace()
         utt_data = get_data_from_utt(tg, wav_file, text_file, spk)
         spk_data.update(utt_data)
     return spk_data
@@ -100,8 +100,29 @@ def get_data_from_utt(tg, wav_file, text_file, spk):
     ## To get training target phones, set `keep_artifical_sil=False`, `rm_repetitive_sil=True`
     ## this apply some preprocessing on the perceived phones, i.e. rm artifical and repetitive sil
     _, target_phns = get_phonemes(tg, keep_artificial_sil=False, rm_repetitive_sil=True)
+    
+    _, _, _, target_starts, target_ends, _ = get_phoneme_intervals(tg, keep_artificial_sil=False, rm_repetitive_sil=True) #
+    _, _, _, canonical_starts, canonical_ends, perceived_intervals_marks = get_phoneme_intervals(tg, keep_artificial_sil=True, rm_repetitive_sil=False) #
+    try:
+        assert len(canonical_starts) == len(canonical_ends) 
+        assert len(cano_phns_align.split(" ")) == len(perc_phns_align.split(" "))
+    except AssertionError:
+        import pdb; pdb.set_trace()
+    
+    utt_data[wav_file]["target_starts"] = target_starts
+    utt_data[wav_file]["target_ends"] = target_ends
     utt_data[wav_file]["perceived_train_target"] = target_phns
-
+    try:
+        assert len(target_starts) == len(target_ends) == len(target_phns.split(" "))
+    except AssertionError:
+        import pdb; pdb.set_trace()
+    
+    utt_data[wav_file]["canonical_starts"] = canonical_starts
+    utt_data[wav_file]["canonical_ends"] = canonical_ends
+    try:
+        assert len(canonical_starts) == len(canonical_ends) == len(cano_phns_align.split(" ")) == len(perc_phns_align.split(" "))
+    except AssertionError:
+        import pdb; pdb.set_trace()
     with open(text_file, "r") as reader:
         text = reader.readline()
     utt_data[wav_file]["wrd"] = text
@@ -122,8 +143,46 @@ def get_phonemes(tg, keep_artificial_sil=False, rm_repetitive_sil=True):
         perceived_phones = remove_repetitive_sil(perceived_phones)
     return " ".join(canonical_phones), " ".join(perceived_phones)
 
+def get_phoneme_intervals(tg, keep_artificial_sil=False, rm_repetitive_sil=True):
+    """
+    Get the phoneme intervals from the TextGrid.
+    Returns:
+        canonical_intervals: List of tuples with (minTime, maxTime, mark) for canonical phones.
+        perceived_intervals: List of tuples with (minTime, maxTime, mark) for perceived phones.
+    """
+    phone_tier = tg.getFirst("phones")
+    canonical_tier = normalize_tier_mark(phone_tier, "NormalizePhoneCanonical", keep_artificial_sil)
+    perceived_tier = normalize_tier_mark(phone_tier, "NormalizePhonePerceived", keep_artificial_sil)
+
+    canonical_intervals = iter_to_list_time_tuple(canonical_tier)
+    perceived_intervals = iter_to_list_time_tuple(perceived_tier)
+
+    if keep_artificial_sil:
+        assert len(canonical_intervals) == len(perceived_intervals)
+
+    if rm_repetitive_sil:
+        canonical_intervals = remove_repetitive_sil_ver2(canonical_intervals)
+        perceived_intervals = remove_repetitive_sil_ver2(perceived_intervals)
+
+    canonical_intervals_starts = [interval[0] for interval in canonical_intervals]
+    canonical_intervals_ends = [interval[1] for interval in canonical_intervals]
+    canonical_intervals_marks = [interval[2] for interval in canonical_intervals]
+
+    perceived_intervals_starts = [interval[0] for interval in perceived_intervals]
+    perceived_intervals_ends = [interval[1] for interval in perceived_intervals]
+    perceived_intervals_marks = [interval[2] for interval in perceived_intervals]
+
+    return canonical_intervals_starts, canonical_intervals_ends, canonical_intervals_marks, \
+           perceived_intervals_starts, perceived_intervals_ends, perceived_intervals_marks
+
+    
 def tier_to_list(tier):
     return [interval.mark for interval in tier]
+def iter_to_list_time_tuple(tier):
+    """
+    Convert an IntervalTier to a list of tuples with (minTime, maxTime, mark).
+    """
+    return [(interval.minTime, interval.maxTime, interval.mark) for interval in tier.intervals]
 
 def get_word_bounds(word_tier, phone_tier):
     """
@@ -175,6 +234,37 @@ def remove_repetitive_sil(phone_list):
     ]
     return phone_list
 
+def remove_repetitive_sil_ver2(phone_list):
+    """Merge consecutive 'sil' intervals into a single interval."""
+    # Filtering out consecutive silences by applying a mask with True marking
+    # which sils to remove
+    # e.g.
+    # phone_interval_list          [  [0, 1, "a"], [1, 2, "sil"], [2, 3, "sil"], [3, 4, "sil"],   [4, 5, "b"]]
+    # ---
+    # create:
+    # remove_sil_mask   [False,  True,  True,  False,  False]
+    # ---
+    # so end result is:
+    # phone_list  [  [0, 1, "a"], [1, 4, "sil"],   [4, 5, "b"]]
+    merged = []
+    i = 0
+    while i < len(phone_list):
+        start, end, mark = phone_list[i]
+        if mark != "sil":
+            merged.append([start, end, mark])
+            i += 1
+        else:
+            # Merge all consecutive sil intervals
+            sil_start = start
+            sil_end = end
+            j = i
+            while j + 1 < len(phone_list) and phone_list[j + 1][2] == "sil":
+                sil_end = phone_list[j + 1][1]
+                j += 1
+            merged.append([sil_start, sil_end, "sil"])
+            i = j + 1
+    return merged
+
 def normalize_tier_mark(tier: IntervalTier,
                         mode="NormalizePhoneCanonical", keep_artificial_sil=False) -> IntervalTier:
     """Normalize the marks of an IntervalTier.
@@ -209,17 +299,8 @@ def normalize_tier_mark(tier: IntervalTier,
             continue
         if p == 'ax':
             p = 'ah'
-        elif p == 'axr':
-            p = 'ah'
-        elif p == 'sp':
-            p = "sil"
         each_interval.mark = p
-        # assert p in ARPA_PHONEMES + ["err"], pdb.set_trace()
-        try:
-            if p in ARPA_PHONEMES + ["err"]:
-                pass
-        except AssertionError:
-            p = "err"
+        # assert p in ARPA_PHONEMES + ["err"], import pdb; pdb.set_trace()
         tier_out.addInterval(each_interval)
     return tier_out
 
@@ -249,8 +330,6 @@ def normalize_phone(s: str, is_rm_annotation=True, is_phoneme_canonical=True,
         raise ValueError("Input %s is invalid.", s)
     if len(parse_tag.split(",")) == 1:
         if parse_tag.split(",")[0] == 'ax':
-            return 'ah'
-        elif parse_tag.split(",")[0] == 'axr':
             return 'ah'
         else:
             return parse_tag.split(",")[0]
@@ -293,22 +372,10 @@ if __name__ == "__main__":
 
     prepare_l2arctic(
     data_folder=sys.argv[1],
-    save_json_train="data/train_erj_spk_open_train_1.1_times.json",
-    save_json_test="data/test_erj_spk_open_test_1.1_times.json",
-    metadata_l2arctic="data/metadata_erj_ver1.1",
-    test_spks=["NAR_F05",
-               "DOS_F02",
-               "KYO_M02",
-                "KYO_F07",
-                "KYO_F01",
-                "TOH_F04",
-                "IWA_M03",
-                "RYU_M01",
-                "SIZ_M04",
-                "NAR_F02",
-                "TUT_F04",
-                "WAK_M04",
-               ]
+    save_json_train="data/train_times.json",
+    save_json_test="data/test_times.json",
+    metadata_l2arctic="data/metadata_l2arctic",
+    test_spks=['TLV', 'NJS', 'TNI', 'TXHC', 'ZHAA', 'YKWK',]
 )
 
-# collate the train and test json files, TODO
+
