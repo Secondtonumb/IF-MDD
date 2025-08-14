@@ -701,12 +701,12 @@ if __name__ == "__main__":
     model_stem = Path(model_type).stem 
 
     run_id = time.strftime("%Y%m%d-%H%M%S") 
-    run_name = f"{perceived_ssl_model}_{canonical_ssl_model}_{feature_fusion}_{model_stem}"
+    # run_name = f"{perceived_ssl_model}_{canonical_ssl_model}_{feature_fusion}_{model_stem}"
+    run_name = hparams["output_folder"].split("/")[-1]  # use the last part of the output folder as run name
     # if overrides.is given append its values to run_name
     if isinstance(overrides, dict):
         overrides = [f"{k}={v}" for k, v in overrides.items()]
         run_name += "_" + "_".join(overrides)
-    
     run_id = f"{run_name}_{run_id}"
     # wandb init group by hparams perceived_ssl_model, canonical_ssl_model, feature_fusion
     wandb.init(
@@ -727,7 +727,7 @@ if __name__ == "__main__":
         )
     except StopIteration:
         print("Training stopped early due to no improvement.")
-    # Test
+    # # Test
     asr_brain.evaluate(
         test_data,
         test_loader_kwargs=hparams["test_dataloader_opts"],

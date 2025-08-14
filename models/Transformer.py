@@ -5,8 +5,7 @@ import torch.nn
 
 import speechbrain as sb
 from hyperpyyaml import load_hyperpyyaml
-# from mpd_eval_v3 import MpdStats
-from mpd_eval_v4 import MpdStats  # Updated import for mpd_eval_v4
+from mpd_eval_v4 import MpdStats
 
 
 import wandb
@@ -62,7 +61,427 @@ class TransformerMDD(sb.Brain):
         self.best_mpd_f1_seq = float('-inf')
             
         self.best_valid_loss = float('inf')
-        self.best_valid_loss_list = []  # List of (valid_loss, epoch, ckpt_name)label_encoder.add_label("<eos>")
+        self.best_valid_loss_list = []  # List of (valid_loss, epoch, ckpt_name)
+        
+        # CTC freezing mechanism
+        self.enable_ctc_freezing = getattr(self.hparams, 'enable_ctc_freezing', True)
+        self.best_ctc_loss = float('inf')
+        self.ctc_patience = getattr(self.hparams, 'ctc_patience', 5)
+        self.ctc_threshold_factor = getattr(self.hparams, 'ctc_threshold_factor', 1.1)
+        self.ctc_no_improve_epochs = 0
+        self.encoder_frozen = False
+        self.ssl_frozen = False
+        self.ctc_threshold = None  # Will be set based on training progress
+        
+        # Track CTC loss history for threshold setting
+        self.ctc_loss_history = []
+        
+        # Metric-based freezing mechanism
+        self.enable_metric_freezing = getattr(self.hparams, 'enable_metric_freezing', False)
+        self.freezing_metric = getattr(self.hparams, 'freezing_metric', 'PER')
+        self.metric_patience = getattr(self.hparams, 'metric_patience', 10)
+        self.per_threshold_factor = getattr(self.hparams, 'per_threshold_factor', 1.05)
+        self.f1_threshold_factor = getattr(self.hparams, 'f1_threshold_factor', 0.95)
+        self.min_epochs_before_metric_freeze = getattr(self.hparams, 'min_epochs_before_metric_freeze', 15)
+        
+        # Track metric history and convergence
+        self.best_valid_per = float('inf')
+        self.best_valid_f1 = float('-inf')
+        self.metric_no_improve_epochs = 0
+        self.per_threshold = None
+        self.f1_threshold = None
+        self.per_history = []
+        self.f1_history = []
+    
+    def freeze_encoder_and_ssl(self):
+        """Freeze encoder and SSL model parameters"""
+        if not self.encoder_frozen:
+            # Freeze TransASR (encoder part )
+            for param in self.modules.TransASR.encoder.parameters():
+                param.requires_grad = False
+            for param in self.modules.TransASR.custom_src_module.parameters():
+                param.requires_grad = False
+            print("✓ Encoder (TransASR) and Encoder Prenet frozen")
+            self.encoder_frozen = True
+            
+            # Also freeze the encoder projection layer if exists
+            if hasattr(self.modules, 'enc'):
+                for param in self.modules.enc.parameters():
+                    param.requires_grad = False
+                print("✓ Encoder projection layer frozen")
+        
+        if not self.ssl_frozen:
+            # Freeze perceived SSL model
+            for param in self.modules.perceived_ssl.parameters():
+                param.requires_grad = False
+            print("✓ Perceived SSL model frozen")
+            self.ssl_frozen = True
+            
+        # Save the frozen state checkpoint
+        if self.checkpointer is not None:
+            current_epoch = self.hparams.epoch_counter.current
+            ckpt_name = f"encoder_ssl_frozen_epoch_{current_epoch:03d}.ckpt"
+            meta = {
+                "epoch": current_epoch, 
+                "encoder_frozen": True, 
+                "ssl_frozen": True,
+                "frozen_by_ctc": self.enable_ctc_freezing and not self.enable_metric_freezing,
+                "frozen_by_metric": self.enable_metric_freezing,
+                "freezing_metric": getattr(self, 'freezing_metric', 'unknown'),
+                "best_ctc_loss": self.best_ctc_loss,
+                "best_valid_per": self.best_valid_per,
+                "best_valid_f1": self.best_valid_f1,
+            }
+            self.checkpointer.save_and_keep_only(
+                meta=meta,
+                name=ckpt_name,
+                num_to_keep=1,
+            )
+            print(f"✓ Saved frozen model checkpoint: {ckpt_name}")
+    
+    def manual_freeze_encoder_ssl(self):
+        """Manually trigger freezing of encoder and SSL model"""
+        print("\n🔒 Manual freeze triggered...")
+        self.freeze_encoder_and_ssl()
+        self.enable_ctc_freezing = False  # Disable automatic checking
+        print("✓ Automatic CTC freezing disabled")
+    
+    def unfreeze_encoder_ssl(self):
+        """Unfreeze encoder and SSL model parameters"""
+        if self.encoder_frozen:
+            # Unfreeze TransASR (encoder part)
+            for param in self.modules.TransASR.parameters():
+                param.requires_grad = True
+            print("✓ Encoder (TransASR) unfrozen")
+            
+            # Unfreeze encoder projection layer if exists
+            if hasattr(self.modules, 'enc'):
+                for param in self.modules.enc.parameters():
+                    param.requires_grad = True
+                print("✓ Encoder projection layer unfrozen")
+            
+            self.encoder_frozen = False
+        
+        if self.ssl_frozen:
+            # Unfreeze perceived SSL model
+            for param in self.modules.perceived_ssl.parameters():
+                param.requires_grad = True
+            print("✓ Perceived SSL model unfrozen")
+            self.ssl_frozen = False
+    
+    def check_ctc_convergence(self, current_ctc_loss):
+        """Check if CTC loss has converged and freeze encoder/SSL if needed"""
+        if not self.enable_ctc_freezing:
+            return
+            
+        current_epoch = self.hparams.epoch_counter.current
+        
+        # Don't start checking until we have enough epochs (at least 5 epochs)
+        if current_epoch < 5:
+            return
+            
+        self.ctc_loss_history.append(current_ctc_loss)
+        
+        # Only start checking after 10 epochs total to have enough history
+        if len(self.ctc_loss_history) < 10:
+            return
+            
+        # Set threshold based on configured factor
+        if self.ctc_threshold is None:
+            min_ctc = min(self.ctc_loss_history)
+            self.ctc_threshold = min_ctc * self.ctc_threshold_factor
+            print(f"✓ CTC threshold set to: {self.ctc_threshold:.6f} (factor: {self.ctc_threshold_factor})")
+        
+        # Check if current loss is close to the best
+        if current_ctc_loss <= self.best_ctc_loss:
+            self.best_ctc_loss = current_ctc_loss
+            self.ctc_no_improve_epochs = 0
+        else:
+            self.ctc_no_improve_epochs += 1
+        
+        # Print progress every few epochs
+        if current_epoch % 5 == 0:
+            print(f"📊 CTC Convergence Check (Epoch {current_epoch}):")
+            print(f"   Current CTC Loss: {current_ctc_loss:.6f}")
+            print(f"   Best CTC Loss: {self.best_ctc_loss:.6f}")
+            print(f"   No improve epochs: {self.ctc_no_improve_epochs}/{self.ctc_patience}")
+            if self.ctc_threshold:
+                print(f"   Threshold: {self.ctc_threshold:.6f}")
+        
+        # Freeze if CTC has converged (no improvement for ctc_patience epochs)
+        # AND current loss is below threshold
+        if (not self.encoder_frozen and 
+            self.ctc_no_improve_epochs >= self.ctc_patience and 
+            current_ctc_loss <= self.ctc_threshold):
+            
+            print(f"\n🔒 CTC Loss Converged! (No improvement for {self.ctc_patience} epochs)")
+            print(f"   Current CTC Loss: {current_ctc_loss:.6f}")
+            print(f"   Best CTC Loss: {self.best_ctc_loss:.6f}")
+            print(f"   Threshold: {self.ctc_threshold:.6f}")
+            print("   Freezing Encoder and SSL model...")
+            
+            self.freeze_encoder_and_ssl()
+    
+    def load_pretrained_components(self, checkpoint_path, components_to_load=None, freeze_loaded=True):
+        """
+        Load specific components from a pretrained model checkpoint
+        
+        Args:
+            checkpoint_path (str): Path to the checkpoint directory or file
+            components_to_load (list): List of components to load. 
+                                     Options: ['ssl', 'encoder', 'ctc_head', 'decoder', 'enc_projection']
+                                     If None, loads ['ssl', 'encoder'] by default
+            freeze_loaded (bool): Whether to freeze the loaded components
+        """
+        if components_to_load is None:
+            components_to_load = ['ssl']  # Default: load SSL 
+        pdb.set_trace()
+        print(f"\n🔄 Loading pretrained components from: {checkpoint_path}")
+        print(f"   Components to load: {components_to_load}")
+        
+        # Load the checkpoint
+        if os.path.isdir(checkpoint_path):
+            # Find the checkpoint file in the directory
+            ckpt_files = [f for f in os.listdir(checkpoint_path) if f.endswith('.ckpt')]
+            if not ckpt_files:
+                raise ValueError(f"No .ckpt files found in {checkpoint_path}")
+            # Use the most recent checkpoint
+            ckpt_files.sort()
+            checkpoint_file = os.path.join(checkpoint_path, ckpt_files[-1])
+            print(f"   Using checkpoint: {ckpt_files[-1]}")
+            # pdb.set_trace()
+
+        else:
+            checkpoint_file = checkpoint_path
+        
+        # Load checkpoint
+        checkpoint = torch.load(checkpoint_file, map_location=self.device)
+        
+        # Extract model state dict
+        if 'model' in checkpoint:
+            pretrained_state = checkpoint['model']
+        else:
+            pretrained_state = checkpoint
+        
+        # Get current model state
+        current_state = self.modules.state_dict()
+        
+        # Component mapping
+        component_mapping = {
+            'ssl': ['perceived_ssl'],
+            'encoder': ['TransASR.encoder', 'TransASR.custom_src_module'],
+            'enc_projection': ['enc'],
+            'ctc_head': ['ctc_lin'],
+            'decoder': ['TransASR.decoder', 'd_out']
+        }
+        pdb.set_trace()
+        # Load specified components
+        loaded_components = []
+        for component in components_to_load:
+            if component not in component_mapping:
+                print(f"   ⚠️  Warning: Unknown component '{component}', skipping...")
+                continue
+                
+            module_prefixes = component_mapping[component]
+            for prefix in module_prefixes:
+                # Find matching keys
+                matching_keys = [k for k in pretrained_state.keys() if k.startswith(prefix)]
+                if not matching_keys:
+                    print(f"   ⚠️  Warning: No parameters found for {prefix} in checkpoint")
+                    continue
+                
+                # Load matching parameters
+                loaded_count = 0
+                for key in matching_keys:
+                    if key in current_state:
+                        try:
+                            current_state[key] = pretrained_state[key]
+                            loaded_count += 1
+                        except Exception as e:
+                            print(f"   ❌ Error loading {key}: {e}")
+                    else:
+                        print(f"   ⚠️  Key {key} not found in current model")
+                
+                if loaded_count > 0:
+                    loaded_components.append(prefix)
+                    print(f"   ✅ Loaded {loaded_count} parameters for {prefix}")
+        pdb.set_trace()
+        # Load the updated state dict
+        self.modules.load_state_dict(current_state, strict=False)
+        
+        # Freeze loaded components if requested
+        if freeze_loaded:
+            for component in components_to_load:
+                if component == 'ssl':
+                    for param in self.modules.perceived_ssl.parameters():
+                        param.requires_grad = False
+                    self.ssl_frozen = True
+                    print("   🔒 SSL model frozen")
+                    
+                elif component == 'encoder':
+                    for param in self.modules.TransASR.encoder.parameters():
+                        param.requires_grad = False
+                    if hasattr(self.modules.TransASR, 'custom_src_module'):
+                        for param in self.modules.TransASR.custom_src_module.parameters():
+                            param.requires_grad = False
+                    self.encoder_frozen = True
+                    print("   🔒 Encoder frozen")
+                    
+                elif component == 'enc_projection':
+                    if hasattr(self.modules, 'enc'):
+                        for param in self.modules.enc.parameters():
+                            param.requires_grad = False
+                        print("   🔒 Encoder projection frozen")
+                        
+                elif component == 'ctc_head':
+                    for param in self.modules.ctc_lin.parameters():
+                        param.requires_grad = False
+                    print("   🔒 CTC head frozen")
+        pdb.set_trace()
+        print(f"   ✅ Successfully loaded components: {loaded_components}")
+        return loaded_components
+    
+    def load_from_checkpoint_manual(self, checkpoint_path, ssl_only=False, encoder_only=False, 
+                                  freeze_ssl=True, freeze_encoder=True):
+        """
+        Simplified method to manually load components from checkpoint
+        
+        Args:
+            checkpoint_path (str): Path to checkpoint directory or file
+            ssl_only (bool): Load only SSL model
+            encoder_only (bool): Load only encoder (TransASR)
+            freeze_ssl (bool): Whether to freeze SSL after loading
+            freeze_encoder (bool): Whether to freeze encoder after loading
+        """
+        components = []
+        if ssl_only:
+            components = ['ssl']
+        elif encoder_only:
+            components = ['encoder']
+        else:
+            components = ['ssl', 'encoder']  # Default: both
+        
+        freeze_loaded = freeze_ssl or freeze_encoder
+        
+        return self.load_pretrained_components(
+            checkpoint_path=checkpoint_path,
+            components_to_load=components,
+            freeze_loaded=freeze_loaded
+        )
+    
+    def print_parameter_status(self):
+        """Print the current status of model parameters (trainable vs frozen)"""
+        print(f"\n📊 Model Parameter Status:")
+        
+        total_params = 0
+        trainable_params = 0
+        
+        # Check each module
+        modules_info = {}
+        for name, module in self.modules.named_children():
+            module_params = sum(p.numel() for p in module.parameters())
+            module_trainable = sum(p.numel() for p in module.parameters() if p.requires_grad)
+            total_params += module_params
+            trainable_params += module_trainable
+            
+            status = "🔒 FROZEN" if module_trainable == 0 else "🔓 TRAINABLE"
+            modules_info[name] = (module_trainable, module_params, status)
+            print(f"   {name}: {module_trainable:,}/{module_params:,} params {status}")
+        
+        # Summary
+        frozen_ratio = (total_params - trainable_params) / total_params * 100 if total_params > 0 else 0
+        print(f"\n📈 Summary:")
+        print(f"   Total parameters: {total_params:,}")
+        print(f"   Trainable parameters: {trainable_params:,}")
+        print(f"   Frozen parameters: {total_params - trainable_params:,}")
+        print(f"   Frozen ratio: {frozen_ratio:.1f}%")
+        
+        # Freezing status
+        print(f"\n🔒 Component Status:")
+        print(f"   SSL frozen: {self.ssl_frozen}")
+        print(f"   Encoder frozen: {self.encoder_frozen}")
+        
+        return modules_info, total_params, trainable_params
+    
+    def check_metric_convergence(self, current_per, current_f1):
+        """Check if validation metrics have converged and freeze encoder/SSL if needed"""
+        if not self.enable_metric_freezing:
+            return
+            
+        current_epoch = self.hparams.epoch_counter.current
+        
+        # Don't start checking until minimum epochs
+        if current_epoch < self.min_epochs_before_metric_freeze:
+            return
+            
+        # Track metric history
+        self.per_history.append(current_per)
+        self.f1_history.append(current_f1)
+        
+        # Set thresholds based on history (need at least 10 epochs of data)
+        if len(self.per_history) >= 10:
+            if self.per_threshold is None:
+                min_per = min(self.per_history)
+                self.per_threshold = min_per * self.per_threshold_factor
+                print(f"✓ PER threshold set to: {self.per_threshold:.4f} (factor: {self.per_threshold_factor})")
+            
+            if self.f1_threshold is None:
+                max_f1 = max(self.f1_history)
+                self.f1_threshold = max_f1 * self.f1_threshold_factor
+                print(f"✓ F1 threshold set to: {self.f1_threshold:.4f} (factor: {self.f1_threshold_factor})")
+        
+        # Check for improvement based on selected metric
+        improved = False
+        if self.freezing_metric == "PER":
+            if current_per <= self.best_valid_per:
+                self.best_valid_per = current_per
+                improved = True
+        elif self.freezing_metric == "F1":
+            if current_f1 >= self.best_valid_f1:
+                self.best_valid_f1 = current_f1
+                improved = True
+        elif self.freezing_metric == "both":
+            if current_per <= self.best_valid_per or current_f1 >= self.best_valid_f1:
+                if current_per <= self.best_valid_per:
+                    self.best_valid_per = current_per
+                if current_f1 >= self.best_valid_f1:
+                    self.best_valid_f1 = current_f1
+                improved = True
+        
+        if improved:
+            self.metric_no_improve_epochs = 0
+        else:
+            self.metric_no_improve_epochs += 1
+        
+        # Print progress every few epochs
+        if current_epoch % 5 == 0:
+            print(f"📊 Metric Convergence Check (Epoch {current_epoch}):")
+            print(f"   Current PER: {current_per:.4f}, Current F1: {current_f1:.4f}")
+            print(f"   Best PER: {self.best_valid_per:.4f}, Best F1: {self.best_valid_f1:.4f}")
+            print(f"   No improve epochs: {self.metric_no_improve_epochs}/{self.metric_patience}")
+            if self.per_threshold and self.f1_threshold:
+                print(f"   PER threshold: {self.per_threshold:.4f}, F1 threshold: {self.f1_threshold:.4f}")
+        
+        # Check if we should freeze based on the selected metric
+        should_freeze = False
+        if self.freezing_metric == "PER" and self.per_threshold is not None:
+            should_freeze = (current_per <= self.per_threshold and 
+                           self.metric_no_improve_epochs >= self.metric_patience)
+        elif self.freezing_metric == "F1" and self.f1_threshold is not None:
+            should_freeze = (current_f1 >= self.f1_threshold and 
+                           self.metric_no_improve_epochs >= self.metric_patience)
+        elif self.freezing_metric == "both" and self.per_threshold is not None and self.f1_threshold is not None:
+            should_freeze = ((current_per <= self.per_threshold or current_f1 >= self.f1_threshold) and 
+                           self.metric_no_improve_epochs >= self.metric_patience)
+        
+        # Freeze if conditions are met
+        if not self.encoder_frozen and should_freeze:
+            print(f"\n🔒 Validation Metrics Converged! (No improvement for {self.metric_patience} epochs)")
+            print(f"   Freezing based on metric: {self.freezing_metric}")
+            print(f"   Current PER: {current_per:.4f}, Current F1: {current_f1:.4f}")
+            print(f"   Freezing Encoder and SSL model...")
+            
+            self.freeze_encoder_and_ssl()
     
     def evaluate_batch(self, batch, stage):
         """Computations needed for validation/test batches"""
@@ -82,7 +501,7 @@ class TransformerMDD(sb.Brain):
             self.per_metrics_seq = self.hparams.per_stats()
             self.mpd_metrics = MpdStats()
             self.mpd_metrics_seq = MpdStats()
-
+   
     def compute_forward(self, batch, stage):
         batch = batch.to(self.device)
         wavs, wav_lens = batch.sig
@@ -180,8 +599,32 @@ class TransformerMDD(sb.Brain):
         # Caculate the loss for CTC and seq2seq outputs
 
         loss_ctc = self.hparams.ctc_cost(p_ctc_feat, targets, wav_lens, target_lens)
-        loss_dec_out = self.hparams.seq_cost(p_dec_out, targets_eos, length=target_lens_eos)
+        loss_dec_out = self.hparams.seq_cost(p_dec_out, targets_eos, target_lens_eos)
+        
+        # if stage == sb.Stage.TRAIN:
+        #     # # TODO: Better to Train CELoss without BOS / EOS
+        #     # pdb.set_trace()
+        #     # loss_dec_out = torch.tensor(0.0, device=self.device)
 
+        #     loss_dec_out = sb.nnet.losses.kldiv_loss(
+        #         p_dec_out,
+        #         targets_eos,
+        #         length=target_lens_eos,
+        #         label_smoothing=0.1,
+        #         reduction="batchmean",
+        #     )
+
+        # else: 
+        #     # During inference, don't compute attention loss
+        #     # loss_dec_out = torch.tensor(0.0, device=self.device)
+        #     loss_dec_out = sb.nnet.losses.kldiv_loss(
+        #         p_dec_out,
+        #         targets_eos,
+        #         length=target_lens_eos,
+        #         label_smoothing=0.1,
+        #         reduction="batchmean",
+        #     )
+        # ---- Guided Attention Loss ----
 
         loss = (
             self.hparams.ctc_weight * loss_ctc
@@ -291,9 +734,29 @@ class TransformerMDD(sb.Brain):
         if self.checkpointer is not None:
             # TODO: support recover best on PER or mpd_f1 or averaged model of best PER and mpd_f1
             self.checkpointer.recover_if_possible(
-                # min_key="PER",
-                max_key="mpd_f1",
+                min_key="PER",
+                # max_key="mpd_f1",
             )
+        
+        # Load pretrained components if specified
+        if getattr(self.hparams, 'load_pretrained_components', False):
+            pretrained_path = getattr(self.hparams, 'pretrained_model_path', '')
+            components = getattr(self.hparams, 'components_to_load', ['ssl', 'encoder'])
+            freeze_loaded = getattr(self.hparams, 'freeze_loaded_components', True)
+            
+            if pretrained_path and os.path.exists(pretrained_path):
+                try:
+                    self.load_pretrained_components(
+                        checkpoint_path=pretrained_path,
+                        components_to_load=components,
+                        freeze_loaded=freeze_loaded
+                    )
+                except Exception as e:
+                    print(f"❌ Failed to load pretrained components: {e}")
+                    print("   Continuing with random initialization...")
+            else:
+                print(f"⚠️  Pretrained model path not found: {pretrained_path}")
+                print("   Continuing with random initialization...")
 
     def on_stage_end(self, stage, stage_loss, epoch):
         current_stage = self.hparams.epoch_counter.current
@@ -324,6 +787,13 @@ class TransformerMDD(sb.Brain):
                     "PER_seq": per_seq,
                     "mpd_f1_seq": mpd_f1_seq,
                 }
+                
+                # Check CTC convergence at the end of validation epoch
+                current_ctc_loss = self.ctc_metrics.summarize("average")
+                self.check_ctc_convergence(current_ctc_loss)
+                
+                # Check metric convergence at the end of validation epoch
+                self.check_metric_convergence(per, mpd_f1)
             
                 self.hparams.train_logger.log_stats(
                     stats_meta={
@@ -405,6 +875,14 @@ class TransformerMDD(sb.Brain):
                     "mpd_f1": mpd_f1,
                     "PER_seq": per_seq,
                     "mpd_f1_seq": mpd_f1_seq,
+                    "encoder_frozen": self.encoder_frozen,
+                    "ssl_frozen": self.ssl_frozen,
+                    "best_ctc_loss": self.best_ctc_loss,
+                    "ctc_no_improve_epochs": self.ctc_no_improve_epochs,
+                    "best_valid_per": self.best_valid_per,
+                    "best_valid_f1": self.best_valid_f1,
+                    "metric_no_improve_epochs": self.metric_no_improve_epochs,
+                    "freezing_metric": self.freezing_metric,
                 }, step=epoch)
                 # Early stop if patience exceeded
                 if self.no_improve_epochs >= self.patience:
@@ -513,6 +991,17 @@ class TransformerMDD(sb.Brain):
             # if self.hparams.perceived_ssl is not None and not self.hparams.perceived_ssl.freeze:
             self.checkpointer.add_recoverable("adam_opt", self.adam_optimizer)
             self.checkpointer.add_recoverable("pretrained_opt", self.pretrained_opt_class)
+            # Add recoverable for freezing states
+            self.checkpointer.add_recoverable("encoder_frozen", self)
+            self.checkpointer.add_recoverable("ssl_frozen", self)
+            self.checkpointer.add_recoverable("best_ctc_loss", self)
+            self.checkpointer.add_recoverable("ctc_no_improve_epochs", self)
+            self.checkpointer.add_recoverable("ctc_loss_history", self)
+            self.checkpointer.add_recoverable("best_valid_per", self)
+            self.checkpointer.add_recoverable("best_valid_f1", self)
+            self.checkpointer.add_recoverable("metric_no_improve_epochs", self)
+            self.checkpointer.add_recoverable("per_history", self)
+            self.checkpointer.add_recoverable("f1_history", self)
             
     def on_evaluate_start(self, max_key=None, min_key=None):
         return super().on_evaluate_start(max_key, min_key)
@@ -560,10 +1049,17 @@ class TransformerMDD(sb.Brain):
             # normalize the loss by gradient_accumulation and scale for mixed precision
             self.scaler.scale(loss / self.hparams.gradient_accumulation).backward()
             self.scaler.unscale_(self.adam_optimizer)
-            self.scaler.unscale_(self.pretrained_opt_class)
+            if not self.ssl_frozen:
+                self.scaler.unscale_(self.pretrained_opt_class)
             
             if check_gradients(loss):
-                self.scaler.step(self.pretrained_opt_class)
+                # Only step optimizers for non-frozen parts
+                if not self.ssl_frozen:
+                    self.scaler.step(self.pretrained_opt_class)
+                else:
+                    print("SSL model frozen, skipping SSL optimizer step")
+                
+                # Main optimizer always steps (includes decoder)
                 self.scaler.step(self.adam_optimizer)
                 
             self.scaler.update()
@@ -580,9 +1076,16 @@ class TransformerMDD(sb.Brain):
                 # gradient clipping & early stop if loss is not fini
                 
                 if check_gradients(loss):
-                    self.pretrained_opt_class.step()
+                    # Only step optimizers for non-frozen parts
+                    if not self.ssl_frozen:
+                        self.pretrained_opt_class.step()
+                    else:
+                        print("SSL model frozen, skipping SSL optimizer step")
+                    
+                    # Main optimizer always steps (includes decoder)
                     self.adam_optimizer.step()
 
+                # Always zero gradients
                 self.pretrained_opt_class.zero_grad()
                 self.adam_optimizer.zero_grad()    
 
@@ -1612,3 +2115,229 @@ class TransformerMDD_dual_path(TransformerMDD):
                 self.adam_optimizer_cano.zero_grad()
 
         return loss.detach().cpu()
+class TransformerMDD_dual_ctc(TransformerMDD):
+    def compute_forward(self, batch, stage):
+        batch = batch.to(self.device)
+        wavs, wav_lens = batch.sig
+        targets, target_lens = batch.phn_encoded_target
+        targets_bos, target_lens_bos = batch.phn_encoded_target_bos
+        targets_eos, target_lens_eos = batch.phn_encoded_target_eos
+        
+        canonicals, canonical_lens = batch.phn_encoded_canonical
+        canonicals_bos, canonical_lens_bos = batch.phn_encoded_canonical_bos
+        canonicals_eos, canonical_lens_eos = batch.phn_encoded_canonical_eos
+        perceiveds, perceived_lens = batch.phn_encoded_perceived
+        perceiveds_bos, perceived_lens_bos = batch.phn_encoded_perceived_bos
+        perceiveds_eos, perceived_lens_eos = batch.phn_encoded_perceived_eos
+    
+        feats = self.modules.perceived_ssl(wavs)  # [B, T_s, ENC_DIM]
+        
+        before_enc_feats = self.modules.enc(feats)  # [B, T_s, D]
+        # CTC detection before Transformer
+        p_pre_enc_feats = self.modules.ctc_lin(before_enc_feats)  # [B, T_s, C]
+        
+        # pre_enc
+        current_epoch = self.hparams.epoch_counter.current
+        hyps = None
+        attn_map = None
+
+        if sb.Stage.TRAIN == stage:
+            # pdb.set_trace()
+            enc_out, hidden, dec_out = self.modules.TransASR(
+                src=before_enc_feats,
+                tgt=targets_bos,
+                wav_len=wav_lens,
+                pad_idx=0, 
+            )
+            # CTC head
+            h_ctc_feat = self.modules.ctc_lin_after_enc(enc_out)  # [B, T_s, C]
+            p_ctc_logits = self.hparams.log_softmax(h_ctc_feat)  # Log probabilities
+
+            # seq2seq head
+            h_seq_feat = self.modules.d_out(dec_out)  # [B, T_p+1, C]
+            p_seq_logits = self.hparams.log_softmax(h_seq_feat)  # Log probabilities
+
+        else:
+            with torch.no_grad():
+                enc_out, hidden, dec_out = self.modules.TransASR(
+                    src=before_enc_feats,
+                    tgt=targets_bos,
+                    wav_len=wav_lens,
+                    pad_idx=0,  # Assuming 0 is the padding index
+                )
+                h_ctc_feat = self.modules.ctc_lin_after_enc(enc_out)  # [B, T_s, C]
+                p_ctc_logits = self.hparams.log_softmax(h_ctc_feat)  # Log probabilities
+
+                # seq2seq head
+                h_seq_feat = self.modules.d_out(dec_out)  # [B, T_p+1, C]
+                p_seq_logits = self.hparams.log_softmax(h_seq_feat)  # Log probabilities
+                
+                hyps = None
+                attn_map = None
+        
+            valid_search_interval = self.hparams.valid_search_interval
+            if current_epoch % valid_search_interval == 0:
+                hyps, top_lengths, top_scores, top_log_probs = self.hparams.valid_search(enc_out.detach(), wav_lens)
+                attn_map = None
+            if stage == sb.Stage.TEST:
+                hyps, top_lengths, top_scores, top_log_probs = self.hparams.test_search(enc_out.detach(), wav_lens)
+                attn_map = None
+        return {
+            "p_ctc_feat": p_ctc_logits,  # [B, T_s, C]
+            "p_dec_out": p_seq_logits,  # [B, T_p+1, C]
+            "feats": feats,  # [B, T_s, D]
+            "attn_map": attn_map,  # [B, T_p+1, T_s] or similar
+            "hyps": hyps,  # [B, T_p+1] or None if not applicable
+            "p_pre_enc_feats": p_pre_enc_feats,  # [B, T_s, C]
+        }
+    def compute_objectives(self, predictions, batch, stage):
+        "Computes the loss for the model."
+        current_epoch = self.hparams.epoch_counter.current
+        valid_search_interval = self.hparams.valid_search_interval
+        
+        p_ctc_feat = predictions["p_ctc_feat"]
+        p_dec_out = predictions["p_dec_out"]
+        feats = predictions["feats"]
+        attn_map = predictions["attn_map"]
+        hyps = predictions.get("hyps", [])  # [B, T_p+1] or None if not applicable
+        p_pre_enc_feats = predictions["p_pre_enc_feats"]  # [B, T_s, C]
+
+        wavs, wav_lens = batch.sig
+        targets, target_lens = batch.phn_encoded_target
+        targets_bos, target_lens_bos = batch.phn_encoded_target_bos
+        targets_eos, target_lens_eos = batch.phn_encoded_target_eos
+        
+        canonicals, canonical_lens = batch.phn_encoded_canonical
+        canonicals_bos, canonical_lens_bos = batch.phn_encoded_canonical_bos
+        canonicals_eos, canonical_lens_eos = batch.phn_encoded_canonical_eos
+        perceiveds, perceived_lens = batch.phn_encoded_perceived
+        perceiveds_bos, perceived_lens_bos = batch.phn_encoded_perceived_bos
+        perceiveds_eos, perceived_lens_eos = batch.phn_encoded_perceived_eos
+        ids = batch.id
+        
+        # if sb.Stage.TRAIN == stage and hasattr(self.hparams, "wav_augment"):
+        #     wavs, wav_lens = self.hparams.wav_augment(wavs, wav_lens)
+        #     targets = self.hparams.wav_augment.replicate_labels(targets)
+        #     target_lens = self.hparams.wav_augment.replicate_labels(target_lens)
+        #     targets_bos = self.hparams.wav_augment.replicate_labels(targets_bos)
+        #     target_lens_bos = self.hparams.wav_augment.replicate_labels(target_lens_bos)
+        #     targets_eos = self.hparams.wav_augment.replicate_labels(targets_eos)
+        #     target_lens_eos = self.hparams.wav_augment.replicate_labels(target_lens_eos)
+
+        # Caculate the loss for CTC and seq2seq outputs
+        # loss_ctc = self.hparams.ctc_cost(p_ctc_feat, targets, wav_lens, target_lens)
+        loss_ctc = self.hparams.ctc_cost(p_ctc_feat, targets, wav_lens, target_lens)
+        loss_dec_out = self.hparams.seq_cost(p_dec_out, targets_eos, target_lens_eos)
+        loss_ctc_post_enc = self.hparams.ctc_cost(p_pre_enc_feats, targets, wav_lens, target_lens)
+        
+        # if stage == sb.Stage.TRAIN:
+        #     # # TODO: Better to Train CELoss without BOS / EOS
+        #     # pdb.set_trace()
+        #     # loss_dec_out = torch.tensor(0.0, device=self.device)
+
+        #     loss_dec_out = sb.nnet.losses.kldiv_loss(
+        #         p_dec_out,
+        #         targets_eos,
+        #         length=target_lens_eos,
+        #         label_smoothing=0.1,
+        #         reduction="batchmean",
+        #     )
+
+        # else: 
+        #     # During inference, don't compute attention loss
+        #     # loss_dec_out = torch.tensor(0.0, device=self.device)
+        #     loss_dec_out = sb.nnet.losses.kldiv_loss(
+        #         p_dec_out,
+        #         targets_eos,
+        #         length=target_lens_eos,
+        #         label_smoothing=0.1,
+        #         reduction="batchmean",
+        #     )
+        ctc_loss_merge = self.hparams.dual_ctc_loss_weight * loss_ctc + (1 - self.hparams.dual_ctc_loss_weight) * loss_ctc_post_enc
+
+        loss = (self.hparams.ctc_weight * ctc_loss_merge
+            + (1 - self.hparams.ctc_weight) * loss_dec_out)
+        
+        if stage != sb.Stage.TRAIN:
+            if current_epoch % valid_search_interval == 0 or (
+                    stage == sb.Stage.TEST
+                ):
+                    # Record losses for posterit
+                    # Traditional CTC greedy decoding
+                sequence = sb.decoders.ctc_greedy_decode(
+                    p_ctc_feat, wav_lens, blank_id=self.hparams.blank_index
+                )
+                sequence_decoder_out = hyps  # [B, T_p+1]
+                
+                # print(f"GT: \n {self.label_encoder.decode_ndim(targets[-1])}")
+                # print(f"CTC Greedy Decoding: \n {self.label_encoder.decode_ndim(sequence[-1])}")
+                # print(f"Attention Decoder Greedy Decoding: \n {self.label_encoder.decode_ndim(sequence_decoder_out[-1])}")
+
+                self.ctc_metrics.append(ids, p_ctc_feat, targets, wav_lens, target_lens)
+                self.seq_metrics.append(ids, log_probabilities=p_dec_out, targets=targets_eos, length=target_lens_eos)
+                
+                # self.ctc_metrics_fuse.append(ids, sequence_decoder_out, targets, wav_lens, target_lens)
+                
+                # CTC-only results
+                self.per_metrics.append(
+                    ids=ids,
+                    predict=sequence,
+                    target=targets,
+                    predict_len=None,
+                    target_len=target_lens,
+                    ind2lab=self.label_encoder.decode_ndim,
+                )
+                    
+                # seq2seq results
+                self.per_metrics_seq.append(
+                    ids=ids,
+                    predict=sequence_decoder_out,
+                    target=targets,
+                    predict_len=None,
+                    target_len=target_lens,
+                    ind2lab=self.label_encoder.decode_ndim,
+                )
+                
+                # MPD metrics
+                self.mpd_metrics.append(
+                    ids=ids,
+                    predict=sequence,
+                    canonical=canonicals,
+                    perceived=perceiveds,
+                    predict_len=None,
+                    canonical_len=canonical_lens,
+                    perceived_len=perceived_lens,
+                    ind2lab=self.label_encoder.decode_ndim,
+                )
+                
+                self.mpd_metrics_seq.append(
+                    ids=ids,
+                    predict=sequence_decoder_out,
+                    canonical=canonicals,
+                    perceived=perceiveds,
+                    predict_len=None,
+                    canonical_len=canonical_lens,
+                    perceived_len=perceived_lens,
+                    ind2lab=self.label_encoder.decode_ndim,
+                )
+            
+        # Log to wandb if available (VALID stage only)
+        current_epoch = self.hparams.epoch_counter.current          
+        valid_search_interval = self.hparams.valid_search_interval
+        if current_epoch % valid_search_interval == 0 or (
+            stage == sb.Stage.TEST
+        ):
+            try:
+                import wandb
+                wandb.log({
+                    "loss": loss.item(),
+                }, step=self.hparams.epoch_counter.current)
+                # if loss_ga is not None:
+                #     wandb.log({"loss_ga": loss_ga.item()}, step=self.hparams.epoch_counter.current)
+                if loss_dec_out is not None:
+                    wandb.log({"loss_dec_out": loss_dec_out.item()}, step=self.hparams.epoch_counter.current)
+                if loss_ctc is not None:
+                    wandb.log({"loss_ctc_head": loss_ctc.item()}, step=self.hparams.epoch_counter.current)
+            except Exception:
+                pass
+        return loss

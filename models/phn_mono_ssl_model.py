@@ -5,7 +5,8 @@ import torch.nn
 import logging
 import speechbrain as sb
 from hyperpyyaml import load_hyperpyyaml
-from mpd_eval_v3 import MpdStats
+# from mpd_eval_v3 import MpdStats
+from mpd_eval_v4 import MpdStats
 import librosa
 import json
 import wandb
@@ -165,46 +166,31 @@ class PhnMonoSSLModel(sb.Brain):
                     "mpd_f1": mpd_f1
                 },
             )
-            # Save best 3 Models
+            # Save best Models (only keep the single best for each metric)
             improved = False
-            # Save best 3 PER models (lower is better)
-            if per < self.best_per or len(self.best_per_list) < 3:
+            # Save best PER model (lower is better)
+            if per < self.best_per:
                 ckpt_name = f"best_per_{epoch:03d}_{per:.4f}.ckpt"
                 self.checkpointer.save_and_keep_only(
                     meta={"PER": per, "mpd_f1": mpd_f1, "epoch": epoch},
                     name=ckpt_name,
-                    num_to_keep=5,
+                    num_to_keep=1,
                     min_keys=["PER"]
                 )
-                self.best_per_list.append((per, epoch, ckpt_name))
-                self.best_per_list = sorted(self.best_per_list, key=lambda x: x[0])[:3]
-                self.best_per = self.best_per_list[0][0]
+                self.best_per = per
                 improved = True
-                # Remove extra checkpoints
-                if len(self.best_per_list) > 3:
-                    to_remove = self.best_per_list[3:]
-                    for _, _, name in to_remove:
-                        self.checkpointer.delete_checkpoint(name)
-                    self.best_per_list = self.best_per_list[:3]
-            # Save best 3 mpd_f1 models (higher is better)
-            if mpd_f1 > self.best_mpd_f1 or len(self.best_mpd_f1_list) < 3:
+            
+            # Save best mpd_f1 model (higher is better)
+            if mpd_f1 > self.best_mpd_f1:
                 ckpt_name = f"best_mpdf1_{epoch:03d}_{mpd_f1:.4f}.ckpt"
                 self.checkpointer.save_and_keep_only(
                     meta={"PER": per, "mpd_f1": mpd_f1, "epoch": epoch},
                     name=ckpt_name,
-                    num_to_keep=5,
+                    num_to_keep=1,
                     max_keys=["mpd_f1"]
                 )
-                self.best_mpd_f1_list.append((mpd_f1, epoch, ckpt_name))
-                self.best_mpd_f1_list = sorted(self.best_mpd_f1_list, key=lambda x: -x[0])[:3]
-                self.best_mpd_f1 = self.best_mpd_f1_list[0][0]
+                self.best_mpd_f1 = mpd_f1
                 improved = True
-                # Remove extra checkpoints
-                if len(self.best_mpd_f1_list) > 3:
-                    to_remove = self.best_mpd_f1_list[3:]
-                    for _, _, name in to_remove:
-                        self.checkpointer.delete_checkpoint(name)
-                    self.best_mpd_f1_list = self.best_mpd_f1_list[:3]
 
             # Early stopping logic: only track best valid loss, do not save checkpoint for valid loss
             if stage_loss < self.best_valid_loss or len(self.best_valid_loss_list) < 10:

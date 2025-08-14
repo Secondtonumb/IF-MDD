@@ -108,7 +108,7 @@ ctc_cost_mispro: !name:speechbrain.nnet.losses.ctc_loss
     blank_index: !ref <blank_index>
 
 # Outputs
-output_neurons: 42 # l2arctic: 40phns(sil)+err+blank=42
+output_neurons: 41 # l2arctic: 40phns(sil)+err+blank=42
 blank_index: 0
 
 model: !new:torch.nn.ModuleList
