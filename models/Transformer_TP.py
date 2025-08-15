@@ -514,6 +514,8 @@ class TransformerMDD_TP(sb.Brain):
         mispro_label, mispro_label_lens = batch.mispro_label
 
         feats = self.modules.perceived_ssl(wavs)  # [B, T_s, ENC_DIM]
+        if len(feats.shape) == 4: 
+            feats = feats[self.hparams.preceived_ssl_emb_layer]
         feats_enc= self.modules.enc(feats) # [B, T_s, D]
         
         current_epoch = self.hparams.epoch_counter.current
@@ -960,13 +962,13 @@ class TransformerMDD_TP(sb.Brain):
                         self.checkpointer.save_and_keep_only(
                             meta=meta,
                             name=ckpt_name,
-                            num_to_keep=5,
+                            num_to_keep=self.hparams.max_save_models * 4,
                             **{key_type: [meta_key]}
                         )
                         
                         best_list.append((current_value, epoch, ckpt_name))
                         best_list.sort(key=lambda x: -x[0] if is_higher_better else x[0])
-                        best_list[:] = best_list[:3]
+                        best_list[:] = best_list[:self.hparams.max_save_models]
                         return best_list[0][0], True
                     return best_value, False
                     

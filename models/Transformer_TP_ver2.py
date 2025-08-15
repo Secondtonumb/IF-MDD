@@ -515,6 +515,8 @@ class TransformerMDD_TP_ver2(sb.Brain):
         mispro_label, mispro_label_lens = batch.mispro_label
 
         feats = self.modules.perceived_ssl(wavs)  # [B, T_s, ENC_DIM]
+        if len(feats.shape) == 4: 
+            feats = feats[self.hparams.preceived_ssl_emb_layer]
         feats_enc= self.modules.enc(feats) # [B, T_s, D]
         
         current_epoch = self.hparams.epoch_counter.current
@@ -768,7 +770,7 @@ class TransformerMDD_TP_ver2(sb.Brain):
                 sequence_decoder_out = hyps  # [B, T_p+1]
                 
                 self.ctc_metrics.append(ids, p_ctc_feat, targets, wav_lens, target_lens)
-                self.seq_metrics.append(ids, log_probabilities=p_dec_out, targets=targets_eos, length=target_lens_eos)
+                self.seq_metrics.append(ids, log_probabilities=p_dec_out, targets=perceiveds_eos, length=perceived_lens_eos)
                 self.mispro_metrics.append(ids, h_mispro, mispro_label, mispro_label_lens)
                 
                 # TODO: Guided Attention metrics

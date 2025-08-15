@@ -26,6 +26,7 @@ pretrained_models={
     "data2vec_base": "facebook/data2vec-audio-base", # 768
     
     "wav2vec2_large": "facebook/wav2vec2-large", # 1024
+    "wav2vec_large_xlsr_53": "facebook/wav2vec2-large-xlsr-53", # 1024
     "hubert_large": "facebook/hubert-large-ls960-ft", # 1024
     "hubert_large_ll60k": "facebook/hubert-large-ll60k", # 1024
     "wavlm_large": "microsoft/wavlm-large", # 1024
@@ -35,7 +36,7 @@ pretrained_models={
     "whisper_large_v3_turbo": "openai/whisper-large-v3-turbo", # 1280
 }
 
-def AutoSSLLoader(model_name, freeze, freeze_feature_extractor, save_path, encoder_type=None):
+def AutoSSLLoader(model_name, freeze, freeze_feature_extractor, save_path, output_all_hiddens,encoder_type=None):
     """
     source: str, the name of the pretrained model e.g "hubert_multilingual", "clap", "data2vec_base", etc.
     freeze: bool, whether to freeze the model
@@ -60,27 +61,30 @@ def AutoSSLLoader(model_name, freeze, freeze_feature_extractor, save_path, encod
                 source=model_id,
                 freeze=freeze,
                 freeze_feature_extractor=freeze_feature_extractor,
-                save_path=save_path
+                save_path=save_path,
+                output_all_hiddens=output_all_hiddens
             )
         elif "hubert" in model_id:
             return HuBERT(
                 source=model_id,
                 freeze=freeze,
                 freeze_feature_extractor=freeze_feature_extractor,
-                save_path=save_path
+                save_path=save_path,
+                output_all_hiddens=output_all_hiddens
             )
         elif "wavlm" in model_id:
             return WavLM(
                 source=model_id,
                 freeze=freeze,
                 freeze_feature_extractor=freeze_feature_extractor,
-                save_path=save_path
+                save_path=save_path,
+                output_all_hiddens=output_all_hiddens
             )
         elif "whisper" in model_id:
             return Whisper(
                 source=model_id,
                 freeze=freeze,
-                save_path=save_path
+                save_path=save_path,
             )
         elif encoder_type:
             # use the give encoder 
@@ -89,7 +93,8 @@ def AutoSSLLoader(model_name, freeze, freeze_feature_extractor, save_path, encod
                     source=model_id,
                     freeze=freeze,
                     freeze_feature_extractor=freeze_feature_extractor,
-                    save_path=save_path
+                    save_path=save_path,
+                    output_all_hiddens=output_all_hiddens
                 )
             except:
                 raise ValueError(f"Unsupported encoder type: {encoder_type}")

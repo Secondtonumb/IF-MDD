@@ -899,7 +899,7 @@ class TransformerMDD(sb.Brain):
                             "PER_seq": per_seq, "mpd_f1_seq": mpd_f1_seq},
             )
             # 
-            with open(self.hparams.per_fileni shi z, "w") as w:
+            with open(self.hparams.per_file, "w") as w:
                 w.write("CTC loss stats:\n")
                 self.ctc_metrics.write_stats(w)
                 w.write("\nPER stats:\n")

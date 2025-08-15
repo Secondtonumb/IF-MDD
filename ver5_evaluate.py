@@ -11,6 +11,19 @@ For commercial use, please contact the author.
 This script implements the main training pipeline for the MDD system using
 various SSL models for speech recognition and pronunciation assessment.
 """
+"""
+MDD (Mispronunciation Detection and Diagnosis) System - Main Training Script
+
+Author: Haopeng (Kevin) Geng
+Institution: University of Tokyo
+Year: 2025
+
+This code is provided for non-commercial use only.
+For commercial use, please contact the author.
+
+This script implements the main training pipeline for the MDD system using
+various SSL models for speech recognition and pronunciation assessment.
+"""
 
 import os
 import sys
@@ -26,27 +39,29 @@ import wandb
 import time
 import torchaudio
 from speechbrain.inference.text import GraphemeToPhoneme
-from models.phn_mono_ssl_model import PhnMonoSSLModel,PhnMonoSSLModel_misproBCE
-from models.phn_mono_ssl_model import PhnMonoSSLModel_withcanoPhnEmb_HMA_CTC, HMA_attn_ctc_to_canonical
-from models.phn_mono_ssl_model import PhnMonoSSLModel_withcanoPhnEmb_MHA_Guided_Attention_CTC
-from models.phn_mono_ssl_model import HMA_attn_ctc_to_mispro
+# from models.phn_mono_ssl_model import PhnMonoSSLModel,PhnMonoSSLModel_misproBCE
+# from models.phn_mono_ssl_model import PhnMonoSSLModel_withcanoPhnEmb_HMA_CTC, HMA_attn_ctc_to_canonical
+# from models.phn_mono_ssl_model import PhnMonoSSLModel_withcanoPhnEmb_MHA_Guided_Attention_CTC
+# from models.phn_mono_ssl_model import HMA_attn_ctc_to_mispro
 
-from models.phn_dual_ssl_model import PhnDualSSLModel, PhnDualSSLModel_with_SimpleResidual
-from models.phn_dual_ssl_model import PhnDualSSLModel_Hybrid_CTC_Attention
-from models.phn_mono_ssl_model_ver2 import (HMA_attn_ctc_to_mispro_ver2,
-    HMA_attn_ctc_to_mispro_ver2_1,
-    HMA_attn_ctc_to_mispro_ver2_1_perceived,
-    HMA_attn_ctc_to_mispro_ver2_2)
-
+# from models.phn_dual_ssl_model import PhnDualSSLModel, PhnDualSSLModel_with_SimpleResidual
+# from models.phn_dual_ssl_model import PhnDualSSLModel_Hybrid_CTC_Attention
+# # from models.phn_mono_ssl_model_ver2 import (HMA_attn_ctc_to_mispro_ver2,
+#     HMA_attn_ctc_to_mispro_ver2_1,
+#     HMA_attn_ctc_to_mispro_ver2_1_perceived,
+#     HMA_attn_ctc_to_mispro_ver2_2)
 
 from models.Transformer import TransformerMDD, TransformerMDD_with_extra_loss, TransformerMDD_dual_path
+from models.Transformer_PhnForward import TransformerMDD_PhnForward
 from models.TransformerMHA import TransformerMDDMHA
 from models.Transducer import TransducerMDD
 from models.TransducerConformerEnc import TransducerMDDConformerEnc
+from models.Transformer_TP import TransformerMDD_TP
+from models.Transformer_TP_ver2 import TransformerMDD_TP_ver2
 
-from models.phn_mono_ssl_model_ver2 import Hybrid_CTC_Attention, Hybrid_CTC_Attention_ver2
+# from models.phn_mono_ssl_model_ver2 import Hybrid_CTC_Attention, Hybrid_CTC_Attention_ver2
 
-from models.phn_mono_ssl_model_ver3 import Hybrid_CTC_Attention_SB
+# from models.phn_mono_ssl_model_ver3 import Hybrid_CTC_Attention_SB
 
 wandb.login(key="1e2455bc962bb682012326b2964a299ed63c3690")
 
@@ -131,6 +146,12 @@ class BaseDataIOPrep:
     def _setup_label_encoder(self, datasets):
         """Setup label encoder."""
         lab_enc_file = os.path.join(self.hparams["save_folder"], "label_encoder.txt")
+        self.label_encoder.insert_bos_eos(
+            bos_label="<bos>",
+            eos_label="<eos>",
+            bos_index=42,
+            eos_index=43,
+        )
         special_labels = {
             "blank_label": self.hparams["blank_index"],
         }
@@ -240,12 +261,33 @@ class LLMDataIOPrep(BaseDataIOPrep):
             "phn_list_target",
             "phn_encoded_list_target",
             "phn_encoded_target",
+            "phn_list_target_bos",
+            "phn_encoded_list_target_bos",
+            "phn_encoded_target_bos",
+            "phn_list_target_eos",
+            "phn_encoded_list_target_eos",
+            "phn_encoded_target_eos",
+            
             "phn_list_canonical",
             "phn_encoded_list_canonical",
             "phn_encoded_canonical",
+            "phn_list_canonical_bos",
+            "phn_encoded_list_canonical_bos",
+            "phn_encoded_canonical_bos",
+            "phn_list_canonical_eos",
+            "phn_encoded_list_canonical_eos",
+            "phn_encoded_canonical_eos",
+
             "phn_list_perceived",
             "phn_encoded_list_perceived",
             "phn_encoded_perceived",
+            "phn_list_perceived_bos",
+            "phn_encoded_list_perceived_bos",
+            "phn_encoded_perceived_bos",
+            "phn_list_perceived_eos",
+            "phn_encoded_list_perceived_eos",
+            "phn_encoded_perceived_eos",
+            
             "mispro_label",
         )
         def text_pipeline_test(target, canonical, perceived):
@@ -256,12 +298,41 @@ class LLMDataIOPrep(BaseDataIOPrep):
             phn_encoded_target = torch.LongTensor(phn_encoded_list_target)
             yield phn_encoded_target
             
+            phn_list_target_bos = ["<bos>"] + phn_list_target
+            yield phn_list_target_bos
+            phn_encoded_list_target_bos = self.label_encoder.encode_sequence(phn_list_target_bos)
+            yield phn_encoded_list_target_bos
+            phn_encoded_target_bos = torch.LongTensor(phn_encoded_list_target_bos)
+            yield phn_encoded_target_bos
+            
+            phn_list_target_eos = phn_list_target + ["<eos>"]
+            yield phn_list_target_eos
+            phn_encoded_list_target_eos = self.label_encoder.encode_sequence(phn_list_target_eos)
+            yield phn_encoded_list_target_eos
+            phn_encoded_target_eos = torch.LongTensor(phn_encoded_list_target_eos)
+            yield phn_encoded_target_eos
+            
+
             phn_list_canonical = canonical.strip().split()
             yield phn_list_canonical
             phn_encoded_list_canonical = self.label_encoder.encode_sequence(phn_list_canonical)
             yield phn_encoded_list_canonical
             phn_encoded_canonical = torch.LongTensor(phn_encoded_list_canonical)
             yield phn_encoded_canonical
+            
+            phn_list_canonical_bos = ["<bos>"] + phn_list_canonical
+            yield phn_list_canonical_bos
+            phn_encoded_list_canonical_bos = self.label_encoder.encode_sequence(phn_list_canonical_bos)
+            yield phn_encoded_list_canonical_bos
+            phn_encoded_canonical_bos = torch.LongTensor(phn_encoded_list_canonical_bos)
+            yield phn_encoded_canonical_bos
+
+            phn_list_canonical_eos = phn_list_canonical + ["<eos>"]
+            yield phn_list_canonical_eos
+            phn_encoded_list_canonical_eos = self.label_encoder.encode_sequence(phn_list_canonical_eos)
+            yield phn_encoded_list_canonical_eos
+            phn_encoded_canonical_eos = torch.LongTensor(phn_encoded_list_canonical_eos)
+            yield phn_encoded_canonical_eos
             
             phn_list_perceived = perceived.strip().split()
             yield phn_list_perceived
@@ -270,8 +341,23 @@ class LLMDataIOPrep(BaseDataIOPrep):
             phn_encoded_perceived = torch.LongTensor(phn_encoded_list_perceived)
             yield phn_encoded_perceived
             
+            phn_list_perceived_bos = ["<bos>"] + phn_list_perceived
+            yield phn_list_perceived_bos
+            phn_encoded_list_perceived_bos = self.label_encoder.encode_sequence(phn_list_perceived_bos)
+            yield phn_encoded_list_perceived_bos
+            phn_encoded_perceived_bos = torch.LongTensor(phn_encoded_list_perceived_bos)
+            yield phn_encoded_perceived_bos
+
+            phn_list_perceived_eos = phn_list_perceived + ["<eos>"]
+            yield phn_list_perceived_eos
+            phn_encoded_list_perceived_eos = self.label_encoder.encode_sequence(phn_list_perceived_eos)
+            yield phn_encoded_list_perceived_eos
+            phn_encoded_perceived_eos = torch.LongTensor(phn_encoded_list_perceived_eos)
+            yield phn_encoded_perceived_eos
+
             mispro_label = [1 if p != c else 0 for p, c in zip(phn_list_perceived, phn_list_canonical)]
             mispro_label = torch.LongTensor(mispro_label)
+        
             yield mispro_label
 
         return text_pipeline_test
@@ -297,6 +383,12 @@ class LLMDataIOPrep(BaseDataIOPrep):
         output_keys = [
             "id", "sig", "phn_encoded_target", "phn_encoded_canonical", "phn_encoded_perceived",
             "phn_list_target", "phn_list_canonical", "phn_list_perceived", 
+            "phn_list_target_bos", "phn_list_target_eos",
+            "phn_list_canonical_bos", "phn_list_canonical_eos",
+            "phn_list_perceived_bos", "phn_list_perceived_eos",
+            "phn_encoded_target_bos", "phn_encoded_target_eos",
+            "phn_encoded_canonical_bos", "phn_encoded_canonical_eos",
+            "phn_encoded_perceived_bos", "phn_encoded_perceived_eos",
             "wrd", "mispro_label"
         ]
         sb.dataio.dataset.set_output_keys([train_data], output_keys)
@@ -479,6 +571,8 @@ class TimestampDataIOPrepforHybridCTCAttn(TimestampDataIOPrep):
             "phn_encoded_perceived_eos",
             
             "mispro_label",
+            "mispro_label_bos",
+            "mispro_label_eos",
             "mispro_label_framewise",
             "phn_encoded_target_bin",
         )
@@ -578,9 +672,19 @@ class TimestampDataIOPrepforHybridCTCAttn(TimestampDataIOPrep):
             phn_encoded_perceived_eos = torch.LongTensor(phn_encoded_list_perceived_eos)
             yield phn_encoded_perceived_eos
 
+            
             mispro_label = [1 if p != c else 0 for p, c in zip(phn_list_perceived, phn_list_canonical)]
+            # append a dummy phn for eos
+            mispro_label_bos = [0] + mispro_label
+            mispro_label_eos = mispro_label + [0]  # append a dummy for eos
             mispro_label = torch.LongTensor(mispro_label)
+            mispro_label_bos = torch.LongTensor(mispro_label_bos)
+            mispro_label_eos = torch.LongTensor(mispro_label_eos)
+
+
             yield mispro_label
+            yield mispro_label_bos
+            yield mispro_label_eos
             
             # Frame-wise mispronunciation labels
             mispro_label_framewise = torch.zeros(len(sig), dtype=torch.long)
@@ -630,10 +734,12 @@ class TimestampDataIOPrepforHybridCTCAttn(TimestampDataIOPrep):
         self._setup_label_encoder(datasets)
         # self.label_encoder.add_bos_eos("<bos>", "<eos>")
         max_label = max(self.label_encoder.lab2ind.values())
-
-        self.label_encoder.insert_bos_eos(bos_label="<bos>", eos_label="<eos>",
+        try:
+            self.label_encoder.insert_bos_eos(bos_label="<bos>", eos_label="<eos>",
                                           bos_index=max_label + 1, eos_index=max_label + 2,
                                           )
+        except:
+            print("eos added already")
         
 
         # Set output keys
@@ -644,7 +750,7 @@ class TimestampDataIOPrepforHybridCTCAttn(TimestampDataIOPrep):
             "wrd",
             "target_start_frames", "target_end_frames", 
             "canonical_start_frames", "canonical_end_frames",
-            "mispro_label", "mispro_label_framewise", "phn_encoded_target_bin",
+            "mispro_label", "mispro_label_bos", "mispro_label_eos", "mispro_label_framewise", "phn_encoded_target_bin",
             "phn_list_target_bos", "phn_encoded_list_target_bos", "phn_encoded_target_bos",
             "phn_list_target_eos", "phn_encoded_list_target_eos", "phn_encoded_target_eos",
             "phn_list_canonical_bos", "phn_encoded_list_canonical_bos", "phn_encoded_canonical_bos",
@@ -661,7 +767,8 @@ class TimestampDataIOPrepforHybridCTCAttn(TimestampDataIOPrep):
 if __name__ == "__main__":
     # CLI:
     hparams_file, run_opts, overrides = sb.parse_arguments(sys.argv[1:])
-
+    # log the running sys.argv[0: ] to logger
+    logger.info(f"# " + " ".join([sys.executable] + sys.argv))
     # Load hyperparameters file with command-line overrides
     with open(hparams_file) as fin:
         hparams = load_hyperpyyaml(fin, overrides)
@@ -676,12 +783,16 @@ if __name__ == "__main__":
     )
 
     # DataPrep
-    # DataPrep = TimestampDataIOPrep(hparams)
-    DataPrep = TimestampDataIOPrepforHybridCTCAttn(hparams)
+    # DataPrep = TimestampDataIOPrepforHybridCTCAttn(hparams)
+    # DataPrep = LLMDataIOPrep(hparams)
+    DataPrep = LLMDataIOPrep(hparams)
     train_data, valid_data, test_data, label_encoder = DataPrep.prepare()
-    
     # Model Selection
-    if hparams["feature_fusion"] == "mono":
+    if hparams["feature_fusion"] == "TransformerMDD":
+        asr_brain_class = TransformerMDD
+    elif hparams["feature_fusion"] == "TransformerMDD_dual_ctc":
+        asr_brain_class = TransformerMDD_dual_ctc
+    elif hparams["feature_fusion"] == "PhnMonoSSL":
         asr_brain_class = PhnMonoSSLModel
     elif hparams["feature_fusion"] == "mono_misproBCE":
         asr_brain_class = PhnMonoSSLModel_misproBCE
@@ -706,6 +817,10 @@ if __name__ == "__main__":
         asr_brain_class = HMA_attn_ctc_to_mispro_ver2_2
     elif hparams["feature_fusion"] == "TransformerMDD":
         asr_brain_class = TransformerMDD
+    elif hparams["feature_fusion"] == "TransformerMDD_TP":
+        asr_brain_class = TransformerMDD_TP
+    elif hparams["feature_fusion"] == "TransformerMDD_TP_ver2":
+        asr_brain_class = TransformerMDD_TP_ver2
     elif hparams["feature_fusion"] == "TransformerMDD_with_extra_loss":
         asr_brain_class = TransformerMDD_with_extra_loss
     elif hparams["feature_fusion"] == "TransformerMDD_dual_path":
@@ -714,6 +829,8 @@ if __name__ == "__main__":
         asr_brain_class = TransducerMDD
     elif hparams["feature_fusion"] == "TransformerMDDMHA":
         asr_brain_class = TransformerMDDMHA
+    elif hparams["feature_fusion"] == "TransformerMDD_PhnForward":
+        asr_brain_class = TransformerMDD_PhnForward
     elif hparams["feature_fusion"] == "TransducerMDDConformerEnc":
         asr_brain_class = TransducerMDDConformerEnc
     elif hparams["feature_fusion"] == "PGMDD":
@@ -731,6 +848,7 @@ if __name__ == "__main__":
         asr_brain_class = PhnDualSSLModel_with_SimpleResidual
     elif hparams["feature_fusion"] == "dual_ssl_enc_hybrid_ctc_attention":
         asr_brain_class = PhnDualSSLModel_Hybrid_CTC_Attention
+    
     logger.info(f"Using ASR brain class: {asr_brain_class.__name__}")
     
     asr_brain = asr_brain_class(
@@ -740,40 +858,49 @@ if __name__ == "__main__":
         checkpointer=hparams["checkpointer"],
     )
     asr_brain.label_encoder = label_encoder
-    # import pdb; pdb.set_trace()
-    from pathlib import Path
-    # wandb init group by hparams perceived_ssl_model, canonical_ssl_model, feature_fusion
     
+    # 
+    from pathlib import Path
+    # Wandb init group by hparams perceived_ssl_model, canonical_ssl_model, feature_fusion
+    prefix = hparams.get("prefix", "Null")
     perceived_ssl_model = hparams.get("perceived_ssl_model", "Null")
     canonical_ssl_model = hparams.get("canonical_ssl_model", "Null")    
     feature_fusion = hparams.get("feature_fusion", "Null")
-    # use the asr_brain's type as model name
+    prefix = hparams.get("prefix", None)
     model_type = type(asr_brain).__name__  # e.g., ASR_with_misproBCE_proj
-    # use stem of model_type 
     model_stem = Path(model_type).stem 
-
-    run_id = time.strftime("%Y%m%d-%H%M%S") 
-    run_name = f"{perceived_ssl_model}_{canonical_ssl_model}_{feature_fusion}_{model_stem}"
-    # if overrides.is given append its values to run_name
-    if isinstance(overrides, dict):
-        overrides = [f"{k}={v}" for k, v in overrides.items()]
-        run_name += "_" + "_".join(overrides)
     
+    run_id = time.strftime("%Y%m%d-%H%M%S") 
+    # import hyperpyyaml
+    run_name = f"{prefix}_{perceived_ssl_model}_{canonical_ssl_model}_{feature_fusion}"
+    # if isinstance(overrides, dict):
+    #     overrides = [f"{k}={v.strip()}" for k, v in overrides.items()]
+    #     run_name += "_" + "_".join(overrides)
     run_id = f"{run_name}_{run_id}"
+    
     # wandb init group by hparams perceived_ssl_model, canonical_ssl_model, feature_fusion
+    
     wandb.init(
-        project=hparams.get("wandb_project", "mdd-Trans"), 
+        project=hparams.get("wandb_project", model_type), 
         name=run_name,
         id=run_id,
         resume="allow"
     )
+
+    # Training/validation loop
+
+    # try:
+    #     asr_brain.fit(
+    #         asr_brain.hparams.epoch_counter,
+    #         train_data,
+    #         valid_data,
+    #         train_loader_kwargs=hparams["train_dataloader_opts"],
+    #         valid_loader_kwargs=hparams["valid_dataloader_opts"],
+    #     )
+    # except StopIteration:
+    #     print("Training stopped early due to no improvement.")
+    
     # Test
-    
-    # select 10 test data for debug
-    # import pdb; pdb.set_trace()
-    # records = test_data.data_ids[:10]
-    # test_data_ = test_data.filtered_sorted(key_test={"id": lambda x: x in records},)
-    
     if hparams.get("evaluate_key", True):
         key = hparams["evaluate_key"]
         if key == "mpd_f1" or key == "mpd_f1_seq":
@@ -788,6 +915,7 @@ if __name__ == "__main__":
                 test_loader_kwargs=hparams["test_dataloader_opts"],
                 min_key=key,
             )
+    
 # === Add placeholder gather_ctc_aligned_reps at top of file ===
     # DEBUG MODE
     train_record = test_data.data_ids[:1024]  # Select first 128 for debugging

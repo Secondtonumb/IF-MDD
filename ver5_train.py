@@ -43,6 +43,8 @@ from models.Transformer_PhnForward import TransformerMDD_PhnForward
 from models.TransformerMHA import TransformerMDDMHA
 from models.Transducer import TransducerMDD
 from models.TransducerConformerEnc import TransducerMDDConformerEnc
+from models.Transformer_TP import TransformerMDD_TP
+from models.Transformer_TP_ver2 import TransformerMDD_TP_ver2
 
 # from models.phn_mono_ssl_model_ver2 import Hybrid_CTC_Attention, Hybrid_CTC_Attention_ver2
 
@@ -341,7 +343,7 @@ class LLMDataIOPrep(BaseDataIOPrep):
             yield phn_encoded_perceived_eos
 
             mispro_label = [1 if p != c else 0 for p, c in zip(phn_list_perceived, phn_list_canonical)]
-
+            mispro_label = torch.LongTensor(mispro_label)
         
             yield mispro_label
 
@@ -719,10 +721,12 @@ class TimestampDataIOPrepforHybridCTCAttn(TimestampDataIOPrep):
         self._setup_label_encoder(datasets)
         # self.label_encoder.add_bos_eos("<bos>", "<eos>")
         max_label = max(self.label_encoder.lab2ind.values())
-
-        self.label_encoder.insert_bos_eos(bos_label="<bos>", eos_label="<eos>",
+        try:
+            self.label_encoder.insert_bos_eos(bos_label="<bos>", eos_label="<eos>",
                                           bos_index=max_label + 1, eos_index=max_label + 2,
                                           )
+        except:
+            print("eos added already")
         
 
         # Set output keys
@@ -748,6 +752,9 @@ class TimestampDataIOPrepforHybridCTCAttn(TimestampDataIOPrep):
         return train_data, valid_data, test_data, self.label_encoder
 
 if __name__ == "__main__":
+    import torch.multiprocessing as mp
+    mp.set_start_method("spawn", force=True)  # 放在任何 CUDA 初始化之前
+    # main()
     # CLI:
     hparams_file, run_opts, overrides = sb.parse_arguments(sys.argv[1:])
     # log the running sys.argv[0: ] to logger
@@ -767,6 +774,7 @@ if __name__ == "__main__":
 
     # DataPrep
     # DataPrep = TimestampDataIOPrepforHybridCTCAttn(hparams)
+    # DataPrep = LLMDataIOPrep(hparams)
     DataPrep = LLMDataIOPrep(hparams)
     train_data, valid_data, test_data, label_encoder = DataPrep.prepare()
     # Model Selection
@@ -799,6 +807,10 @@ if __name__ == "__main__":
         asr_brain_class = HMA_attn_ctc_to_mispro_ver2_2
     elif hparams["feature_fusion"] == "TransformerMDD":
         asr_brain_class = TransformerMDD
+    elif hparams["feature_fusion"] == "TransformerMDD_TP":
+        asr_brain_class = TransformerMDD_TP
+    elif hparams["feature_fusion"] == "TransformerMDD_TP_ver2":
+        asr_brain_class = TransformerMDD_TP_ver2
     elif hparams["feature_fusion"] == "TransformerMDD_with_extra_loss":
         asr_brain_class = TransformerMDD_with_extra_loss
     elif hparams["feature_fusion"] == "TransformerMDD_dual_path":
@@ -886,7 +898,7 @@ if __name__ == "__main__":
                 test_data,
                 test_loader_kwargs=hparams["test_dataloader_opts"],
                 max_key=key
-        )
+            )
         elif key == "PER" or key == "PER_seq":
             
             asr_brain.evaluate(
