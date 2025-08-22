@@ -531,6 +531,8 @@ class TransformerMDD(sb.Brain):
         # perceiveds_eos, perceived_lens_eos = batch.phn_encoded_perceived_eos
         # pdb.set_trace()
         feats = self.modules.perceived_ssl(wavs)  # [B, T_s, ENC_DIM]
+        if len(feats.shape) == 4: 
+            feats = feats[self.hparams.preceived_ssl_emb_layer]
 
         current_epoch = self.hparams.epoch_counter.current
         hyps = None

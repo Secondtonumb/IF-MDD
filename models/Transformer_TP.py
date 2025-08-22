@@ -536,7 +536,15 @@ class TransformerMDD_TP(sb.Brain):
             if self.hparams.fuse_enc_or_dec == "enc":
                 memory = enc_out
                 memory = self.modules.mem_proj(memory)  # [B, T_s, D]
-                # tgt_causal_mask = get_lookahead_mask(Cano_emb)
+                # project post encoder
+                if self.hparams.post_encoder_reduction_factor >= 1:
+                    # 使用Conv1d在时间维度降采样，保持D维度不变
+                    import torch.nn.functional as F
+                    factor = self.hparams.post_encoder_reduction_factor
+                    B, T, D = memory.shape
+                    memory_t = memory.transpose(1, 2)  # [B, D, T]
+                    memory_t = self.modules.mem_proj_cnn_post_enc(memory_t)
+                    memory = memory_t.transpose(1, 2)  # [B, T//factor, D]
                 
                 fuse_feat, _,  fuse_attn = self.modules.fuse_net(
                     tgt=Cano_emb,
@@ -591,6 +599,14 @@ class TransformerMDD_TP(sb.Brain):
                     memory = enc_out
                     memory = self.modules.mem_proj(memory)  # [B, T_s, D]
                     # tgt_causal_mask = get_lookahead_mask(Cano_emb)
+                    if self.hparams.post_encoder_reduction_factor >= 1:
+                        # 使用Conv1d在时间维度降采样，保持D维度不变
+                        import torch.nn.functional as F
+                        factor = self.hparams.post_encoder_reduction_factor
+                        B, T, D = memory.shape
+                        memory_t = memory.transpose(1, 2)  # [B, D, T]
+                        memory_t = self.modules.mem_proj_cnn_post_enc(memory_t)
+                        memory = memory_t.transpose(1, 2)  # [B, T//factor, D]
                     
                     fuse_feat, _,  fuse_attn = self.modules.fuse_net(
                         tgt=Cano_emb,

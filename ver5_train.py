@@ -38,7 +38,7 @@ from speechbrain.inference.text import GraphemeToPhoneme
 #     HMA_attn_ctc_to_mispro_ver2_1_perceived,
 #     HMA_attn_ctc_to_mispro_ver2_2)
 
-from models.Transformer import TransformerMDD, TransformerMDD_with_extra_loss, TransformerMDD_dual_path
+from models.Transformer import TransformerMDD
 from models.Transformer_PhnForward import TransformerMDD_PhnForward
 from models.TransformerMHA import TransformerMDDMHA
 from models.Transducer import TransducerMDD
@@ -752,8 +752,7 @@ class TimestampDataIOPrepforHybridCTCAttn(TimestampDataIOPrep):
         return train_data, valid_data, test_data, self.label_encoder
 
 if __name__ == "__main__":
-    import torch.multiprocessing as mp
-    mp.set_start_method("spawn", force=True)  # 放在任何 CUDA 初始化之前
+
     # main()
     # CLI:
     hparams_file, run_opts, overrides = sb.parse_arguments(sys.argv[1:])
@@ -878,7 +877,7 @@ if __name__ == "__main__":
     )
 
     # Training/validation loop
-
+    # import pdb; pdb.set_trace()
     try:
         asr_brain.fit(
             asr_brain.hparams.epoch_counter,
