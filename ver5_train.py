@@ -38,13 +38,14 @@ from speechbrain.inference.text import GraphemeToPhoneme
 #     HMA_attn_ctc_to_mispro_ver2_1_perceived,
 #     HMA_attn_ctc_to_mispro_ver2_2)
 
-from models.Transformer import TransformerMDD, TransformerMDD_with_extra_loss, TransformerMDD_dual_path
+from models.Transformer import TransformerMDD
 from models.Transformer_PhnForward import TransformerMDD_PhnForward
 from models.TransformerMHA import TransformerMDDMHA
 from models.Transducer import TransducerMDD
 from models.TransducerConformerEnc import TransducerMDDConformerEnc
 from models.Transformer_TP import TransformerMDD_TP
 from models.Transformer_TP_ver2 import TransformerMDD_TP_ver2
+from models.Transformer_TP_fuse import TransformerMDD_TP_encdec
 
 # from models.phn_mono_ssl_model_ver2 import Hybrid_CTC_Attention, Hybrid_CTC_Attention_ver2
 
@@ -809,6 +810,8 @@ if __name__ == "__main__":
         asr_brain_class = TransformerMDD_TP
     elif hparams["feature_fusion"] == "TransformerMDD_TP_ver2":
         asr_brain_class = TransformerMDD_TP_ver2
+    elif hparams["feature_fusion"] == "TransformerMDD_TP_encdec":
+        asr_brain_class = TransformerMDD_TP_encdec
     elif hparams["feature_fusion"] == "TransformerMDD_with_extra_loss":
         asr_brain_class = TransformerMDD_with_extra_loss
     elif hparams["feature_fusion"] == "TransformerMDD_dual_path":
@@ -876,7 +879,6 @@ if __name__ == "__main__":
     )
 
     # Training/validation loop
-
     try:
         asr_brain.fit(
             asr_brain.hparams.epoch_counter,

@@ -37,7 +37,7 @@ import torch.nn.functional as F
 from utils.layers.utils import make_pad_mask
 from utils.plot.plot_attn import plot_attention
 
-class TransformerMDD_TP(sb.Brain):
+class TransformerMDD_TP_encdec(sb.Brain):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # self.        super().__init__(*args, **kwargs)
@@ -533,7 +533,7 @@ class TransformerMDD_TP(sb.Brain):
                 pad_idx=0, 
             )
             # Option 2, fuse Canononical Emb and mispro after Encoder.
-            if self.hparams.fuse_enc_or_dec == "enc":
+            if "enc" in self.hparams.fuse_enc_or_dec:
                 memory = enc_out
                 memory = self.modules.mem_proj(memory)  # [B, T_s, D]
                 # project post encoder
@@ -554,13 +554,12 @@ class TransformerMDD_TP(sb.Brain):
                     pos_embs_tgt=RelPosEncXL(emb_dim=self.hparams.dnn_neurons)(Cano_emb).to(self.device),
                     pos_embs_src=RelPosEncXL(emb_dim=self.hparams.dnn_neurons)(memory).to(self.device)
                 )# [B, T_c, D]
-
-            elif self.hparams.fuse_enc_or_dec == "dec":
+            if "dec" in self.hparams.fuse_enc_or_dec:
                 memory = dec_out
                 # LayerNorm and Positional Embedding
-                memory = self.modules.mem_proj(memory)  # [B, T_p, D]
+                memory = self.modules.mem_proj_dec(memory)  # [B, T_p, D]
                 # tgt_causal_mask = get_lookahead_mask(Cano_emb)
-                fuse_feat, _,  fuse_attn = self.modules.fuse_net(
+                fuse_feat_dec, _,  fuse_attn_dec = self.modules.fuse_net_dec(
                     tgt=Cano_emb,
                     memory=memory,
                     tgt_key_padding_mask=make_pad_mask(Cano_emb.shape[1] * mispro_label_lens, maxlen=Cano_emb.shape[1]).to(self.device),
@@ -568,9 +567,13 @@ class TransformerMDD_TP(sb.Brain):
                     pos_embs_tgt=RelPosEncXL(emb_dim=self.hparams.dnn_neurons)(Cano_emb).to(self.device),
                     pos_embs_src=RelPosEncXL(emb_dim=self.hparams.dnn_neurons)(memory).to(self.device)
                 )# [B, T_c, D]
-
+            
+            if "enc" in self.hparams.fuse_enc_or_dec and "dec" in self.hparams.fuse_enc_or_dec:
+                # concat fuse_feat from enc and dec
+                fuse_feat_ = torch.cat((fuse_feat, fuse_feat_dec), dim=-1)
+                fuse_feat = self.modules.fuse_proj(fuse_feat_)  # [B, T, D]
+                
                 # tgt_mask=tgt_causal_mask,
-
                 # print("Warning: No fuse net is used!")
             # Apply LayerNorm
             
@@ -594,7 +597,7 @@ class TransformerMDD_TP(sb.Brain):
                     wav_len=wav_lens,
                     pad_idx=0,  
                 )
-                if self.hparams.fuse_enc_or_dec == "enc":
+                if "enc" in self.hparams.fuse_enc_or_dec:
                     memory = enc_out
                     memory = self.modules.mem_proj(memory)  # [B, T_s, D]
                     # tgt_causal_mask = get_lookahead_mask(Cano_emb)
@@ -617,12 +620,11 @@ class TransformerMDD_TP(sb.Brain):
                     )# [B, T_p, D]
 
                     # tgt_mask=tgt_causal_mask,
-                elif self.hparams.fuse_enc_or_dec == "dec":
+                if "dec" in self.hparams.fuse_enc_or_dec:
                     memory = dec_out
                     memory = self.modules.mem_proj(memory)  # [B, T_s, D]
                     # tgt_causal_mask = get_lookahead_mask(Cano_emb)
-                    
-                    fuse_feat, _,  fuse_attn = self.modules.fuse_net(
+                    fuse_feat_dec, _,  fuse_attn_dec = self.modules.fuse_net_dec(
                         tgt=Cano_emb,
                         memory=memory,
                         tgt_key_padding_mask=make_pad_mask(Cano_emb.shape[1] * mispro_label_lens, maxlen=Cano_emb.shape[1]).to(self.device),
@@ -630,10 +632,13 @@ class TransformerMDD_TP(sb.Brain):
                         pos_embs_tgt=RelPosEncXL(emb_dim=self.hparams.dnn_neurons)(Cano_emb).to(self.device),
                         pos_embs_src=RelPosEncXL(emb_dim=self.hparams.dnn_neurons)(memory).to(self.device)
                     )# [B, T_p, D]
-                   
+                
+                if "enc" in self.hparams.fuse_enc_or_dec and "dec" in self.hparams.fuse_enc_or_dec:
+                    # concat fuse_feat from enc and dec
+                    fuse_feat_ = torch.cat((fuse_feat, fuse_feat_dec), dim=-1)
+                    fuse_feat = self.modules.fuse_proj(fuse_feat_)  # [B, T, D]
                     # tgt_mask=tgt_causal_mask,
             
-                    
                 h_mispro = self.hparams.mispro_head(fuse_feat.transpose(1, 2))
                 h_mispro = h_mispro.transpose(1, 2)  # [B, T_c, D]
                 p_mispro_logits = torch.nn.functional.sigmoid(h_mispro)  # Log probabilities
@@ -654,8 +659,6 @@ class TransformerMDD_TP(sb.Brain):
                 attn_map = None
                 if self.hparams.plot_attention:
                     # Plot the last layer attention
-                    # fuse_attn[-1] #[B, T_p, T_s]
-                    # random select 1 example in each batch.id to plot
                     import random
                     select_id = random.choice(range(len(batch.id)))
                     for index, (attn, c_id) in enumerate(zip(fuse_attn[-1], batch.id)):
@@ -669,6 +672,17 @@ class TransformerMDD_TP(sb.Brain):
 
                         output_dir = Path(self.hparams.valid_attention_plot_dir) / f"{current_epoch:03d}"
                         plot_attention(attn.cpu(), self.hparams.nhead, c_id, output_dir)
+                    if fuse_attn_dec is not None:
+                        for index, (attn, c_id) in enumerate(zip(fuse_attn_dec[-1], batch.id)):
+                            if index != select_id:
+                                continue
+                            from pathlib import Path
+                            # 
+                            if len(attn.shape) == 2:
+                                attn = attn.unsqueeze(0)  # Add batch dimension [n, T_p, T_s]
+                            c_id = "_".join(c_id.split("/")[-3:])
+                            output_dir = Path(self.hparams.valid_attention_plot_dir) / f"{current_epoch:03d}_dec"
+                            plot_attention(attn.cpu(), self.hparams.nhead, c_id, output_dir)
 
 
             if stage == sb.Stage.TEST:
@@ -682,6 +696,9 @@ class TransformerMDD_TP(sb.Brain):
                             attn = attn.unsqueeze(0)  # Add batch dimension [n, T_p, T_s]
                         c_id = "_".join(c_id.split("/")[-3:])
                         plot_attention(attn.cpu(), self.hparams.nhead, c_id, self.hparams.test_attention_plot_dir)
+                        if fuse_attn_dec is not None:
+                            plot_attention(fuse_attn_dec[-1].cpu(), self.hparams.nhead, c_id, self.hparams.test_attention_plot_dir+"_dec")
+            
 
         return {
             "p_ctc_feat": p_ctc_logits,  # [B, T_s, C]
@@ -692,7 +709,9 @@ class TransformerMDD_TP(sb.Brain):
             "p_mispro_logits": p_mispro_logits,
             "h_mispro": h_mispro,
             "fuse_attn": fuse_attn,
-            "memory": memory,
+            "fuse_attn_dec": fuse_attn_dec,
+            "enc_out": enc_out,
+            "dec_out": dec_out,
             "Cano_emb": Cano_emb
         }
         
@@ -709,7 +728,9 @@ class TransformerMDD_TP(sb.Brain):
         p_mispro_logits = predictions["p_mispro_logits"]  # [B, T_c, C]
         h_mispro = predictions["h_mispro"]  # [B, T_c, C]
         fuse_attn = predictions["fuse_attn"]  # [B, T_c, T_s] or similar
-        memory = predictions["memory"]  # [B, T_c, D]
+        fuse_attn_dec = predictions["fuse_attn_dec"]  # [B, T_c, T_p] or similar
+        enc_out = predictions["enc_out"]  # [B, T_s, D]
+        dec_out = predictions["dec_out"]  # [B, T_p+1,
         Cano_emb = predictions["Cano_emb"]  # [B, T_c, D]
 
         wavs, wav_lens = batch.sig
@@ -736,8 +757,11 @@ class TransformerMDD_TP(sb.Brain):
         #     target_lens_eos = self.hparams.wav_augment.replicate_labels(target_lens_eos)
 
         # Caculate the loss for CTC and seq2seq outputs
-        # loss_ctc = self.hparams.ctc_cost(p_ctc_feat, targets, wav_lens, target_lens)
-        loss_ctc = self.hparams.ctc_cost(p_ctc_feat, targets, wav_lens, target_lens)
+        # loss_ctc = self.hparams.ctc_cost(p_ctc_feat, targets, wav_lens, target_lens
+        if self.hparams.ctc_head_target == "perceived":
+            loss_ctc = self.hparams.ctc_cost(p_ctc_feat, targets, wav_lens, target_lens)
+        elif self.hparams.ctc_head_target == "canonical":
+            loss_ctc = self.hparams.ctc_cost(p_ctc_feat, canonicals, wav_lens, canonical_lens)
         loss_dec_out = self.hparams.seq_cost(p_dec_out, targets_eos, target_lens_eos)
         loss_mispro = self.hparams.mispro_cost(inputs=h_mispro,
                                                targets=mispro_label, 
@@ -750,17 +774,19 @@ class TransformerMDD_TP(sb.Brain):
         # Use Last Layer's MHA 
         attn_last = fuse_attn[-1] 
         attn_ga = attn_last.mean(dim=1)  # [B, T_p]
-        if self.hparams.fuse_enc_or_dec == "enc":
+        if "enc" in self.hparams.fuse_enc_or_dec:
             # FUSE_attn [B, T_p, T_s]
             loss_ga = self.hparams.ga_cost()(attn_ga, 
                                            target_lengths=(canonical_lens * Cano_emb.shape[1]).int(),
-                                           input_lengths=(wav_lens * memory.shape[1]).int()
+                                           input_lengths=((wav_lens * enc_out.shape[1]) / self.hparams.post_encoder_reduction_factor).int()
                                             )
-        elif self.hparams.fuse_enc_or_dec == "dec":
+        if "dec" in self.hparams.fuse_enc_or_dec:
             # FUSE_attn [B, T_p, T_p]
-            loss_ga = self.hparams.ga_cost()(attn_ga, 
+            attn_last_dec = fuse_attn_dec[-1]
+            attn_ga = attn_last_dec.mean(dim=1)  # [B, T_p]
+            loss_ga += self.hparams.ga_cost()(attn_ga, 
                                            target_lengths=(canonical_lens * Cano_emb.shape[1]).int(),
-                                           input_lengths=(target_lens_eos * memory.shape[1]).int()
+                                           input_lengths=(target_lens_eos * dec_out.shape[1]).int()
                                             )
         # FUSE_attn [B, T_p, T_p]
             
@@ -770,7 +796,6 @@ class TransformerMDD_TP(sb.Brain):
             + loss_mispro 
             + loss_ga * 10
         )
-
 
         if stage != sb.Stage.TRAIN:
             if current_epoch % valid_search_interval == 0 or (
@@ -783,7 +808,10 @@ class TransformerMDD_TP(sb.Brain):
                 )
                 sequence_decoder_out = hyps  # [B, T_p+1]
                 
-                self.ctc_metrics.append(ids, p_ctc_feat, targets, wav_lens, target_lens)
+                if self.hparams.ctc_head_target == "perceived":
+                    self.ctc_metrics.append(ids, p_ctc_feat, targets, wav_lens, target_lens)
+                elif self.hparams.ctc_head_target == "canonical":
+                    self.ctc_metrics.append(ids, p_ctc_feat, canonicals, wav_lens, canonical_lens)
                 self.seq_metrics.append(ids, log_probabilities=p_dec_out, targets=targets_eos, length=target_lens_eos)
                 self.mispro_metrics.append(ids, h_mispro, mispro_label, mispro_label_lens)
                 
@@ -796,14 +824,24 @@ class TransformerMDD_TP(sb.Brain):
                 # self.ctc_metrics_fuse.append(ids, sequence_decoder_out, targets, wav_lens, target_lens)
                 
                 # CTC-only results
-                self.per_metrics.append(
-                    ids=ids,
-                    predict=sequence,
-                    target=targets,
-                    predict_len=None,
-                    target_len=target_lens,
-                    ind2lab=self.label_encoder.decode_ndim,
-                )
+                if self.hparams.ctc_head_target == "perceived":
+                    self.per_metrics.append(
+                        ids=ids,
+                        predict=sequence,
+                        target=targets,
+                        predict_len=None,
+                        target_len=target_lens,
+                        ind2lab=self.label_encoder.decode_ndim,
+                    )
+                elif self.hparams.ctc_head_target == "canonical":
+                    self.per_metrics.append(
+                        ids=ids,
+                        predict=sequence,
+                        target=canonicals,
+                        predict_len=None,
+                        target_len=canonical_lens,
+                        ind2lab=self.label_encoder.decode_ndim,
+                    )
                     
                 # seq2seq results
                 self.per_metrics_seq.append(

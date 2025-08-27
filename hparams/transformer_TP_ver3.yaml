@@ -30,12 +30,6 @@ test_annotation: !ref <data_folder_save>/test.json
 
 # generate training id for output folder
 # generate_training_id: !apply:trainer.generate_training_id.generate_training_id [!ref <perceived_ssl_model_id>, !ref <canonical_ssl_model_id>, !ref <feature_fusion>, !ref <prefix>]
-# evaluate key:
-evaluate_key: "mpd_f1" # use "mpd_f1_seq" for Transformer decoder path best mpd f1
-                            # "PER_seq" for Transformer decoder's best error rate
-                            # "PER" for ctc path best error rate
-                            # "mpd_f1" for ctc path best mpd f1
-max_save_models: 3 # Maximum number of saved models for each metrics 
 
 evaluate_key: "mpd_f1" # use "mpd_f1_seq" for Transformer decoder path best mpd f1
                             # "PER_seq" for Transformer decoder's best error rate
@@ -64,15 +58,13 @@ modules:
     fuse_net: !ref <fuse_net>
     mispro_head: !ref <mispro_head>
     mem_proj: !ref <mem_proj>
+    mem_proj_cnn_post_enc: !ref <mem_proj_cnn_post_enc>
 
 perceived_ssl: !apply:trainer.AutoSSLoader.AutoSSLLoader
     model_name: !ref <perceived_ssl_model>
     freeze: !ref <freeze_perceived_ssl>
     freeze_feature_extractor: !ref <freeze_perceived_feature_extractor>
     save_path: !ref <pretrained_models_path>
-    output_all_hiddens: False
-
-preceived_ssl_emb_layer: -1 # 0~12 for wav2vec2, 0~23 for wavlm, -1 for last layer
     output_all_hiddens: False
 
 preceived_ssl_emb_layer: -1
@@ -187,6 +179,16 @@ mem_proj_linear: !new:torch.nn.Linear
     in_features: !ref <mem_proj_out_dim>
     out_features: !ref <dnn_neurons>
     # bias: true
+# post_encoder_reduction_factor
+
+post_encoder_reduction_factor: 2
+
+mem_proj_cnn_post_enc: !new:torch.nn.Conv1d
+    in_channels: !ref <dnn_neurons>
+    out_channels: !ref <dnn_neurons>
+    kernel_size: !ref <post_encoder_reduction_factor>
+    stride: !ref <post_encoder_reduction_factor>
+    padding: 0
 
 # memory
 # Fusion network
@@ -197,7 +199,7 @@ fuse_net: !new:speechbrain.lobes.models.transformer.Transformer.TransformerDecod
     num_layers: !ref <fuse_net_layers>
     nhead: !ref <nhead>
     d_ffn: !ref <d_ffn>
-    d_model: !ref <dnn_neurons>
+    d_model: !ref <dnn_neurons> 
     activation: !ref <activation>
     attention_type: "RelPosMHAXL"
     causal: true
@@ -297,6 +299,7 @@ model: !new:torch.nn.ModuleList
      !ref <TransASR>,
      !ref <d_out>,
      !ref <mem_proj>,
+     !ref <mem_proj_cnn_post_enc>
      ]
 
 adam_opt_class: !name:torch.optim.Adam
@@ -392,15 +395,16 @@ min_epochs_before_metric_freeze: 20   # Minimum epochs before considering metric
 # Dataloader options
 train_dataloader_opts:
     batch_size: !ref <batch_size>
+    num_workers: 16
 
 valid_dataloader_opts:
     batch_size: !ref <batch_size>
+    num_workers: 16
 
 test_dataloader_opts:
     batch_size: 1
-    num_workers: 0
+    num_workers: 16
 
-    
 noam_annealing: !new:speechbrain.nnet.schedulers.NewBobScheduler
     initial_value: !ref <lr>
     annealing_factor: 0.8

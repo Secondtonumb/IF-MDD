@@ -9,7 +9,14 @@ source ~/.bashrc
 cd /home/m64000/work/SSL_MDD
 
 conda activate sb
-nvidia-smi
+
+# ctc only
+# python ver5_train.py \
+#         hparams/phnmonossl.yaml \
+#         --feature_fusion PhnMonoSSL \
+#         --perceived_ssl_model wavlm_large \
+#         --ENCODER_DIM 1024 \
+#         --prefix wavlm_ctc
 
 # # ctc only
 # python ver5_train.py \
@@ -61,6 +68,8 @@ nvidia-smi
 #         --num_decoder_layers 2 \
 #         --nhead 8 \
 #         --fuse_enc_or_dec enc
+        # --attention_type regularMHA \
+        # --valid_search_interval 1
 
 # python ver5_train.py \
 #         hparams/transformer_TP.yaml \
@@ -77,19 +86,19 @@ nvidia-smi
 #         --enable_ctc_freezing True
 
 # Ver 2 
-python ver5_train.py \
-        hparams/transformer_TP.yaml \
-        --feature_fusion TransformerMDD_TP_ver2 \
-        --perceived_ssl_model wavlm_large \
-        --ENCODER_DIM 1024 \
-        --prefix transformer_2_2_8_TP_fuse_2_dec_ga_per_trgt \
-        --num_encoder_layers 2 \
-        --num_decoder_layers 2 \
-        --nhead 8 \
-        --fuse_enc_or_dec dec \
-        --fuse_net_layers 2 \
-        --attention_type RelPosMHAXL \
-        --enable_ctc_freezing True
+# python ver5_train.py \
+#         hparams/transformer_TP.yaml \
+#         --feature_fusion TransformerMDD_TP_ver2 \
+#         --perceived_ssl_model wavlm_large \
+#         --ENCODER_DIM 1024 \
+#         --prefix transformer_2_2_8_TP_fuse_2_dec_ga_per_trgt \
+#         --num_encoder_layers 2 \
+#         --num_decoder_layers 2 \
+#         --nhead 8 \
+#         --fuse_enc_or_dec dec \
+#         --fuse_net_layers 2 \
+#         --attention_type RelPosMHAXL \
+#         --enable_ctc_freezing True
 
 # # Fuse dec
 # python ver5_train.py \
@@ -234,6 +243,40 @@ python ver5_train.py \
 #         --nhead 8 \
 #         --dual_ctc_loss_weight 0.5
 
+## Fuse net on both enc and dec
+# RelPosMHA
+# python ver5_train.py \
+#         hparams/transformer_TP_ver4_fuse.yaml \
+#         --feature_fusion TransformerMDD_TP_encdec \
+#         --perceived_ssl_model wavlm_large \
+#         --ENCODER_DIM 1024 \
+#         --prefix transformer_2_TP_fuse_2_encdec\
+#         --fuse_enc_or_dec encdec \
+#         --attention_type RelPosMHAXL \
+#         --valid_search_interval 5 \
+
+# # RoPE MHA
+# python ver5_train.py \
+#         hparams/transformer_TP_ver4_fuse.yaml \
+#         --feature_fusion TransformerMDD_TP_encdec \
+#         --perceived_ssl_model wavlm_large \
+#         --ENCODER_DIM 1024 \
+#         --prefix transformer_2_TP_fuse_2_encdec_RoPE\
+#         --fuse_enc_or_dec encdec \
+#         --attention_type RoPEMHA \
+#         --valid_search_interval 5 
+
+# RelPosMHA but ctc head targeting canonical
+python ver5_train.py \
+        hparams/transformer_TP_ver4_fuse.yaml \
+        --feature_fusion TransformerMDD_TP_encdec \
+        --perceived_ssl_model wavlm_large \
+        --ENCODER_DIM 1024 \
+        --prefix transformer_2_TP_fuse_2_encdec_CTCHeadCano\
+        --fuse_enc_or_dec encdec \
+        --attention_type RelPosMHAXL \
+        --valid_search_interval 5 \
+        --ctc_head_target canonical 
 
 # MHA for Canonical Phn + Acoustic 
 # python ver4_train.py \
@@ -521,7 +564,6 @@ python ver5_train.py \
 #        --ENCODER_DIM 1024 \
 #        --feature_fusion TransducerMDD
 
-
 ## Transducer with Conformer Encoder
 # python ver5_train.py \
 #        hparams/l2arctic/TransducerConformerEnc.yaml \
@@ -672,3 +714,4 @@ python ver5_train.py \
 #        --prefix  Transformer_6_6 \
 #        --perceived_ssl_model wav2vec2_base \
 #        --feature_fusion SB --ctc_weight_decode 0.7
+

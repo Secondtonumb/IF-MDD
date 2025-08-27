@@ -30,12 +30,6 @@ test_annotation: !ref <data_folder_save>/test.json
 
 # generate training id for output folder
 # generate_training_id: !apply:trainer.generate_training_id.generate_training_id [!ref <perceived_ssl_model_id>, !ref <canonical_ssl_model_id>, !ref <feature_fusion>, !ref <prefix>]
-# evaluate key:
-evaluate_key: "mpd_f1" # use "mpd_f1_seq" for Transformer decoder path best mpd f1
-                            # "PER_seq" for Transformer decoder's best error rate
-                            # "PER" for ctc path best error rate
-                            # "mpd_f1" for ctc path best mpd f1
-max_save_models: 3 # Maximum number of saved models for each metrics 
 
 evaluate_key: "mpd_f1" # use "mpd_f1_seq" for Transformer decoder path best mpd f1
                             # "PER_seq" for Transformer decoder's best error rate
@@ -62,17 +56,18 @@ modules:
     d_out: !ref <d_out>
     phn_emb: !ref <phn_emb>
     fuse_net: !ref <fuse_net>
+    fuse_net_dec: !ref <fuse_net>  # separate fuse net for dec
     mispro_head: !ref <mispro_head>
     mem_proj: !ref <mem_proj>
+    mem_proj_cnn_post_enc: !ref <mem_proj_cnn_post_enc>
+    mem_proj_dec: !ref <mem_proj_dec>
+    fuse_proj: !ref <fuse_proj>
 
 perceived_ssl: !apply:trainer.AutoSSLoader.AutoSSLLoader
     model_name: !ref <perceived_ssl_model>
     freeze: !ref <freeze_perceived_ssl>
     freeze_feature_extractor: !ref <freeze_perceived_feature_extractor>
     save_path: !ref <pretrained_models_path>
-    output_all_hiddens: False
-
-preceived_ssl_emb_layer: -1 # 0~12 for wav2vec2, 0~23 for wavlm, -1 for last layer
     output_all_hiddens: False
 
 preceived_ssl_emb_layer: -1
@@ -94,6 +89,9 @@ enc: !new:torch.nn.Sequential
 ctc_lin:  !new:speechbrain.nnet.linear.Linear
     input_size: !ref <dnn_neurons>
     n_neurons: !ref <output_neurons>  # 40 phonemes + 1 blank + 1 err
+
+# ctc_head_targeting
+ctc_head_target: "perceived"  # Options: "perceived", "canonical"
 
 # transformer
 nhead: 8
@@ -177,20 +175,42 @@ phn_emb: !new:torch.nn.Sequential
 mem_proj_out_dim: !ref <dnn_neurons>
 
 # With RelPosMHAXL, avoid adding absolute positional encoding on memory to prevent mixing abs+rel encodings.
+mem_proj_linear: !new:torch.nn.Linear
+    in_features: !ref <mem_proj_out_dim>
+    out_features: !ref <dnn_neurons>
+    # bias: true
+# mapping Transformer encoder's output to fuse_net's d_model
 mem_proj: !new:torch.nn.Sequential
   - !ref <mem_proj_linear>
   - !new:torch.nn.LayerNorm
       normalized_shape: !ref <mem_proj_out_dim>
   - !new:torch.nn.ReLU
 
-mem_proj_linear: !new:torch.nn.Linear
-    in_features: !ref <mem_proj_out_dim>
-    out_features: !ref <dnn_neurons>
-    # bias: true
+# A downsampling CNN after Transformer encoder to reduce memory length
+# Helps guide attention to focus on important parts
+post_encoder_reduction_factor: 4
+mem_proj_cnn: !new:torch.nn.Conv1d
+    in_channels: !ref <dnn_neurons>
+    out_channels: !ref <dnn_neurons>
+    kernel_size: !ref <post_encoder_reduction_factor>
+    stride: !ref <post_encoder_reduction_factor>
+    padding: 0
+    
+mem_proj_cnn_post_enc:  !new:torch.nn.Sequential
+    - !ref <mem_proj_cnn>
+    - !new:torch.nn.BatchNorm1d
+        num_features: !ref <dnn_neurons>
+
+# mapping Transformer encoder's output to fuse_net's d_model
+mem_proj_dec: !new:torch.nn.Sequential
+  - !ref <mem_proj_linear>
+  - !new:torch.nn.LayerNorm
+      normalized_shape: !ref <mem_proj_out_dim>
+  - !new:torch.nn.ReLU
 
 # memory
 # Fusion network
-fuse_enc_or_dec: "enc"
+fuse_enc_or_dec: "encdec"
 fuse_net_layers: 2
 
 fuse_net: !new:speechbrain.lobes.models.transformer.Transformer.TransformerDecoder
@@ -201,6 +221,21 @@ fuse_net: !new:speechbrain.lobes.models.transformer.Transformer.TransformerDecod
     activation: !ref <activation>
     attention_type: "RelPosMHAXL"
     causal: true
+
+fuse_net_dec: !new:speechbrain.lobes.models.transformer.Transformer.TransformerDecoder
+    num_layers: !ref <fuse_net_layers>
+    nhead: !ref <nhead>
+    d_ffn: !ref <d_ffn>
+    d_model: !ref <dnn_neurons>
+    activation: !ref <activation>
+    attention_type: "RelPosMHAXL"
+    causal: true
+
+# concat the fuse features from enc and dec
+fuse_proj: !new:torch.nn.Linear
+    in_features: !ref <dnn_neurons> + <dnn_neurons>  # if concat enc and dec fuse features
+    out_features: !ref <dnn_neurons>
+    # bias: true
 
 # ─── Autoregressive Greedy Searcher ──────────────────────────────────────
 # valid_search: !new:speechbrain.decoders.seq2seq.S2STransformerBeamSearcher
@@ -257,7 +292,6 @@ freeze_canonical_ssl: False
 freeze_perceived_feature_extractor: True  # freeze the CNN extractor in wav2vec
 freeze_canonical_feature_extractor: True         # Freeze Whisper encoder?
 
-
 log_softmax: !new:speechbrain.nnet.activations.Softmax
     apply_log: True
 
@@ -293,10 +327,14 @@ model: !new:torch.nn.ModuleList
      !ref <phn_emb>,
      !ref <ctc_lin>,
      !ref <fuse_net>,
+     !ref <fuse_net_dec>,
      !ref <mispro_head>,
      !ref <TransASR>,
      !ref <d_out>,
      !ref <mem_proj>,
+     !ref <mem_proj_cnn_post_enc>,
+     !ref <mem_proj_dec>,
+     !ref <fuse_proj>,
      ]
 
 adam_opt_class: !name:torch.optim.Adam
@@ -392,15 +430,13 @@ min_epochs_before_metric_freeze: 20   # Minimum epochs before considering metric
 # Dataloader options
 train_dataloader_opts:
     batch_size: !ref <batch_size>
-
+    
 valid_dataloader_opts:
     batch_size: !ref <batch_size>
 
 test_dataloader_opts:
     batch_size: 1
-    num_workers: 0
 
-    
 noam_annealing: !new:speechbrain.nnet.schedulers.NewBobScheduler
     initial_value: !ref <lr>
     annealing_factor: 0.8
