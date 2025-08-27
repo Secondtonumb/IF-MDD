@@ -752,8 +752,6 @@ class TimestampDataIOPrepforHybridCTCAttn(TimestampDataIOPrep):
         return train_data, valid_data, test_data, self.label_encoder
 
 if __name__ == "__main__":
-    import torch.multiprocessing as mp
-    mp.set_start_method("spawn", force=True)  # 放在任何 CUDA 初始化之前
     # main()
     # CLI:
     hparams_file, run_opts, overrides = sb.parse_arguments(sys.argv[1:])

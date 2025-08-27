@@ -20,6 +20,7 @@ import speechbrain as sb
 from speechbrain.utils.distributed import if_main_process, run_on_main
 from speechbrain.utils.logger import get_logger
 
+from utils.data_prep import TimestampDataIOPrepforHybridCTCAttn
 logger = get_logger(__name__)
 
 
@@ -272,7 +273,7 @@ if __name__ == "__main__":
         hparams = load_hyperpyyaml(fin, overrides)
 
     # Dataset prep (parsing TIMIT and annotation into csv files)
-    from timit_prepare import prepare_timit  # noqa
+    # from timit_prepare import prepare_timit  # noqa
 
     # Initialize ddp (useful only for multi-GPU DDP training)
     sb.utils.distributed.ddp_init_group(run_opts)
@@ -301,6 +302,10 @@ if __name__ == "__main__":
 
     # Dataset IO prep: creating Dataset objects and proper encodings for phones
     train_data, valid_data, test_data, label_encoder = dataio_prep(hparams)
+    
+    # DataPrep = TimestampDataIOPrepforHybridCTCAttn(hparams)
+    # train_data, valid_data, test_data, label_encoder = DataPrep.prepare(hparams)
+
     import pdb; pdb.set_trace()
     # Trainer initialization
     asr_brain = ASR_Brain(

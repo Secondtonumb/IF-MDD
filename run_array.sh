@@ -11,228 +11,38 @@ cd /home/m64000/work/SSL_MDD
 conda activate sb
 nvidia-smi
 
-# # ctc only
+# ### Testing Error Label pos weights
+# weight=${PBS_ARRAY_INDEX}
 # python ver5_train.py \
-#         hparams/phnmonossl.yaml \
-#         --feature_fusion PhnMonoSSL \
-#         --perceived_ssl_model wavlm_large \
-#         --ENCODER_DIM 1024 \
-#         --prefix wavlm_ctc
+#        hparams/l2arctic/Transformer_with_extra_loss.yaml \
+#        --prefix  transformer_el_2_2_8_el_pos_weight_${weight} \
+#        --perceived_ssl_model wavlm_large \
+#        --feature_fusion TransformerMDD_with_extra_loss \
+#        --num_encoder_layers 2 \
+#        --num_decoder_layers 2 \
+#        --nhead 8 \
+#        --ctc_weight 0.3 \
+#        --ENCODER_DIM 1024 \
+#        --encoder_module transformer \
+#        --number_of_epochs 300 \
+#        --valid_search_interval 5 \
+#        --mispro_pos_weight ${weight} 
 
-# python ver4_train.py \
-#         hparams/train_l2_arctic_cano_perc_dual_enc.yaml \
-#         --perceived_ssl_model wavlm_large \
-#         --canonical_ssl_model wavlm_large \
-#         --ENCODER_DIM 1024 \
-#         --feature_fusion dual_ssl_enc \
-#         --prefix ""
-
-# # Light transformer
-# python ver5_train.py \
-#         hparams/transformer.yaml \
-#         --feature_fusion TransformerMDD \
-#         --perceived_ssl_model wavlm_large \
-#         --ENCODER_DIM 1024 \
-#         --prefix transformer_2_2_8 \
-#         --num_encoder_layers 2 \
-#         --num_decoder_layers 2 \
-#         --nhead 8 
-
-# # very light transformer
-# python ver5_train.py \
-#         hparams/transformer.yaml \
-#         --feature_fusion TransformerMDD \
-#         --perceived_ssl_model wavlm_large \
-#         --ENCODER_DIM 1024 \
-#         --prefix transformer_1_2_8 \
-#         --num_encoder_layers 1 \
-#         --num_decoder_layers 2 \
-#         --nhead 8 
-
-# # transformer with mispro
-# ## Fuse enc
-# python ver5_train.py \
-#         hparams/transformer_TP.yaml \
-#         --feature_fusion TransformerMDD_TP \
-#         --perceived_ssl_model wavlm_large \
-#         --ENCODER_DIM 1024 \
-#         --prefix transformer_2_2_8_TP_fuse_enc \
-#         --num_encoder_layers 2 \
-#         --num_decoder_layers 2 \
-#         --nhead 8 \
-#         --fuse_enc_or_dec enc
-
-# python ver5_train.py \
-#         hparams/transformer_TP.yaml \
-#         --feature_fusion TransformerMDD_TP \
-#         --perceived_ssl_model wavlm_large \
-#         --ENCODER_DIM 1024 \
-#         --prefix transformer_2_2_8_TP_fuse_2_enc_ga \
-#         --num_encoder_layers 2 \
-#         --num_decoder_layers 2 \
-#         --nhead 8 \
-#         --fuse_enc_or_dec enc \
-#         --fuse_net_layers 2 \
-#         --attention_type RelPosMHAXL \
-#         --enable_ctc_freezing True
-
-# Ver 2 
+weight=${PBS_ARRAY_INDEX}
 python ver5_train.py \
-        hparams/transformer_TP.yaml \
-        --feature_fusion TransformerMDD_TP_ver2 \
-        --perceived_ssl_model wavlm_large \
-        --ENCODER_DIM 1024 \
-        --prefix transformer_2_2_8_TP_fuse_2_dec_ga_per_trgt \
-        --num_encoder_layers 2 \
-        --num_decoder_layers 2 \
-        --nhead 8 \
-        --fuse_enc_or_dec dec \
-        --fuse_net_layers 2 \
-        --attention_type RelPosMHAXL \
-        --enable_ctc_freezing True
-
-# # Fuse dec
-# python ver5_train.py \
-#         hparams/transformer_TP.yaml \
-#         --feature_fusion TransformerMDD_TP \
-#         --perceived_ssl_model wavlm_large \
-#         --ENCODER_DIM 1024 \
-#         --prefix transformer_2_2_8_TP_fuse_dec \
-#         --num_encoder_layers 2 \
-#         --num_decoder_layers 2 \
-#         --nhead 8 \
-#         --fuse_enc_or_dec dec
-
-# python ver5_train.py \
-#         hparams/transformer_TP.yaml \
-#         --feature_fusion TransformerMDD_TP \
-#         --perceived_ssl_model wavlm_large \
-#         --ENCODER_DIM 1024 \
-#         --prefix transformer_2_2_8_TP_fuse_2_dec_ga \
-#         --num_encoder_layers 2 \
-#         --num_decoder_layers 2 \
-#         --nhead 8 \
-#         --fuse_enc_or_dec dec \
-#         --fuse_net_layers 2 \
-#         --attention_type RelPosMHAXL \
-#         --enable_ctc_freezing True
-
-# Conformer Causal Training
-# python ver5_train.py \
-#         hparams/transformer_TP.yaml \
-#         --feature_fusion TransformerMDD_TP \
-#         --perceived_ssl_model wavlm_large \
-#         --ENCODER_DIM 1024 \
-#         --prefix transformer_2_2_8_TP_fuse_2_dec_ga_conformer_causal_frz_ctc \
-#         --num_encoder_layers 2 \
-#         --num_decoder_layers 2 \
-#         --nhead 8 \
-#         --fuse_enc_or_dec dec \
-#         --fuse_net_layers 2 \
-#         --encoder_module conformer \
-#         --attention_type RelPosMHAXL \
-#         --causal true \
-#         --enable_ctc_freezing True
-
-# python ver5_train.py \
-#         hparams/transformer_TP.yaml \
-#         --feature_fusion TransformerMDD_TP \
-#         --perceived_ssl_model wavlm_large \
-#         --ENCODER_DIM 1024 \
-#         --prefix transformer_2_2_8_TP_fuse_2_dec_ga_conf_causal_frz_metric \
-#         --num_encoder_layers 2 \
-#         --num_decoder_layers 2 \
-#         --nhead 8 \
-#         --fuse_enc_or_dec dec \
-#         --fuse_net_layers 2 \
-#         --encoder_module conformer \
-#         --attention_type RelPosMHAXL \
-#         --causal true \
-#         --enable_metric_freezing True
-
-# RoPE Conformer 
-# python ver5_train.py \
-#         hparams/transformer_TP.yaml \
-#         --feature_fusion TransformerMDD_TP \
-#         --perceived_ssl_model wavlm_large \
-#         --ENCODER_DIM 1024 \
-#         --prefix transformer_2_2_8_TP_fuse_2_dec_ga_new_PoPE_conf_frz_metric \
-#         --num_encoder_layers 2 \
-#         --num_decoder_layers 2 \
-#         --nhead 8 \
-#         --fuse_enc_or_dec dec \
-#         --fuse_net_layers 2 \
-#         --valid_search_interval 5 \
-#         --attention_type RoPEMHA \
-#         --encoder_module conformer \
-#         --enable_metric_freezing True
-
-# # VER2: decoder_d_out: aligned perceived 
-# python ver5_train.py \
-#         hparams/transformer_TP.yaml \
-#         --feature_fusion TransformerMDD_TP_ver2 \
-#         --perceived_ssl_model wavlm_large \
-#         --ENCODER_DIM 1024 \
-#         --prefix 2_2_8_TP_fuse_2_dec_RoPE_conf_tgt_aln_perc \
-#         --num_encoder_layers 2 \
-#         --num_decoder_layers 2 \
-#         --nhead 8 \
-#         --fuse_enc_or_dec dec \
-#         --fuse_net_layers 2 \
-#         --encoder_module conformer \
-#         --attention_type RoPEMHA \
-#         --causal true
-
-# Transformer init with pretrained_ssl, enc, TransASR_encoder,
-# python ver5_train.py \
-#         hparams/transformer.yaml \
-#         --feature_fusion TransformerMDD \
-#         --perceived_ssl_model wavlm_large \
-#         --ENCODER_DIM 1024 \
-#         --prefix transformer_2_2_8_from_pretrained_ctc \
-#         --num_encoder_layers 2 \
-#         --num_decoder_layers 2 \
-#         --nhead 8 \
-#         --load_pretrained_components true \
-#         --pretrained_model_path "/home/kevingenghaopeng/MDD/MDD_ver3/exp_l2arctic/wavlm_large_None_TransformerMDD_transformer_2_6_8/save/CKPT+best_per_seq_500_13.8651.ckpt" \
-#         --components_to_load '["ssl", "enc", "encoder", "ctc_head"]' \
-#         --valid_search_interval 1
-
-# # Dual ctc loss, ctc on pre net only
-# python ver5_train.py \
-#         hparams/transformer_dual_ctc.yaml \
-#         --feature_fusion TransformerMDD_dual_ctc \
-#         --perceived_ssl_model wavlm_large \
-#         --ENCODER_DIM 1024 \
-#         --prefix transformer_2_2_8_dual_ctc_1 \
-#         --num_encoder_layers 2 \
-#         --num_decoder_layers 2 \
-#         --nhead 8 \
-#         --dual_ctc_loss_weight 1
-
-# # Dual ctc loss, ctc on post enc only
-# python ver5_train.py \
-#         hparams/transformer_dual_ctc.yaml \
-#         --feature_fusion TransformerMDD_dual_ctc \
-#         --perceived_ssl_model wavlm_large \
-#         --ENCODER_DIM 1024 \
-#         --prefix transformer_2_2_8_dual_ctc_0 \
-#         --num_encoder_layers 2 \
-#         --num_decoder_layers 2 \
-#         --nhead 8 \
-#         --dual_ctc_loss_weight 0
- 
-# # Dual ctc loss, ctc on both
-# python ver5_train.py \
-#         hparams/transformer_dual_ctc.yaml \
-#         --feature_fusion TransformerMDD_dual_ctc \
-#         --perceived_ssl_model wavlm_large \
-#         --ENCODER_DIM 1024 \
-#         --prefix transformer_2_2_8_dual_ctc_0.5 \
-#         --num_encoder_layers 2 \
-#         --num_decoder_layers 2 \
-#         --nhead 8 \
-#         --dual_ctc_loss_weight 0.5
+       hparams/l2arctic/Transformer_with_extra_loss.yaml \
+       --prefix  transformer_el_2_2_8_el_pos_weight_${weight} \
+       --perceived_ssl_model wavlm_large \
+       --feature_fusion TransformerMDD_with_extra_loss \
+       --num_encoder_layers 2 \
+       --num_decoder_layers 2 \
+       --nhead 8 \
+       --ctc_weight 0.3 \
+       --ENCODER_DIM 1024 \
+       --encoder_module transformer \
+       --number_of_epochs 300 \
+       --valid_search_interval 5 \
+       --mispro_pos_weight ${weight} 
 
 
 # MHA for Canonical Phn + Acoustic 
@@ -255,7 +65,7 @@ python ver5_train.py \
 #        --ENCODER_DIM 1024 \
 #        --encoder_module transformer
 
-# # Transformer with new MPD metrics
+# # # Transformer with new MPD metrics
 # python ver5_train.py \
 #        hparams/l2arctic/Transformer.yaml \
 #        --prefix  transformer_6_6_8_new_mpd \
@@ -283,7 +93,7 @@ python ver5_train.py \
 #        --ENCODER_DIM 1024 \
 #        --encoder_module transformer 
 
-# # Light Transformer with new MPD metrics
+# Light Transformer with new MPD metrics
 # python ver5_train.py \
 #        hparams/l2arctic/Transformer.yaml \
 #        --prefix  transformer_2_2_8_new_mpd \
@@ -295,20 +105,6 @@ python ver5_train.py \
 #        --ctc_weight 0.3 \
 #        --ENCODER_DIM 1024 \
 #        --encoder_module transformer 
-
-# # Light Transformer with wav2vec2_large_xlsr_53
-# python ver5_train.py \
-#        hparams/l2arctic/Transformer.yaml \
-#        --prefix  transformer_2_2_8_new_mpd \
-#        --perceived_ssl_model wav2vec_large_xlsr_53 \
-#        --feature_fusion TransformerMDD \
-#        --num_encoder_layers 2 \
-#        --num_decoder_layers 2 \
-#        --nhead 8 \
-#        --ctc_weight 0.3 \
-#        --ENCODER_DIM 1024 \
-#        --encoder_module transformer 
-
 
 # # # # Very Light Transformer 
 # python ver5_train.py \
@@ -428,10 +224,10 @@ python ver5_train.py \
 #        --number_of_epochs 600 \
 #        --valid_search_interval 5
 
-# # # # Light Transformer with MHA embedding
-#  python ver5_train.py \
+# # # Light Transformer with MHA embedding
+# python ver5_train.py \
 #        hparams/l2arctic/TransformerMHA.yaml \
-#        --prefix  transformer_2_2_8_MHA \
+#        --prefix  conformer_2_2_8_dual \
 #        --perceived_ssl_model wavlm_large \
 #        --feature_fusion TransformerMDDMHA \
 #        --num_encoder_layers 2 \
@@ -441,23 +237,7 @@ python ver5_train.py \
 #        --ENCODER_DIM 1024 \
 #        --encoder_module transformer \
 #        --number_of_epochs 600 \
-#        --valid_search_interval 5 \
-#        --evaluate_key mpd_f1_seq \
-
-# # # Light Transformer with MHA embedding, Phn Forward
-# python ver5_train.py \
-#        hparams/l2arctic/Transformer_PhnForward.yaml \
-#        --prefix  transformer_2_2_8_PhnForward \
-#        --perceived_ssl_model wavlm_large \
-#        --feature_fusion TransformerMDD_PhnForward \
-#        --num_encoder_layers 2 \
-#        --num_decoder_layers 2 \
-#        --nhead 8 \
-#        --ctc_weight 0.3 \
-#        --ENCODER_DIM 1024 \
-#        --encoder_module transformer \
-#        --number_of_epochs 600 \
-#        --valid_search_interval 1
+#        --valid_search_interval 5
 
 # Heavy Transformer
 # python ver5_train.py \
