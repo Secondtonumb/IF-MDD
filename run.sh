@@ -126,22 +126,39 @@ conda activate sb
 #         --attention_type RelPosMHAXL \
 #         --enable_ctc_freezing True
 
-# Conformer Causal Training
-# python ver5_train.py \
-#         hparams/transformer_TP.yaml \
-#         --feature_fusion TransformerMDD_TP \
-#         --perceived_ssl_model wavlm_large \
-#         --ENCODER_DIM 1024 \
-#         --prefix transformer_2_2_8_TP_fuse_2_dec_ga_conformer_causal_frz_ctc \
-#         --num_encoder_layers 2 \
-#         --num_decoder_layers 2 \
-#         --nhead 8 \
-#         --fuse_enc_or_dec dec \
-#         --fuse_net_layers 2 \
-#         --encoder_module conformer \
-#         --attention_type RelPosMHAXL \
-#         --causal true \
-#         --enable_ctc_freezing True
+# Conformer Causal Training ✅ 
+python ver5_train.py \
+        hparams/transformer_TP.yaml \
+        --feature_fusion TransformerMDD_TP \
+        --perceived_ssl_model wavlm_large \
+        --ENCODER_DIM 1024 \
+        --prefix transformer_2_2_8_TP_fuse_2_dec_ga_conformer_causal_frz_ctc \
+        --num_encoder_layers 2 \
+        --num_decoder_layers 2 \
+        --nhead 8 \
+        --fuse_enc_or_dec dec \
+        --fuse_net_layers 2 \
+        --encoder_module conformer \
+        --attention_type RelPosMHAXL \
+        --causal true \
+        --enable_ctc_freezing True
+
+# Conformer Causal Training ✅  enc
+python ver5_train.py \
+        hparams/transformer_TP_ver3.yaml \
+        --feature_fusion TransformerMDD_TP \
+        --perceived_ssl_model wavlm_large \
+        --ENCODER_DIM 1024 \
+        --prefix transformer_2_2_8_TP_fuse_2_enc_ga_conformer_causal_frz_ctc \
+        --num_encoder_layers 2 \
+        --num_decoder_layers 2 \
+        --nhead 8 \
+        --fuse_enc_or_dec enc \
+        --fuse_net_layers 2 \
+        --encoder_module conformer \
+        --attention_type RelPosMHAXL \
+        --causal true \
+        --enable_ctc_freezing True
 
 # python ver5_train.py \
 #         hparams/transformer_TP.yaml \
@@ -255,6 +272,32 @@ conda activate sb
 #         --attention_type RelPosMHAXL \
 #         --valid_search_interval 5 \
 
+## Fuse net on both enc and dec
+# RelPosMHA　Conformer
+# python ver5_train.py \
+#         hparams/transformer_TP_ver4_fuse.yaml \
+#         --feature_fusion TransformerMDD_TP_encdec \
+#         --perceived_ssl_model wavlm_large \
+#         --ENCODER_DIM 1024 \
+#         --prefix transformer_2_TP_fuse_2_encdec_conformer\
+#         --fuse_enc_or_dec encdec \
+#         --attention_type RelPosMHAXL \
+#         --valid_search_interval 5 \
+#         --encoder_module conformer
+
+# RelPosMHA　Conformer ctc freeze
+python ver5_train.py \
+        hparams/transformer_TP_ver4_fuse.yaml \
+        --feature_fusion TransformerMDD_TP_encdec \
+        --perceived_ssl_model wavlm_large \
+        --ENCODER_DIM 1024 \
+        --prefix transformer_2_TP_fuse_2_encdec_conformer_frzctc\
+        --fuse_enc_or_dec encdec \
+        --attention_type RelPosMHAXL \
+        --valid_search_interval 5 \
+        --encoder_module conformer \
+        --enable_ctc_freezing
+
 # # RoPE MHA
 # python ver5_train.py \
 #         hparams/transformer_TP_ver4_fuse.yaml \
@@ -266,17 +309,17 @@ conda activate sb
 #         --attention_type RoPEMHA \
 #         --valid_search_interval 5 
 
-# RelPosMHA but ctc head targeting canonical
-python ver5_train.py \
-        hparams/transformer_TP_ver4_fuse.yaml \
-        --feature_fusion TransformerMDD_TP_encdec \
-        --perceived_ssl_model wavlm_large \
-        --ENCODER_DIM 1024 \
-        --prefix transformer_2_TP_fuse_2_encdec_CTCHeadCano\
-        --fuse_enc_or_dec encdec \
-        --attention_type RelPosMHAXL \
-        --valid_search_interval 5 \
-        --ctc_head_target canonical 
+# RelPosMHA but ctc head targeting canonical ❌
+# python ver5_train.py \
+#         hparams/transformer_TP_ver4_fuse.yaml \
+#         --feature_fusion TransformerMDD_TP_encdec \
+#         --perceived_ssl_model wavlm_large \
+#         --ENCODER_DIM 1024 \
+#         --prefix transformer_2_TP_fuse_2_encdec_CTCHeadCano\
+#         --fuse_enc_or_dec encdec \
+#         --attention_type RelPosMHAXL \
+#         --valid_search_interval 5 \
+#         --ctc_head_target canonical 
 
 # MHA for Canonical Phn + Acoustic 
 # python ver4_train.py \

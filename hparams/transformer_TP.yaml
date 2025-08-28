@@ -31,11 +31,6 @@ test_annotation: !ref <data_folder_save>/test.json
 # generate training id for output folder
 # generate_training_id: !apply:trainer.generate_training_id.generate_training_id [!ref <perceived_ssl_model_id>, !ref <canonical_ssl_model_id>, !ref <feature_fusion>, !ref <prefix>]
 # evaluate key:
-evaluate_key: "mpd_f1" # use "mpd_f1_seq" for Transformer decoder path best mpd f1
-                            # "PER_seq" for Transformer decoder's best error rate
-                            # "PER" for ctc path best error rate
-                            # "mpd_f1" for ctc path best mpd f1
-max_save_models: 3 # Maximum number of saved models for each metrics 
 
 evaluate_key: "mpd_f1" # use "mpd_f1_seq" for Transformer decoder path best mpd f1
                             # "PER_seq" for Transformer decoder's best error rate
@@ -73,9 +68,6 @@ perceived_ssl: !apply:trainer.AutoSSLoader.AutoSSLLoader
     output_all_hiddens: False
 
 preceived_ssl_emb_layer: -1 # 0~12 for wav2vec2, 0~23 for wavlm, -1 for last layer
-    output_all_hiddens: False
-
-preceived_ssl_emb_layer: -1
 
 # canonical_ssl: !apply:trainer.AutoSSLoader.AutoSSLLoader
 #     model_name: !ref <canonical_ssl_model>

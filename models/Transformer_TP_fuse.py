@@ -696,8 +696,13 @@ class TransformerMDD_TP_encdec(sb.Brain):
                             attn = attn.unsqueeze(0)  # Add batch dimension [n, T_p, T_s]
                         c_id = "_".join(c_id.split("/")[-3:])
                         plot_attention(attn.cpu(), self.hparams.nhead, c_id, self.hparams.test_attention_plot_dir)
-                        if fuse_attn_dec is not None:
-                            plot_attention(fuse_attn_dec[-1].cpu(), self.hparams.nhead, c_id, self.hparams.test_attention_plot_dir+"_dec")
+                    if fuse_attn_dec is not None:
+                        for attn, c_id in zip(fuse_attn_dec[-1], batch.id):
+                            from pathlib import Path
+                            if len(attn.shape) == 2:
+                                attn = attn.unsqueeze(0)  # Add batch dimension [n, T_p, T_s]
+                            c_id = "_".join(c_id.split("/")[-3:])
+                            plot_attention(attn.cpu(), self.hparams.nhead, c_id, self.hparams.test_attention_plot_dir+"_dec")
             
 
         return {

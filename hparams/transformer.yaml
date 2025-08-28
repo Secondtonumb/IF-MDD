@@ -6,7 +6,7 @@ pretrained_models_path: pretrained_models/
 
 # Pretrained Component Loading
 load_pretrained_components: false     # Enable loading specific components from pretrained model
-pretrained_model_path: ""
+pretrained_model_path: "/home/kevingenghaopeng/MDD/MDD_ver3/exp_l2arctic/wavlm_large_None_TransformerMDD_transformer_2_6_8/save/"
 # components_to_load: ["ssl", "encoder"] # Components to load: ssl, encoder, enc_projection, ctc_head, decoder
 components_to_load: ["ssl", "enc", "encoder", "ctc_head"]
 freeze_loaded_components: true        # Whether to freeze the loaded components, # 768
@@ -31,16 +31,10 @@ test_annotation: !ref <data_folder_save>/test.json
 # generate training id for output folder
 # generate_training_id: !apply:trainer.generate_training_id.generate_training_id [!ref <perceived_ssl_model_id>, !ref <canonical_ssl_model_id>, !ref <feature_fusion>, !ref <prefix>]
 
-evaluate_key: "mpd_f1" # use "mpd_f1_seq" for Transformer decoder path best mpd f1
-                            # "PER_seq" for Transformer decoder's best error rate
-                            # "PER" for ctc path best error rate
-                            # "mpd_f1" for ctc path best mpd f1
-max_save_models: 3 # Maximum number of saved models for each metrics 
-
 # output files
 output_folder: !ref exp_l2arctic/<perceived_ssl_model>_<feature_fusion>_<prefix>
-per_file: !ref <output_folder>/per_<evaluate_key>.txt
-mpd_file: !ref <output_folder>/mpd_<evaluate_key>.txt
+per_file: !ref <output_folder>/per.txt
+mpd_file: !ref <output_folder>/mpd.txt
 save_folder: !ref <output_folder>/save
 train_log: !ref <output_folder>/train_log.txt
 
@@ -52,13 +46,9 @@ modules:
     perceived_ssl: !ref <perceived_ssl>
     enc: !ref <enc>
     ctc_lin: !ref <ctc_lin>
+    mispro_head: !ref <mispro_head>
     TransASR: !ref <TransASR>
     d_out: !ref <d_out>
-    phn_emb: !ref <phn_emb>
-    fuse_net: !ref <fuse_net>
-    mispro_head: !ref <mispro_head>
-    mem_proj: !ref <mem_proj>
-    mem_proj_cnn_post_enc: !ref <mem_proj_cnn_post_enc>
 
 perceived_ssl: !apply:trainer.AutoSSLoader.AutoSSLLoader
     model_name: !ref <perceived_ssl_model>
@@ -69,20 +59,19 @@ perceived_ssl: !apply:trainer.AutoSSLoader.AutoSSLLoader
 
 preceived_ssl_emb_layer: -1
 
+
 # canonical_ssl: !apply:trainer.AutoSSLoader.AutoSSLLoader
 #     model_name: !ref <canonical_ssl_model>
 #     freeze: !ref <freeze_canonical_ssl>
 #     freeze_feature_extractor: !ref <freeze_perceived_feature_extractor>
 #     save_path: !ref <pretrained_models_path>
-enc: !new:torch.nn.Sequential
-  - !new:speechbrain.lobes.models.VanillaNN.VanillaNN
-     input_shape: [null, null, !ref <ENCODER_DIM>]
-     activation: !ref <activation>
-     dnn_blocks: !ref <dnn_layers>
-     dnn_neurons: !ref <dnn_neurons>
-  - !new:torch.nn.LayerNorm
-     normalized_shape: !ref <dnn_neurons>
-    
+enc:
+  !new:speechbrain.lobes.models.VanillaNN.VanillaNN
+    input_shape: [null, null, !ref <ENCODER_DIM>]
+    activation: !ref <activation>
+    dnn_blocks: !ref <dnn_layers>
+    dnn_neurons: !ref <dnn_neurons>
+
 ctc_lin:  !new:speechbrain.nnet.linear.Linear
     input_size: !ref <dnn_neurons>
     n_neurons: !ref <output_neurons>  # 40 phonemes + 1 blank + 1 err
@@ -92,121 +81,44 @@ nhead: 8
 d_ffn: 1024
 num_encoder_layers: 2
 num_decoder_layers: 2
-encoder_module: transformer # conformer, branchformer
-attention_type: RelPosMHAXL # regularMHA， RoPEMHA (with conformer)
-causal: true
+
 # activation: gelu
 
 TransASR: !new:speechbrain.lobes.models.transformer.TransformerASR.TransformerASR
     tgt_vocab: !ref <output_neurons>
-    input_size: !ref <dnn_neurons>
+    input_size: !ref <ENCODER_DIM>
     d_model: !ref <dnn_neurons>
     nhead: !ref <nhead>
     num_encoder_layers: !ref <num_encoder_layers>
     num_decoder_layers: !ref <num_decoder_layers>
     d_ffn: !ref <d_ffn>
-    output_hidden_states: True
-    normalize_before: True
-    kernel_size: 9
-    encoder_module: !ref <encoder_module>
-    attention_type: !ref <attention_type>
-    causal: !ref <causal>
+    output_hidden_states: True 
     # activation: !ref <activation>
 
 d_out: !new:speechbrain.nnet.linear.Linear
     input_size: !ref <dnn_neurons>
     n_neurons: !ref <output_neurons>  # 40 phonemes + 1 blank + 1 err
 
-# mispro_head: For mispronunciation detection
-mispro_head: !new:torch.nn.Sequential
-  - !ref <mispro_cnn1>
-  - !new:torch.nn.BatchNorm1d
-      num_features: 128
-  - !new:torch.nn.GELU {}
-  - !ref <mispro_cnn2>
-  - !new:torch.nn.BatchNorm1d
-      num_features: 64
-  - !new:torch.nn.GELU {}
-  - !ref <mispro_cnn3>
-  - !new:torch.nn.GELU {}
+# Linear layers for mispronunciation detection
+mispro_head: !new:speechbrain.nnet.linear.Linear
+    input_size: !ref <dnn_neurons>
+    n_neurons: 1  # Binary classification for mispronunciation detection
+# CNN layer for mispronunciation detection
 
-mispro_cnn1: !new:torch.nn.Conv1d
-    in_channels: !ref <dnn_neurons>
-    out_channels: 128
-    kernel_size: 5
-    stride: 1
-    padding: 2
-
-mispro_cnn2: !new:torch.nn.Conv1d
-    in_channels: 128
-    out_channels: 64
-    kernel_size: 5
-    stride: 1
-    padding: 2
-
-mispro_cnn3: !new:torch.nn.Conv1d
-    in_channels: 64
-    out_channels: 1
-    kernel_size: 5
-    stride: 1
-    padding: 2
-    bias: true     # 最后一层可以保留 bias
-
-# Text prompt module
-phn_emb: !new:torch.nn.Sequential
-    - !new:torch.nn.Embedding
-      num_embeddings: !ref <output_neurons>
-      embedding_dim: !ref <dnn_neurons>
-    - !new:torch.nn.LayerNorm
-      normalized_shape: !ref <dnn_neurons>
-    # - !new:speechbrain.lobes.models.dual_path.PyTorchPositionalEncoding
-    #   d_model: !ref <dnn_neurons>
-    #   dropout: 0.1
-    #   max_len: 1000
-
-# Memory projection (applied to encoder memory before feeding into fuse_net)
-# Set mem_proj_out_dim to match fuse_net d_model (defaults to <dnn_neurons>)
-mem_proj_out_dim: !ref <dnn_neurons>
-# With RelPosMHAXL, avoid adding absolute positional encoding on memory to prevent mixing abs+rel encodings.
-mem_proj: !new:torch.nn.Sequential
-  - !ref <mem_proj_linear>
-  - !new:torch.nn.LayerNorm
-      normalized_shape: !ref <mem_proj_out_dim>
-  - !new:torch.nn.ReLU
-
-mem_proj_linear: !new:torch.nn.Linear
-    in_features: !ref <mem_proj_out_dim>
-    out_features: !ref <dnn_neurons>
-    # bias: true
-# post_encoder_reduction_factor
-
-post_encoder_reduction_factor: 4
-
-mem_proj_cnn: !new:torch.nn.Conv1d
-    in_channels: !ref <dnn_neurons>
-    out_channels: !ref <dnn_neurons>
-    kernel_size: !ref <post_encoder_reduction_factor>
-    stride: !ref <post_encoder_reduction_factor>
-    padding: 0
+# mispro_head: !torch.nn.Sequential
+#     - !new:speechbrain.nnet.CNN.Conv1d
+#         in_channels: !ref <dnn_neurons>
+#         out_channels: 64
+#         kernel_size: 5
+#         stride: 1
+#         padding: 1
+#     - !new:speechbrain.nnet.CNN.Conv1d
+#         in_channels: 64
+#         out_channels: 1
+#         kernel_size: 5
+#         stride: 1
+#         padding: 1
     
-mem_proj_cnn_post_enc:  !new:torch.nn.Sequential
-    - !ref <mem_proj_cnn>
-    - !new:torch.nn.BatchNorm1d
-        num_features: !ref <dnn_neurons>
-
-# memory
-# Fusion network
-fuse_enc_or_dec: "enc"
-fuse_net_layers: 2
-
-fuse_net: !new:speechbrain.lobes.models.transformer.Transformer.TransformerDecoder
-    num_layers: !ref <fuse_net_layers>
-    nhead: !ref <nhead>
-    d_ffn: !ref <d_ffn>
-    d_model: !ref <dnn_neurons> 
-    activation: !ref <activation>
-    attention_type: "RelPosMHAXL"
-    causal: true
 
 # ─── Autoregressive Greedy Searcher ──────────────────────────────────────
 # valid_search: !new:speechbrain.decoders.seq2seq.S2STransformerBeamSearcher
@@ -263,7 +175,6 @@ freeze_canonical_ssl: False
 freeze_perceived_feature_extractor: True  # freeze the CNN extractor in wav2vec
 freeze_canonical_feature_extractor: True         # Freeze Whisper encoder?
 
-
 log_softmax: !new:speechbrain.nnet.activations.Softmax
     apply_log: True
 
@@ -277,16 +188,8 @@ seq_cost: !name:speechbrain.nnet.losses.kldiv_loss
     reduction: batchmean
     label_smoothing: 0.1
 
-mispro_cost: !name:speechbrain.nnet.losses.bce_loss
-    reduction: batchmean
-    pos_weight: !apply:torch.Tensor.to
-        - !new:torch.Tensor
-            - [2.0]
-        - "cuda:0"
-# guided attention cost： speechbrain.nnet.loss.guidedattn_loss.GuidedAttentionLoss
-sigma: 0.4 # smaller sigma force model to learn diagnostic features
-ga_cost: !name:speechbrain.nnet.loss.guidedattn_loss.GuidedAttentionLoss
-    sigma: !ref <sigma>
+ctc_cost_mispro: !name:speechbrain.nnet.losses.ctc_loss
+    blank_index: !ref <blank_index>
 
 # Outputs
 output_neurons: 44 # l2arctic: 40phns(sil)+err+blank=42
@@ -295,16 +198,7 @@ bos_index: 42
 eos_index: 43
 
 model: !new:torch.nn.ModuleList
-    - [!ref <enc>,
-     !ref <phn_emb>,
-     !ref <ctc_lin>,
-     !ref <fuse_net>,
-     !ref <mispro_head>,
-     !ref <TransASR>,
-     !ref <d_out>,
-     !ref <mem_proj>,
-     !ref <mem_proj_cnn_post_enc>
-     ]
+    - [!ref <enc>, !ref <ctc_lin>, !ref <d_out>, !ref <TransASR>]
 
 adam_opt_class: !name:torch.optim.Adam
     lr: !ref <lr>
@@ -347,18 +241,6 @@ seqlabel_stats: !name:speechbrain.utils.metric_stats.MetricStats
         reduction: batch
         label_smoothing: 0.1
 
-mispro_stats: !name:speechbrain.utils.metric_stats.MetricStats
-    metric: !name:speechbrain.nnet.losses.bce_loss
-        reduction: batch
-        pos_weight: !apply:torch.Tensor.to
-            - !new:torch.Tensor
-                - [2.0]
-            - "cuda:0"
-
-ga_stats: !name:speechbrain.utils.metric_stats.MetricStats
-    metric: !name:speechbrain.nnet.loss.guidedattn_loss.GuidedAttentionLoss
-        sigma: !ref <sigma>
-
 per_stats: !name:speechbrain.utils.metric_stats.ErrorRateStats
 
 # # TIMIT
@@ -385,12 +267,12 @@ precision: fp16         # 支持 "fp32"、"fp16" 或 "bf16"
 
 # CTC-based Encoder/SSL Freezing
 enable_ctc_freezing: false    # Enable automatic freezing when CTC converges
-ctc_patience: 5                # Number of epochs to wait before freezing (increased from 5)
-ctc_threshold_factor: 1.1     # Threshold = min_ctc_loss * this_factor (tighter threshold)
+ctc_patience: 3                # Number of epochs to wait before freezing (increased from 5)
+ctc_threshold_factor: 1.05     # Threshold = min_ctc_loss * this_factor (tighter threshold)
 
 # Metric-based Encoder/SSL Freezing
-enable_metric_freezing: True          # Enable automatic freezing when validation metrics converge
-freezing_metric: "both"                # Options: "PER", "F1", "both"
+enable_metric_freezing: false          # Enable automatic freezing when validation metrics converge
+freezing_metric: "PER"                # Options: "PER", "F1", "both"
 metric_patience: 4                   # Number of epochs to wait before freezing
 per_threshold_factor: 1.05            # Threshold = min_PER * this_factor (for PER, lower is better)
 f1_threshold_factor: 0.95             # Threshold = max_F1 * this_factor (for F1, higher is better)
@@ -414,8 +296,3 @@ noam_annealing: !new:speechbrain.nnet.schedulers.NewBobScheduler
     annealing_factor: 0.8
     improvement_threshold: 0.0025
     patient: 0
-
-# Plot attention for fusion
-plot_attention: true
-valid_attention_plot_dir: !ref <output_folder>/valid_attention_plots
-test_attention_plot_dir: !ref <output_folder>/test_attention_plots
