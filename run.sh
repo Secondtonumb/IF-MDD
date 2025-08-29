@@ -160,6 +160,10 @@ python ver5_train.py \
         --causal true \
         --enable_ctc_freezing True
 
+# wav2vec-xlr-s-1b
+
+
+
 # python ver5_train.py \
 #         hparams/transformer_TP.yaml \
 #         --feature_fusion TransformerMDD_TP \
@@ -296,7 +300,65 @@ python ver5_train.py \
         --attention_type RelPosMHAXL \
         --valid_search_interval 5 \
         --encoder_module conformer \
-        --enable_ctc_freezing
+        --enable_ctc_freezing True
+
+python ver5_train.py \
+        hparams/transformer_TP_ver4_fuse.yaml \
+        --feature_fusion TransformerMDD_TP_encdec \
+        --perceived_ssl_model wavlm_large \
+        --ENCODER_DIM 1024 \
+        --prefix transformer_1_TP_fuse_1_encdec_conformer_frzctc\
+        --num_encoder_layers 1 \
+        --num_decoder_layers 1 \
+        --fuse_net_layers 1\
+        --fuse_enc_or_dec encdec \
+        --attention_type RelPosMHAXL \
+        --valid_search_interval 1 \
+        --encoder_module conformer \
+        --enable_ctc_freezing True
+
+
+python ver5_train.py \
+        hparams/transformer_TP_ver4_fuse.yaml \
+        --feature_fusion TransformerMDD_TP_encdec \
+        --perceived_ssl_model wavlm_large \
+        --ENCODER_DIM 1024 \
+        --prefix transformer_2_TP_fuse_2_encdec_conformer_RoPE_frzctc \
+        --fuse_enc_or_dec encdec \
+        --attention_type RoPEMHA \
+        --valid_search_interval 1 \
+        --encoder_module conformer \
+        --enable_ctc_freezing True \
+        --plot_attention false
+
+## TransDec‘s output is perceived (aligned phn seq with canonical)
+python ver5_train.py \
+        hparams/transformer_TP_ver4_fuse.yaml \
+        --feature_fusion TransformerMDD_TP_encdec \
+        --perceived_ssl_model wavlm_large \
+        --ENCODER_DIM 1024 \
+        --prefix transformer_2_TP_fuse_2_encdec_conformer_frzctc_dechead_perc \
+        --fuse_enc_or_dec encdec \
+        --attention_type RelPosMHAXL \
+        --valid_search_interval 1 \
+        --encoder_module conformer \
+        --enable_ctc_freezing True \
+        --decoder_target perceived
+
+# # Use XLS-r-1b ばつ
+# python ver5_train.py \
+#         hparams/transformer_TP_ver4_fuse.yaml \
+#         --feature_fusion TransformerMDD_TP_encdec \
+#         --perceived_ssl_model wav2vec2-xls-r-1b \
+#         --ENCODER_DIM 1028 \
+#         --prefix transformer_2_TP_fuse_2_encdec_conformer_RoPE_frzctc \
+#         --fuse_enc_or_dec encdec \
+#         --attention_type RoPEMHA \
+#         --valid_search_interval 1 \
+#         --encoder_module conformer \
+#         --enable_ctc_freezing True \
+#         --plot_attention false \
+
 
 # # RoPE MHA
 # python ver5_train.py \
@@ -357,17 +419,17 @@ python ver5_train.py \
 #        --number_of_epochs 600
 
 # # Light Transformer 
-# python ver5_train.py \
-#        hparams/l2arctic/Transformer.yaml \
-#        --prefix  transformer_2_2_8 \
-#        --perceived_ssl_model wavlm_large \
-#        --feature_fusion TransformerMDD \
-#        --num_encoder_layers 2 \
-#        --num_decoder_layers 2 \
-#        --nhead 8 \
-#        --ctc_weight 0.3 \
-#        --ENCODER_DIM 1024 \
-#        --encoder_module transformer 
+python ver5_train.py \
+       hparams/l2arctic/Transformer.yaml \
+       --prefix  transformer_2_2_8 \
+       --perceived_ssl_model wavlm_large \
+       --feature_fusion TransformerMDD \
+       --num_encoder_layers 2 \
+       --num_decoder_layers 2 \
+       --nhead 8 \
+       --ctc_weight 0.3 \
+       --ENCODER_DIM 1024 \
+       --encoder_module transformer 
 
 # # Light Transformer with new MPD metrics
 # python ver5_train.py \

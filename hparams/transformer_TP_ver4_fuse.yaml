@@ -31,7 +31,7 @@ test_annotation: !ref <data_folder_save>/test.json
 # generate training id for output folder
 # generate_training_id: !apply:trainer.generate_training_id.generate_training_id [!ref <perceived_ssl_model_id>, !ref <canonical_ssl_model_id>, !ref <feature_fusion>, !ref <prefix>]
 
-evaluate_key: "mpd_f1" # use "mpd_f1_seq" for Transformer decoder path best mpd f1
+evaluate_key: "mpd_f1_seq" # use "mpd_f1_seq" for Transformer decoder path best mpd f1
                             # "PER_seq" for Transformer decoder's best error rate
                             # "PER" for ctc path best error rate
                             # "mpd_f1" for ctc path best mpd f1
@@ -92,6 +92,9 @@ ctc_lin:  !new:speechbrain.nnet.linear.Linear
 
 # ctc_head_targeting
 ctc_head_target: "perceived"  # Options: "perceived", "canonical"
+
+# Seq head targeting
+decoder_target: "target" # Options: "target" "perceived";  len(perceived) = len(canonical), aligned
 
 # transformer
 nhead: 8
@@ -290,7 +293,7 @@ dnn_neurons: 384
 freeze_perceived_ssl: False
 freeze_canonical_ssl: False
 freeze_perceived_feature_extractor: True  # freeze the CNN extractor in wav2vec
-freeze_canonical_feature_extractor: True         # Freeze Whisper encoder?
+freeze_canonical_feature_extractor: True  # Freeze Whisper encoder?
 
 log_softmax: !new:speechbrain.nnet.activations.Softmax
     apply_log: True

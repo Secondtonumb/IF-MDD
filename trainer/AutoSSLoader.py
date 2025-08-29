@@ -27,6 +27,7 @@ pretrained_models={
     
     "wav2vec2_large": "facebook/wav2vec2-large", # 1024
     "wav2vec_large_xlsr_53": "facebook/wav2vec2-large-xlsr-53", # 1024
+    "wav2vec2-xls-r-1b": "facebook/wav2vec2-xls-r-1b", # 1024
     "hubert_large": "facebook/hubert-large-ls960-ft", # 1024
     "hubert_large_ll60k": "facebook/hubert-large-ll60k", # 1024
     "wavlm_large": "microsoft/wavlm-large", # 1024

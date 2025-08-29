@@ -87,8 +87,8 @@ class TransformerMDD_TP_encdec(sb.Brain):
         self.per_threshold = None
         self.f1_threshold = None
         self.per_history = []
-        self.f1_history = []
-    
+        self.f1_history = []        
+
     def freeze_encoder_and_ssl(self):
         """Freeze encoder and SSL model parameters"""
         if not self.encoder_frozen:
@@ -525,10 +525,6 @@ class TransformerMDD_TP_encdec(sb.Brain):
         # Cano Phn Emb:
         Cano_emb = self.modules.phn_emb(canonicals)  # [B, T_c, D]
         
-        if self.hparams.decoder_target == "perceived":
-            # using aligned cano/perc' s result as transformer decoder's result.
-            targets_bos = perceiveds_bos
-            target_lens_bos = perceiveds_bos
         if sb.Stage.TRAIN == stage:
             enc_out, hidden, dec_out = self.modules.TransASR(
                 src=feats_enc,
@@ -537,8 +533,6 @@ class TransformerMDD_TP_encdec(sb.Brain):
                 pad_idx=0, 
             )
             # Option 2, fuse Canononical Emb and mispro after Encoder.
-            
-
             if "enc" in self.hparams.fuse_enc_or_dec:
                 memory = enc_out
                 memory = self.modules.mem_proj(memory)  # [B, T_s, D]
@@ -772,12 +766,7 @@ class TransformerMDD_TP_encdec(sb.Brain):
             loss_ctc = self.hparams.ctc_cost(p_ctc_feat, targets, wav_lens, target_lens)
         elif self.hparams.ctc_head_target == "canonical":
             loss_ctc = self.hparams.ctc_cost(p_ctc_feat, canonicals, wav_lens, canonical_lens)
-            
-        if self.hparams.decoder_target == "perceived":
-            loss_dec_out = self.hparams.seq_cost(p_dec_out, perceiveds_eos, perceived_lens_eos)
-        else:
-            loss_dec_out = self.hparams.seq_cost(p_dec_out, targets_eos, target_lens_eos)
-        
+        loss_dec_out = self.hparams.seq_cost(p_dec_out, targets_eos, target_lens_eos)
         loss_mispro = self.hparams.mispro_cost(inputs=h_mispro,
                                                targets=mispro_label, 
                                                length=mispro_label_lens)
@@ -827,11 +816,7 @@ class TransformerMDD_TP_encdec(sb.Brain):
                     self.ctc_metrics.append(ids, p_ctc_feat, targets, wav_lens, target_lens)
                 elif self.hparams.ctc_head_target == "canonical":
                     self.ctc_metrics.append(ids, p_ctc_feat, canonicals, wav_lens, canonical_lens)
-
-                if self.hparams.decoder_target == "perceived":
-                    self.seq_metrics.append(ids, log_probabilities=p_dec_out, targets=perceiveds_eos, length=perceived_lens_eos)
-                else:
-                    self.seq_metrics.append(ids, log_probabilities=p_dec_out, targets=targets_eos, length=target_lens_eos)
+                self.seq_metrics.append(ids, log_probabilities=p_dec_out, targets=targets_eos, length=target_lens_eos)
                 self.mispro_metrics.append(ids, h_mispro, mispro_label, mispro_label_lens)
                 
                 # TODO: Guided Attention metrics
@@ -863,24 +848,14 @@ class TransformerMDD_TP_encdec(sb.Brain):
                     )
                     
                 # seq2seq results
-                if self.hparams.decoder_target == "perceived":
-                    self.per_metrics_seq.append(
-                        ids=ids,
-                        predict=sequence_decoder_out,
-                        target=perceiveds_eos,
-                        predict_len=None,
-                        target_len=perceived_lens_eos,
-                        ind2lab=self.label_encoder.decode_ndim,
-                    )
-                else:
-                    self.per_metrics_seq.append(
-                        ids=ids,
-                        predict=sequence_decoder_out,
-                        target=targets,
-                        predict_len=None,
-                        target_len=target_lens,
-                        ind2lab=self.label_encoder.decode_ndim,
-                    )
+                self.per_metrics_seq.append(
+                    ids=ids,
+                    predict=sequence_decoder_out,
+                    target=targets,
+                    predict_len=None,
+                    target_len=target_lens,
+                    ind2lab=self.label_encoder.decode_ndim,
+                )
                 
                 # MPD metrics
                 self.mpd_metrics.append(
