@@ -245,15 +245,15 @@ conda activate sb
 
 ## Fuse net on both enc and dec
 # RelPosMHA
-# python ver5_train.py \
-#         hparams/transformer_TP_ver4_fuse.yaml \
-#         --feature_fusion TransformerMDD_TP_encdec \
-#         --perceived_ssl_model wavlm_large \
-#         --ENCODER_DIM 1024 \
-#         --prefix transformer_2_TP_fuse_2_encdec\
-#         --fuse_enc_or_dec encdec \
-#         --attention_type RelPosMHAXL \
-#         --valid_search_interval 5 \
+python ver5_train.py \
+        hparams/transformer_TP_ver4_fuse.yaml \
+        --feature_fusion TransformerMDD_TP_encdec \
+        --perceived_ssl_model wavlm_large \
+        --ENCODER_DIM 1024 \
+        --prefix transformer_2_TP_fuse_2_encdec\
+        --fuse_enc_or_dec encdec \
+        --attention_type RelPosMHAXL \
+        --valid_search_interval 5 \
 
 # # RoPE MHA
 # python ver5_train.py \

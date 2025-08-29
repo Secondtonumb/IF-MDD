@@ -900,7 +900,6 @@ if __name__ == "__main__":
                 max_key=key
             )
         elif key == "PER" or key == "PER_seq":
-            
             asr_brain.evaluate(
                 test_data,
                 test_loader_kwargs=hparams["test_dataloader_opts"],
