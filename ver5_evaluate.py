@@ -51,14 +51,14 @@ from speechbrain.inference.text import GraphemeToPhoneme
 #     HMA_attn_ctc_to_mispro_ver2_1_perceived,
 #     HMA_attn_ctc_to_mispro_ver2_2)
 
-from models.Transformer import TransformerMDD, TransformerMDD_with_extra_loss, TransformerMDD_dual_path
+from models.Transformer import TransformerMDD
 from models.Transformer_PhnForward import TransformerMDD_PhnForward
 from models.TransformerMHA import TransformerMDDMHA
 from models.Transducer import TransducerMDD
 from models.TransducerConformerEnc import TransducerMDDConformerEnc
 from models.Transformer_TP import TransformerMDD_TP
 from models.Transformer_TP_ver2 import TransformerMDD_TP_ver2
-
+from models.Transformer_TP_fuse import TransformerMDD_TP_encdec
 # from models.phn_mono_ssl_model_ver2 import Hybrid_CTC_Attention, Hybrid_CTC_Attention_ver2
 
 # from models.phn_mono_ssl_model_ver3 import Hybrid_CTC_Attention_SB
@@ -821,6 +821,8 @@ if __name__ == "__main__":
         asr_brain_class = TransformerMDD_TP
     elif hparams["feature_fusion"] == "TransformerMDD_TP_ver2":
         asr_brain_class = TransformerMDD_TP_ver2
+    elif hparams["feature_fusion"] == "TransformerMDD_TP_encdec":
+        asr_brain_class = TransformerMDD_TP_encdec
     elif hparams["feature_fusion"] == "TransformerMDD_with_extra_loss":
         asr_brain_class = TransformerMDD_with_extra_loss
     elif hparams["feature_fusion"] == "TransformerMDD_dual_path":
@@ -900,27 +902,27 @@ if __name__ == "__main__":
     # except StopIteration:
     #     print("Training stopped early due to no improvement.")
     
-    # Test
-    if hparams.get("evaluate_key", True):
-        key = hparams["evaluate_key"]
-        if key == "mpd_f1" or key == "mpd_f1_seq":
-            asr_brain.evaluate(
-                test_data,
-                test_loader_kwargs=hparams["test_dataloader_opts"],
-                max_key=key
-        )
-        elif key == "PER" or key == "PER_seq":
-            asr_brain.evaluate(
-                test_data,
-                test_loader_kwargs=hparams["test_dataloader_opts"],
-                min_key=key,
-            )
+    # # Test
+    # if hparams.get("evaluate_key", True):
+    #     key = hparams["evaluate_key"]
+    #     if key == "mpd_f1" or key == "mpd_f1_seq":
+    #         asr_brain.evaluate(
+    #             test_data,
+    #             test_loader_kwargs=hparams["test_dataloader_opts"],
+    #             max_key=key
+    #     )
+    #     elif key == "PER" or key == "PER_seq":
+    #         asr_brain.evaluate(
+    #             test_data,
+    #             test_loader_kwargs=hparams["test_dataloader_opts"],
+    #             min_key=key,
+    #         )
     
 # === Add placeholder gather_ctc_aligned_reps at top of file ===
     # DEBUG MODE
     train_record = test_data.data_ids[:1024]  # Select first 128 for debugging
     valid_record = valid_data.data_ids[:128]  # Select first 32 for debugging
-    test_record = test_data.data_ids[:32]  # Select first 32 for debugging
+    test_record = test_data.data_ids[:900]  # Select first 32 for debugging
     train_data_ = train_data.filtered_sorted(key_test={"id": lambda x: x in train_record},)
     valid_data_ = valid_data.filtered_sorted(key_test={"id": lambda x: x in valid_record},)
     test_data_ = test_data.filtered_sorted(key_test={"id": lambda x: x in test_record},)
@@ -937,18 +939,18 @@ if __name__ == "__main__":
     #     print("Training stopped early due to no improvement.")
     
     # Test
-    # if hparams.get("evaluate_key", True):
-    #     key = hparams["evaluate_key"]
-    #     if key == "mpd_f1" or key == "mpd_f1_seq":
-    #         asr_brain.evaluate(
-    #             test_data_,
-    #             test_loader_kwargs=hparams["test_dataloader_opts"],
-    #             max_key=key
-    #     )
-    #     elif key == "PER" or key == "PER_seq":
+    if hparams.get("evaluate_key", True):
+        key = hparams["evaluate_key"]
+        if key == "mpd_f1" or key == "mpd_f1_seq":
+            asr_brain.evaluate(
+                test_data_,
+                test_loader_kwargs=hparams["test_dataloader_opts"],
+                max_key=key
+        )
+        elif key == "PER" or key == "PER_seq":
             
-    #         asr_brain.evaluate(
-    #             test_data_,
-    #             test_loader_kwargs=hparams["test_dataloader_opts"],
-    #             min_key=key,
-    #         )
+            asr_brain.evaluate(
+                test_data_,
+                test_loader_kwargs=hparams["test_dataloader_opts"],
+                min_key=key,
+            )
