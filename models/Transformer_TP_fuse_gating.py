@@ -1030,13 +1030,13 @@ class TransformerMDD_TP_encdec(sb.Brain):
                     return best_value, False
                     
                 # Save models for each metric
-                self.best_per, per_improved = save_best_model(
-                    "per", per, self.best_per, self.best_per_list, 
-                    "best_per", "best_PER", "min_keys", False)
+                # self.best_per, per_improved = save_best_model(
+                #     "per", per, self.best_per, self.best_per_list, 
+                #     "best_per", "best_PER", "min_keys", False)
                 
-                self.best_mpd_f1, mpd_improved = save_best_model(
-                    "mpd_f1", mpd_f1, self.best_mpd_f1, self.best_mpd_f1_list,
-                    "best_mpdf1", "best_mpd_f1", "max_keys", True)
+                # self.best_mpd_f1, mpd_improved = save_best_model(
+                #     "mpd_f1", mpd_f1, self.best_mpd_f1, self.best_mpd_f1_list,
+                #     "best_mpdf1", "best_mpd_f1", "max_keys", True)
                 
                 self.best_per_seq, per_seq_improved = save_best_model(
                     "per_seq", per_seq, self.best_per_seq, self.best_per_seq_list,
@@ -1046,7 +1046,8 @@ class TransformerMDD_TP_encdec(sb.Brain):
                     "mpd_f1_seq", mpd_f1_seq, self.best_mpd_f1_seq, self.best_mpd_f1_seq_list,
                     "best_mpd_f1_seq", "best_mpd_f1_seq", "max_keys", True)
                 
-                improved = per_improved or mpd_improved or per_seq_improved or mpd_seq_improved
+                # improved = per_improved or mpd_improved or per_seq_improved or mpd_seq_improved
+                improved = per_seq_improved or mpd_seq_improved
 
                 # Early stopping logic: only track best valid loss, do not save checkpoint for valid loss
                 if stage_loss < self.best_valid_loss or len(self.best_valid_loss_list) < 10:

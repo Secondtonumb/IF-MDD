@@ -96,6 +96,10 @@ ctc_head_target: "perceived"  # Options: "perceived", "canonical"
 # Seq head targeting
 decoder_target: "target" # Options: "target" "perceived";  len(perceived) = len(canonical), aligned
 
+# decoding with mispronunciation detection strategy
+allow_mispro_threshold: false
+mispro_threshold: -0.8
+
 # transformer
 nhead: 8
 d_ffn: 1024
