@@ -396,6 +396,63 @@ class TransformerMDD_TP_encdec(sb.Brain):
         print(f"   Encoder frozen: {self.encoder_frozen}")
         
         return modules_info, total_params, trainable_params
+
+    def filter_token_batch(self, seqs: torch.Tensor, lens: torch.Tensor, token_id: int, pad_id: int = 0,
+                            keep_at_least_one: bool = True, return_mask: bool = False):
+        """移除 batch 序列中指定 token (例如 silence) 并重新 pad。
+
+        适用于形状 [B, T_pad] 的整数张量, 其中 lens 是 SpeechBrain 风格的相对长度 (0~1 浮点)。
+
+        步骤:
+          1. 依据 lens 还原各样本的有效绝对长度 L_i = round(lens_i * T_pad)
+          2. 截取有效部分 seqs[b, :L_i]
+          3. 过滤 token_id
+          4. 若结果为空且 keep_at_least_one=True, 保留第一个元素(若第一个就是要过滤的则放回 token_id 或 pad)
+          5. 找到新的最大长度 new_T, 重新 pad 成 [B, new_T]
+          6. 计算新的绝对长度 & 相对长度 (相对 new_T)
+
+        返回:
+          new_seqs: [B, new_T] 过滤并重新 pad 后张量
+          new_lens_frac: [B] 过滤后长度 / new_T 的浮点 (与 SpeechBrain 接口一致)
+          new_lens_abs: [B] 过滤后绝对长度 (int)
+          (可选) removed_mask: list 长度 B, 每个元素是被移除的数量
+        """
+        assert seqs.dim() == 2, "seqs must be [B, T_pad]"
+        B, T_pad = seqs.shape
+        device = seqs.device
+        # 绝对长度 (四舍五入避免浮点误差) 并限制在 [0, T_pad]
+        abs_lens = torch.clamp((lens * T_pad).round().long(), min=0, max=T_pad)
+        new_list = []
+        new_abs = []
+        removed = []
+        for b in range(B):
+            L = abs_lens[b].item()
+            subseq = seqs[b, :L]
+            kept = subseq[subseq != token_id]
+            if kept.numel() == 0:
+                if keep_at_least_one:
+                    # 保留原第一元素或强制 token_id
+                    if L > 0:
+                        kept = subseq[:1]
+                    else:
+                        kept = torch.tensor([token_id], device=device, dtype=seqs.dtype)
+                # 否则允许空，但为了 pad 方便仍保留一个 pad_id
+                if kept.numel() == 0:
+                    kept = torch.tensor([pad_id], device=device, dtype=seqs.dtype)
+            new_list.append(kept)
+            new_abs.append(kept.numel())
+            removed.append(L - kept.numel())
+        new_T = max(new_abs) if len(new_abs) > 0 else 1
+        padded = seqs.new_full((B, new_T), pad_id)
+        for b, kept in enumerate(new_list):
+            padded[b, :kept.numel()] = kept
+        new_abs_tensor = torch.tensor(new_abs, device=device, dtype=abs_lens.dtype)
+        new_frac = new_abs_tensor.to(torch.float32) / float(new_T)
+        # 保持与原 lens dtype/设备一致
+        new_frac = new_frac.to(lens.dtype).to(device)
+        if return_mask:
+            return padded, new_frac, new_abs_tensor, removed
+        return padded, new_frac, new_abs_tensor
     
     def check_metric_convergence(self, current_per, current_f1):
         """Check if validation metrics have converged and freeze encoder/SSL if needed"""
@@ -722,7 +779,9 @@ class TransformerMDD_TP_encdec(sb.Brain):
             "fuse_attn_dec": fuse_attn_dec,
             "enc_out": enc_out,
             "dec_out": dec_out,
-            "Cano_emb": Cano_emb
+            "Cano_emb": Cano_emb,
+            "top_log_probs": top_log_probs,
+            "top_lengths": top_lengths
         }
         
     def compute_objectives(self, predictions, batch, stage):
@@ -742,7 +801,9 @@ class TransformerMDD_TP_encdec(sb.Brain):
         enc_out = predictions["enc_out"]  # [B, T_s, D]
         dec_out = predictions["dec_out"]  # [B, T_p+1,
         Cano_emb = predictions["Cano_emb"]  # [B, T_c, D]
-
+        top_log_probs = predictions["top_log_probs"]
+        top_lengths = predictions["top_lengths"]
+        
         wavs, wav_lens = batch.sig
         targets, target_lens = batch.phn_encoded_target
         targets_bos, target_lens_bos = batch.phn_encoded_target_bos
@@ -757,6 +818,7 @@ class TransformerMDD_TP_encdec(sb.Brain):
         ids = batch.id
         
         mispro_label, mispro_label_lens = batch.mispro_label
+        
         # if sb.Stage.TRAIN == stage and hasattr(self.hparams, "wav_augment"):
         #     wavs, wav_lens = self.hparams.wav_augment(wavs, wav_lens)
         #     targets = self.hparams.wav_augment.replicate_labels(targets)
@@ -822,18 +884,108 @@ class TransformerMDD_TP_encdec(sb.Brain):
                     p_ctc_feat, wav_lens, blank_id=self.hparams.blank_index
                 )
                 sequence_decoder_out = hyps  # [B, T_p+1]
-                
+
+                if self.hparams.eval_with_silence == False:
+                    sil_inx = self.label_encoder.lab2ind["sil"]
+                    # sequence / sequence_decoder_out 可能是: list[list[int]] 或 np.ndarray 或 torch.Tensor
+                    def _to_list_of_lists(obj):
+                        import numpy as np
+                        import torch
+                        if isinstance(obj, list):
+                            # 确认是否已经是 list of lists
+                            if len(obj) > 0 and isinstance(obj[0], (list, tuple)):
+                                return [list(x) for x in obj]
+                            # 可能是单条序列 -> 包成 batch
+                            return [list(obj)]
+                        if isinstance(obj, np.ndarray):
+                            if obj.ndim == 1:
+                                return [obj.tolist()]
+                            return [row.tolist() for row in obj]
+                        if torch.is_tensor(obj):
+                            if obj.dim() == 1:
+                                return [obj.cpu().tolist()]
+                            return [row.cpu().tolist() for row in obj]
+                        # 其它直接尝试包装
+                        return [list(obj)]
+
+                    def _filter_sil(batch_seqs, sil_id):
+                        filtered = []
+                        orig_lens = []
+                        new_lens = []
+                        for hyp in batch_seqs:
+                            orig_lens.append(len(hyp))
+                            # 逐元素过滤 silence
+                            kept = [tok for tok in hyp if tok != sil_id]
+                            # 如果全部被滤掉，至少保留一个（避免空序列导致后续崩溃）
+                            if len(kept) == 0:
+                                kept = [sil_id]  # 或者可以放 <blank>
+                            filtered.append(kept)
+                            new_lens.append(len(kept))
+                        return filtered, orig_lens, new_lens
+
+                    seq_list = _to_list_of_lists(sequence)
+                    dec_list = _to_list_of_lists(sequence_decoder_out)
+
+                    seq_filtered, seq_orig_lens, seq_new_lens = _filter_sil(seq_list, sil_inx)
+                    dec_filtered, dec_orig_lens, dec_new_lens = _filter_sil(dec_list, sil_inx)
+
+                    # 可选：如果后续指标期望 list[list[int]] 形式就直接用；若需 tensor 可再 pad
+                    sequence = seq_filtered
+                    sequence_decoder_out = dec_filtered
+
+                    # 调试少量打印（避免刷屏）
+                    if torch.rand(1).item() < 0.001:
+                        print(f"[SilenceFilter] Removed sil tokens: avg Δlen = "
+                              f"{(sum(seq_orig_lens)-sum(seq_new_lens))/max(1,len(seq_new_lens)):.2f}")
+                    
+                # 先准备参考序列（若需要去除 sil）
+                filtered_ctc_ref = None
+                filtered_ctc_ref_lens = None
+                filtered_seq_ref = None
+                filtered_seq_ref_lens = None
+                if self.hparams.eval_with_silence == False:
+                    sil_inx = self.label_encoder.lab2ind.get("sil", None)
+                    if sil_inx is not None:
+                        # CTC 参考
+                        if self.hparams.ctc_head_target == "perceived":
+                            filtered_ctc_ref, filtered_ctc_ref_lens, _ = self.filter_token_batch(
+                                targets, target_lens, token_id=sil_inx, pad_id=0
+                            )
+                        elif self.hparams.ctc_head_target == "canonical":
+                            filtered_ctc_ref, filtered_ctc_ref_lens, _ = self.filter_token_batch(
+                                canonicals, canonical_lens, token_id=sil_inx, pad_id=0
+                            )
+                        # seq2seq 参考（不含 eos 的那份，用于 PER_seq）
+                        if self.hparams.decoder_target == "perceived":
+                            filtered_seq_ref, filtered_seq_ref_lens, _ = self.filter_token_batch(
+                                perceiveds, perceived_lens, token_id=sil_inx, pad_id=0
+                            )
+                        else:
+                            filtered_seq_ref, filtered_seq_ref_lens, _ = self.filter_token_batch(
+                                targets, target_lens, token_id=sil_inx, pad_id=0
+                            )
+
+                # CTC metrics（仍使用原 logits + 可能过滤后的参考）
                 if self.hparams.ctc_head_target == "perceived":
                     self.ctc_metrics.append(ids, p_ctc_feat, targets, wav_lens, target_lens)
                 elif self.hparams.ctc_head_target == "canonical":
                     self.ctc_metrics.append(ids, p_ctc_feat, canonicals, wav_lens, canonical_lens)
+
+                if self.hparams.allow_confidence_thresholding:
+                    mask = (top_log_probs < self.hparams.confidence_threshold).float()
+                    # replace mask phn inx with err index
+                    err_inx = self.label_encoder.lab2ind["err"]
+                    # make where mask == 1's inx in sequence_decoder_out as err
+                    sequence_decoder_out_confience_thre = torch.tensor(sequence_decoder_out, device=mask.device)
+                    mask = mask[:, :sequence_decoder_out_confience_thre.shape[1]]
+                    sequence_decoder_out_confience_thre[mask.bool()] = err_inx
+                    sequence_decoder_out = sequence_decoder_out_confience_thre.cpu().numpy()
 
                 if self.hparams.decoder_target == "perceived":
                     self.seq_metrics.append(ids, log_probabilities=p_dec_out, targets=perceiveds_eos, length=perceived_lens_eos)
                 else:
                     self.seq_metrics.append(ids, log_probabilities=p_dec_out, targets=targets_eos, length=target_lens_eos)
                 self.mispro_metrics.append(ids, h_mispro, mispro_label, mispro_label_lens)
-                
                 # TODO: Guided Attention metrics
                 # self.ga_metrics.append(ids, attention=fuse_attn, 
                 #                        target_lengths=(mispro_label_lens * mispro_label.shape[1]).int(),
@@ -841,46 +993,85 @@ class TransformerMDD_TP_encdec(sb.Brain):
                 #                        )
                 
                 # self.ctc_metrics_fuse.append(ids, sequence_decoder_out, targets, wav_lens, target_lens)
-                
                 # CTC-only results
                 if self.hparams.ctc_head_target == "perceived":
-                    self.per_metrics.append(
-                        ids=ids,
-                        predict=sequence,
-                        target=targets,
-                        predict_len=None,
-                        target_len=target_lens,
-                        ind2lab=self.label_encoder.decode_ndim,
-                    )
+                    if self.hparams.eval_with_silence == False and filtered_ctc_ref is not None:
+                        self.per_metrics.append(
+                            ids=ids,
+                            predict=sequence,
+                            target=filtered_ctc_ref,
+                            predict_len=None,
+                            target_len=filtered_ctc_ref_lens,
+                            ind2lab=self.label_encoder.decode_ndim,
+                        )
+                    else:
+                        self.per_metrics.append(
+                            ids=ids,
+                            predict=sequence,
+                            target=targets,
+                            predict_len=None,
+                            target_len=target_lens,
+                            ind2lab=self.label_encoder.decode_ndim,
+                        )
                 elif self.hparams.ctc_head_target == "canonical":
-                    self.per_metrics.append(
-                        ids=ids,
-                        predict=sequence,
-                        target=canonicals,
-                        predict_len=None,
-                        target_len=canonical_lens,
-                        ind2lab=self.label_encoder.decode_ndim,
-                    )
+                    if self.hparams.eval_with_silence == False and filtered_ctc_ref is not None:
+                        self.per_metrics.append(
+                            ids=ids,
+                            predict=sequence,
+                            target=filtered_ctc_ref,
+                            predict_len=None,
+                            target_len=filtered_ctc_ref_lens,
+                            ind2lab=self.label_encoder.decode_ndim,
+                        )
+                    else:
+                        self.per_metrics.append(
+                            ids=ids,
+                            predict=sequence,
+                            target=canonicals,
+                            predict_len=None,
+                            target_len=canonical_lens,
+                            ind2lab=self.label_encoder.decode_ndim,
+                        )
                     
                 # seq2seq results
                 if self.hparams.decoder_target == "perceived":
-                    self.per_metrics_seq.append(
-                        ids=ids,
-                        predict=sequence_decoder_out,
-                        target=perceiveds_eos,
-                        predict_len=None,
-                        target_len=perceived_lens_eos,
-                        ind2lab=self.label_encoder.decode_ndim,
-                    )
+                    if self.hparams.eval_with_silence == False and filtered_seq_ref is not None:
+                        self.per_metrics_seq.append(
+                            ids=ids,
+                            predict=sequence_decoder_out,
+                            target=filtered_seq_ref,
+                            predict_len=None,
+                            target_len=filtered_seq_ref_lens,
+                            ind2lab=self.label_encoder.decode_ndim,
+                        )
+                    else:
+                        self.per_metrics_seq.append(
+                            ids=ids,
+                            predict=sequence_decoder_out,
+                            target=perceiveds,
+                            predict_len=None,
+                            target_len=perceived_lens_eos,
+                            ind2lab=self.label_encoder.decode_ndim,
+                        )
                 else:
-                    self.per_metrics_seq.append(
-                        ids=ids,
-                        predict=sequence_decoder_out,
-                        target=targets,
-                        predict_len=None,
-                        target_len=target_lens,
-                        ind2lab=self.label_encoder.decode_ndim,
-                    )
+                    if self.hparams.eval_with_silence == False and filtered_seq_ref is not None:
+                        self.per_metrics_seq.append(
+                            ids=ids,
+                            predict=sequence_decoder_out,
+                            target=filtered_seq_ref,
+                            predict_len=None,
+                            target_len=filtered_seq_ref_lens,
+                            ind2lab=self.label_encoder.decode_ndim,
+                        )
+                    else:
+                        self.per_metrics_seq.append(
+                            ids=ids,
+                            predict=sequence_decoder_out,
+                            target=targets,
+                            predict_len=None,
+                            target_len=target_lens,
+                            ind2lab=self.label_encoder.decode_ndim,
+                        )
                 
                 # MPD metrics
                 self.mpd_metrics.append(
@@ -1055,13 +1246,13 @@ class TransformerMDD_TP_encdec(sb.Brain):
                     return best_value, False
                     
                 # Save models for each metric
-                self.best_per, per_improved = save_best_model(
-                    "per", per, self.best_per, self.best_per_list, 
-                    "best_per", "best_PER", "min_keys", False)
+                # self.best_per, per_improved = save_best_model(
+                #     "per", per, self.best_per, self.best_per_list, 
+                #     "best_per", "best_PER", "min_keys", False)
                 
-                self.best_mpd_f1, mpd_improved = save_best_model(
-                    "mpd_f1", mpd_f1, self.best_mpd_f1, self.best_mpd_f1_list,
-                    "best_mpdf1", "best_mpd_f1", "max_keys", True)
+                # self.best_mpd_f1, mpd_improved = save_best_model(
+                #     "mpd_f1", mpd_f1, self.best_mpd_f1, self.best_mpd_f1_list,
+                #     "best_mpdf1", "best_mpd_f1", "max_keys", True)
                 
                 self.best_per_seq, per_seq_improved = save_best_model(
                     "per_seq", per_seq, self.best_per_seq, self.best_per_seq_list,
@@ -1071,7 +1262,8 @@ class TransformerMDD_TP_encdec(sb.Brain):
                     "mpd_f1_seq", mpd_f1_seq, self.best_mpd_f1_seq, self.best_mpd_f1_seq_list,
                     "best_mpd_f1_seq", "best_mpd_f1_seq", "max_keys", True)
                 
-                improved = per_improved or mpd_improved or per_seq_improved or mpd_seq_improved
+                # improved = per_improved or mpd_improved or per_seq_improved or mpd_seq_improved
+                improved = per_seq_improved or mpd_seq_improved
 
                 # Early stopping logic: only track best valid loss, do not save checkpoint for valid loss
                 if stage_loss < self.best_valid_loss or len(self.best_valid_loss_list) < 10:

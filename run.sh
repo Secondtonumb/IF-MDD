@@ -350,19 +350,19 @@ python ver5_train.py \
 
 
 # TransDec‘s output is perceived (aligned phn seq with canonical)
-# python ver5_train.py \
-#         hparams/transformer_TP_ver4_fuse.yaml \
-#         --feature_fusion TransformerMDD_TP_encdec \
-#         --perceived_ssl_model wavlm_large \
-#         --ENCODER_DIM 1024 \
-#         --prefix transformer_2_TP_fuse_2_encdec_conformer_frzctc_dechead_perc \
-#         --fuse_enc_or_dec encdec \
-#         --attention_type RelPosMHAXL \
-#         --valid_search_interval 2 \
-#         --encoder_module conformer \
-#         --enable_ctc_freezing True \
-#         --decoder_target perceived \
-#         --number_of_epochs 300
+python ver5_train.py \
+        hparams/transformer_TP_ver4_fuse.yaml \
+        --feature_fusion TransformerMDD_TP_encdec \
+        --perceived_ssl_model wavlm_large \
+        --ENCODER_DIM 1024 \
+        --prefix transformer_2_TP_fuse_2_encdec_conformer_frzctc_dechead_perc \
+        --fuse_enc_or_dec encdec \
+        --attention_type RelPosMHAXL \
+        --valid_search_interval 2 \
+        --encoder_module conformer \
+        --enable_ctc_freezing True \
+        --decoder_target perceived \
+        --number_of_epochs 300
 
 # # Use XLS-r-1b ばつ
 # python ver5_train.py \

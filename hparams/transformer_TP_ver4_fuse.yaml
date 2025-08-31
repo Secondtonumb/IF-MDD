@@ -100,6 +100,9 @@ decoder_target: "target" # Options: "target" "perceived";  len(perceived) = len(
 allow_confidence_thresholding: false
 confidence_threshold: -1.0
 
+# eval with silence
+eval_with_silence: true
+
 # transformer
 nhead: 8
 d_ffn: 1024
@@ -264,7 +267,7 @@ valid_search: !new:speechbrain.decoders.seq2seq.S2STransformerBeamSearcher
   max_decode_ratio: 1.0
   length_normalization: True
   using_eos_threshold: False
-  beam_size: 5
+  beam_size: 1
   scorer: !ref <scorer>
 
 test_search: !new:speechbrain.decoders.seq2seq.S2STransformerBeamSearcher
