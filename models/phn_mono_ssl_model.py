@@ -339,8 +339,8 @@ class PhnMonoSSLModel(sb.Brain):
         if self.checkpointer is not None:
             # TODO: support recover best on PER or mpd_f1 or averaged model of best PER and mpd_f1
             self.checkpointer.recover_if_possible(
-                # min_key="PER",
-                max_key="mpd_f1",
+                min_key="PER",
+                # max_key="mpd_f1",
             )
 
 class PhnMonoSSLModel_misproBCE(PhnMonoSSLModel):

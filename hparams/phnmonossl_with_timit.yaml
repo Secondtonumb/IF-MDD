@@ -38,17 +38,10 @@ blend_alpha: 0.5              # If using "blend" fusion
 # Data files
 data_folder_save: "./data"
 train_annotation: !ref <data_folder_save>/train-train.json
+train_annotation_extra: !ref <data_folder_save>/train-train_timit.json
 valid_annotation: !ref <data_folder_save>/train-dev.json
 test_annotation: !ref <data_folder_save>/test.json
-# Extra data
-train_annotation_extra: !ref <data_folder_save>/train-train_with_extra.json
-use_extra_train_data: False
 
-evaluate_key: "PER" # use "mpd_f1_seq" for Transformer decoder path best mpd f1
-                            # "PER_seq" for Transformer decoder's best error rate
-                            # "PER" for ctc path best error rate
-                            # "mpd_f1" for ctc path best mpd f1
-max_save_models: 3 # Maximum number of saved models for each metrics 
 # generate training id for output folder
 # generate_training_id: !apply:trainer.generate_training_id.generate_training_id [!ref <perceived_ssl_model_id>, !ref <canonical_ssl_model_id>, !ref <feature_fusion>, !ref <prefix>]
 
@@ -75,26 +68,19 @@ perceived_ssl: !apply:trainer.AutoSSLoader.AutoSSLLoader
     freeze: !ref <freeze_perceived_ssl>
     freeze_feature_extractor: !ref <freeze_perceived_feature_extractor>
     save_path: !ref <pretrained_models_path>
-    output_all_hiddens: False
-preceived_ssl_emb_layer: -1
 
 canonical_ssl: !apply:trainer.AutoSSLoader.AutoSSLLoader
     model_name: !ref <canonical_ssl_model>
     freeze: !ref <freeze_canonical_ssl>
     freeze_feature_extractor: !ref <freeze_perceived_feature_extractor>
     save_path: !ref <pretrained_models_path>
-    output_all_hiddens: False
 
-canonical_ssl_emb_layer: -1
-
-enc: !new:torch.nn.Sequential
-  - !new:speechbrain.lobes.models.VanillaNN.VanillaNN
-     input_shape: [null, null, !ref <ENCODER_DIM>]
-     activation: !ref <activation>
-     dnn_blocks: !ref <dnn_layers>
-     dnn_neurons: !ref <dnn_neurons>
-  - !new:torch.nn.LayerNorm
-     normalized_shape: !ref <dnn_neurons>
+enc:
+  !new:speechbrain.lobes.models.VanillaNN.VanillaNN
+    input_shape: [null, null, !ref <ENCODER_DIM>]
+    activation: !ref <activation>
+    dnn_blocks: !ref <dnn_layers>
+    dnn_neurons: !ref <dnn_neurons>
 
 ctc_lin:  !new:speechbrain.nnet.linear.Linear
     input_size: !ref <dnn_neurons>
@@ -127,7 +113,7 @@ output_neurons: 44 # l2arctic: 40phns(sil)+err+blank + eos + bos =44
 blank_index: 0
 
 model: !new:torch.nn.ModuleList
-    - [!ref <enc>, !ref <ctc_lin>]
+    - [!ref <enc>, !ref <ctc_lin>, !ref <mispro_head>]
 
 adam_opt_class: !name:torch.optim.Adam
     lr: !ref <lr>
@@ -169,7 +155,7 @@ seed: 3047
 __set_seed: !apply:torch.manual_seed [!ref <seed>]
 
 # training parameters
-number_of_epochs: 100
+number_of_epochs: 300
 batch_size: 16
 lr: 0.0003
 sorting: ascending
@@ -181,7 +167,7 @@ lr_pretrained: 0.00001
 auto_mix_prec: true
 # or
 precision: fp16         # 支持 "fp32"、"fp16" 或 "bf16"
-eval_precision: fp32    # 推理同样切换到 FP16
+eval_precision: fp16    # 推理同样切换到 FP16
 
 # Dataloader options
 train_dataloader_opts:

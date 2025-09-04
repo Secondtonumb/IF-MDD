@@ -1,5 +1,4 @@
 import os
-import math
 
 import torch
 import torch.nn
@@ -38,7 +37,7 @@ import torch.nn.functional as F
 from utils.layers.utils import make_pad_mask
 from utils.plot.plot_attn import plot_attention
 
-class TransformerMDD_TP_encdec_gating(sb.Brain):
+class TransformerMDD_TP_encdec_errclass_DecOnly(sb.Brain):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # self.        super().__init__(*args, **kwargs)
@@ -89,21 +88,6 @@ class TransformerMDD_TP_encdec_gating(sb.Brain):
         self.f1_threshold = None
         self.per_history = []
         self.f1_history = []
-
-        # ---- Optional mispro -> sequence integration hyperparams ----
-        # These can be overridden in hparams yaml. If integrate_mispro_into_seq is False, code is skipped.
-        self.integrate_mispro_into_seq = getattr(self.hparams, 'integrate_mispro_into_seq', False)
-        self.mispro_gate_alpha = getattr(self.hparams, 'mispro_gate_alpha', 0.5)
-        self.bias_err_with_mispro = getattr(self.hparams, 'bias_err_with_mispro', True)
-        self.mispro_err_bias = getattr(self.hparams, 'mispro_err_bias', 1.0)
-        # Adapter to project decoder states for gated residual; created lazily to ensure dnn_neurons exists
-        pdb.set_trace()
-        if self.integrate_mispro_into_seq:
-            d_model = getattr(self.hparams, 'dnn_neurons', None)
-            if d_model is not None:
-                self.mispro_dec_adapter = torch.nn.Linear(d_model, d_model, bias=True).to(self.device)
-            else:
-                print('[Warn] dnn_neurons not found; mispro_dec_adapter not initialized.')
     
     def freeze_encoder_and_ssl(self):
         """Freeze encoder and SSL model parameters"""
@@ -253,7 +237,7 @@ class TransformerMDD_TP_encdec_gating(sb.Brain):
         # pdb.set_trace()
                 
         from speechbrain.utils.parameter_transfer import Pretrainer
-
+        pdb.set_trace()
         pretrainer = Pretrainer(
             collect_in=self.hparams.pretrained_model_path,      # 把文件收集到这个目录（用软链或拷贝）
             loadables={
@@ -590,6 +574,8 @@ class TransformerMDD_TP_encdec_gating(sb.Brain):
         self.ctc_metrics = self.hparams.ctc_stats()
         self.seq_metrics = self.hparams.seqlabel_stats()
         self.mispro_metrics = self.hparams.mispro_stats()
+        self.mispro_metrics_cls = self.hparams.mispro_class_stats()
+        
         if hasattr(self.hparams, "augmentation"):
             self.modules.perceived_ssl.model.config.apply_spec_augment = True
 
@@ -632,18 +618,23 @@ class TransformerMDD_TP_encdec_gating(sb.Brain):
             targets_bos = perceiveds_bos
             target_lens_bos = perceiveds_bos
         if sb.Stage.TRAIN == stage:
-            allow_ASR_hidden = getattr(self.hparams, "output_ASR_hidden_state", True)
-            outs = self.modules.TransASR(
-                    src=feats_enc,
-                    tgt=targets_bos,
-                    wav_len=wav_lens,
-                    pad_idx=0,
+            # enc_out, hidden, dec_out = self.modules.TransASR(
+            #     src=feats_enc,
+            #     tgt=targets_bos,
+            #     wav_len=wav_lens,
+            #     pad_idx=0, 
+            # )
+            self.modules.TransASR(
+                tgt=targets_bos,
+                memory=feats_enc,
+                tgt_key_padding_mask=make_pad_mask(target_lens_bos*target_lens_bos.shape[1], maxlen=targets_bos.shape[1]).to(self.device),
+                memory_key_padding_mask=make_pad_mask(wav_lens * feats_enc.shape[1], maxlen=feats_enc.shape[1]).to(self.device),
+                pos_embs_tgt=RelPosEncXL(emb_dim=self.hparams.dnn_neurons)(self.modules.phn_emb(targets_bos)).to(self.device),
+                pos_embs_src=RelPosEncXL(emb_dim=self.hparams.dnn_neurons)(feats_enc).to(self.device)
             )
-            if allow_ASR_hidden:
-                enc_out, hidden_outs, dec_out = outs
-            else:
-                enc_out, dec_out = outs
+            
             # Option 2, fuse Canononical Emb and mispro after Encoder.
+            
 
             if "enc" in self.hparams.fuse_enc_or_dec:
                 memory = enc_out
@@ -688,85 +679,32 @@ class TransformerMDD_TP_encdec_gating(sb.Brain):
                 # tgt_mask=tgt_causal_mask,
                 # print("Warning: No fuse net is used!")
             h_mispro = self.hparams.mispro_head(fuse_feat.transpose(1, 2))
-            h_mispro = h_mispro.transpose(1, 2)  # [B, T_c, D]
-            p_mispro_logits = torch.nn.functional.sigmoid(h_mispro)  # Log probabilities
+            # for binary detection, 
+            h_mispro_bin = self.hparams.mispro_head_binary_out(h_mispro)
+            h_mispro_bin = h_mispro_bin.transpose(1, 2)  # [B, T_c, 1]
+            # for multi-class detection, 4 classes
+            h_mispro_cls = self.hparams.mispro_head_class_out(h_mispro.transpose(1, 2)) #[B, T_c, 4]
+            
+            # p_mispro_logits = torch.nn.functional.log_softmax(h_mispro)  # Log probabilities for 4 Classes
+            p_mispro_bin_logits = torch.nn.functional.sigmoid(h_mispro_bin)  # Log probabilities for binary
+            p_mispro_cls_logits = torch.nn.functional.log_softmax(h_mispro_cls, dim=-1)
 
             # CTC head
-            ## feats_enc: the output of SSL encoder + FC
-            ## enc_out: TransformerASR's Encoder's output (Conformer)
-            ctc_head_input = getattr(self.hparams, "ctc_head_input", "enc_out")
-            # pdb.set_trace()
-            if ctc_head_input == "feat_enc":
-                h_ctc_feat = self.modules.ctc_lin(feats_enc)  # [B, T_s, C]
-            elif ctc_head_input == "enc_out":
-                # Using encoder output
-                h_ctc_feat = self.modules.ctc_lin(enc_out)  # [B, T_s, C]
+            h_ctc_feat = self.modules.ctc_lin(enc_out)  # [B, T_s, C]
             p_ctc_logits = self.hparams.log_softmax(h_ctc_feat)  # Log probabilities
 
             # seq2seq head
             h_seq_feat = self.modules.d_out(dec_out)  # [B, T_p+1, C]
             p_seq_logits = self.hparams.log_softmax(h_seq_feat)  # Log probabilities
-            # ----- Integrate mispro probabilities into seq logits (TRAIN) -----
-            pdb.set_trace()
-            if self.integrate_mispro_into_seq:
-                try:
-                    # h_mispro shape: [B, T_c, 1]; fuse_attn aligns canonical tokens to encoder/decoder memory.
-                    # We first build alignment from canonical positions to decoder output positions using fuse_attn_dec if available; else use identity/truncate.
-                    # Strategy: use average attention over heads from fuse_attn_dec (enc-dec fusion) to map canonical mispro probs -> decoder positions.
-                    with torch.no_grad():
-                        if 'fuse_attn_dec' in locals() and fuse_attn_dec is not None:
-                            # fuse_attn_dec: list[layer] each [B, nhead, T_c, T_p]
-                            attn_for_align = fuse_attn_dec[-1].mean(1)  # [B, T_c, T_p]
-                            # Normalize to avoid numerical issues
-                            attn_for_align = attn_for_align / (attn_for_align.sum(dim=1, keepdim=True) + 1e-8)
-                            mispro_prob = torch.sigmoid(h_mispro.squeeze(-1))  # [B, T_c]
-                            # Project mispro to decoder positions
-                            mispro_on_dec = torch.bmm(mispro_prob.unsqueeze(1), attn_for_align).squeeze(1)  # [B, T_p]
-                        else:
-                            # Fallback: truncate or pad to decoder length (excluding final eos)
-                            mispro_prob = torch.sigmoid(h_mispro.squeeze(-1))  # [B, T_c]
-                            T_p = h_seq_feat.shape[1] - 1  # exclude final eos for alignment
-                            mispro_on_dec = torch.zeros(mispro_prob.size(0), T_p, device=mispro_prob.device)
-                            trunc = min(T_p, mispro_prob.size(1))
-                            mispro_on_dec[:, :trunc] = mispro_prob[:, :trunc]
-                    # Build gate values g in [0,1]
-                    g = mispro_on_dec.unsqueeze(-1)  # [B, T_p, 1]
-                    # Exclude BOS (position 0) gating lightly: shift
-                    # (h_seq_feat includes BOS at pos0 and EOS at end). We apply gating to middle tokens 1..T_p
-                    token_slice = slice(1, -1)
-                    if not hasattr(self, 'mispro_dec_adapter'):
-                        self.mispro_dec_adapter = torch.nn.Linear(h_seq_feat.size(-1), h_seq_feat.size(-1), bias=True).to(h_seq_feat.device)
-                    dec_proj = self.mispro_dec_adapter(dec_out[:, token_slice, :])  # [B, T_p-? , D]
-                    # Residual modulation: h' = h + alpha * g * dec_proj
-                    # Align sizes: g for sequence positions except BOS/EOS
-                    g_mid = g[:, :dec_proj.size(1), :]
-                    h_seq_feat[:, token_slice, :] = h_seq_feat[:, token_slice, :] + self.mispro_gate_alpha * g_mid * dec_proj
-                    # Optional: add bias for 'err' token before softmax
-                    if self.bias_err_with_mispro:
-                        err_inx = self.label_encoder.lab2ind.get('err', None)
-                        if err_inx is not None and err_inx < h_seq_feat.size(-1):
-                            # Expand mispro_on_dec to match slice length
-                            err_bias = self.mispro_err_bias * g_mid.squeeze(-1)  # [B, T_mid]
-                            h_seq_feat[:, token_slice, err_inx] = h_seq_feat[:, token_slice, err_inx] + err_bias
-                    # Recompute logits & log-softmax after modulation / bias
-                    p_seq_logits = self.hparams.log_softmax(h_seq_feat)
-                except Exception as e:
-                    if torch.rand(1).item() < 0.01:
-                        print(f'[mispro-integrate][train] Warning: {e}')
 
         else:
             with torch.no_grad():
-                allow_ASR_hidden = getattr(self.hparams, "output_ASR_hidden_state", True)
-                outs = self.modules.TransASR(
-                        src=feats_enc,
-                        tgt=targets_bos,
-                        wav_len=wav_lens,
-                        pad_idx=0,
+                enc_out, hidden, dec_out = self.modules.TransASR(
+                    src=feats_enc,
+                    tgt=targets_bos,
+                    wav_len=wav_lens,
+                    pad_idx=0,  
                 )
-                if allow_ASR_hidden:
-                    enc_out, hidden_outs, dec_out = outs
-                else:
-                    enc_out, dec_out = outs
                 if "enc" in self.hparams.fuse_enc_or_dec:
                     memory = enc_out
                     memory = self.modules.mem_proj(memory)  # [B, T_s, D]
@@ -810,52 +748,24 @@ class TransformerMDD_TP_encdec_gating(sb.Brain):
                     # tgt_mask=tgt_causal_mask,
             
                 h_mispro = self.hparams.mispro_head(fuse_feat.transpose(1, 2))
-                h_mispro = h_mispro.transpose(1, 2)  # [B, T_c, D]
-                p_mispro_logits = torch.nn.functional.sigmoid(h_mispro)  # Log probabilities
+                # h_mispro = h_mispro.transpose(1, 2)  # [B, T_c, D]
+                # p_mispro_logits = torch.nn.functional.sigmoid(h_mispro)  # Log probabilities
+                # for binary detection,
+                h_mispro_bin = self.hparams.mispro_head_binary_out(h_mispro)
+                h_mispro_bin = h_mispro_bin.transpose(1, 2)
+                # for multi-class detection, 4 classes
+                h_mispro_cls = self.hparams.mispro_head_class_out(h_mispro.transpose(1, 2))
+                # p_mispro_logits = torch.nn.functional.log_softmax(h_mispro)  # Log probabilities for 4 Classes
+                p_mispro_bin_logits = torch.nn.functional.sigmoid(h_mispro_bin)
+                p_mispro_cls_logits = torch.nn.functional.log_softmax(h_mispro_cls, dim=-1)
                 
-                
-                ctc_head_input = getattr(self.hparams, "ctc_head_input", "enc_out")
-                if ctc_head_input == "feat_enc":
-                    h_ctc_feat = self.modules.ctc_lin(feats_enc)  # [B, T_s, C]
-                elif ctc_head_input == "enc_out":
-                    # Using encoder output
-                    h_ctc_feat = self.modules.ctc_lin(enc_out)  # [B, T_s, C]
+                # CTC head
+                h_ctc_feat = self.modules.ctc_lin(enc_out)  # [B, T_s, C]
                 p_ctc_logits = self.hparams.log_softmax(h_ctc_feat)  # Log probabilities
 
                 # seq2seq head
                 h_seq_feat = self.modules.d_out(dec_out)  # [B, T_p+1, C]
                 p_seq_logits = self.hparams.log_softmax(h_seq_feat)  # Log probabilities
-
-                # ----- Integrate mispro probabilities into seq logits (EVAL) -----
-                if self.integrate_mispro_into_seq:
-                    try:
-                        with torch.no_grad():
-                            if 'fuse_attn_dec' in locals() and fuse_attn_dec is not None:
-                                attn_for_align = fuse_attn_dec[-1].mean(1)  # [B, T_c, T_p]
-                                attn_for_align = attn_for_align / (attn_for_align.sum(dim=1, keepdim=True) + 1e-8)
-                                mispro_prob = torch.sigmoid(h_mispro.squeeze(-1))  # [B, T_c]
-                                mispro_on_dec = torch.bmm(mispro_prob.unsqueeze(1), attn_for_align).squeeze(1)  # [B, T_p]
-                            else:
-                                mispro_prob = torch.sigmoid(h_mispro.squeeze(-1))
-                                T_p = h_seq_feat.shape[1] - 1
-                                mispro_on_dec = torch.zeros(mispro_prob.size(0), T_p, device=mispro_prob.device)
-                                trunc = min(T_p, mispro_prob.size(1))
-                                mispro_on_dec[:, :trunc] = mispro_prob[:, :trunc]
-                        token_slice = slice(1, -1)
-                        if not hasattr(self, 'mispro_dec_adapter'):
-                            self.mispro_dec_adapter = torch.nn.Linear(h_seq_feat.size(-1), h_seq_feat.size(-1), bias=True).to(h_seq_feat.device)
-                        dec_proj = self.mispro_dec_adapter(dec_out[:, token_slice, :])
-                        g_mid = mispro_on_dec.unsqueeze(-1)[:, :dec_proj.size(1), :]
-                        h_seq_feat[:, token_slice, :] = h_seq_feat[:, token_slice, :] + self.mispro_gate_alpha * g_mid * dec_proj
-                        if self.bias_err_with_mispro:
-                            err_inx = self.label_encoder.lab2ind.get('err', None)
-                            if err_inx is not None and err_inx < h_seq_feat.size(-1):
-                                err_bias = self.mispro_err_bias * g_mid.squeeze(-1)
-                                h_seq_feat[:, token_slice, err_inx] = h_seq_feat[:, token_slice, err_inx] + err_bias
-                        p_seq_logits = self.hparams.log_softmax(h_seq_feat)
-                    except Exception as e:
-                        if torch.rand(1).item() < 0.01:
-                            print(f'[mispro-integrate][eval] Warning: {e}')
                 
                 hyps = None
                 attn_map = None
@@ -911,14 +821,19 @@ class TransformerMDD_TP_encdec_gating(sb.Brain):
                             c_id = "_".join(c_id.split("/")[-3:])
                             plot_attention(attn.cpu(), self.hparams.nhead, c_id, self.hparams.test_attention_plot_dir+"_dec")
             
+
         return {
             "p_ctc_feat": p_ctc_logits,  # [B, T_s, C]
             "p_dec_out": p_seq_logits,  # [B, T_p+1, C]
             "feats": feats,  # [B, T_s, D]
             "attn_map": attn_map,  # [B, T_p+1, T_s] or similar
             "hyps": hyps,  # [B, T_p+1] or None if not applicable
-            "p_mispro_logits": p_mispro_logits,
-            "h_mispro": h_mispro,
+            # "p_mispro_logits": p_mispro_logits,
+            "p_mispro_bin_logits": p_mispro_bin_logits,
+            "p_mispro_cls_logits": p_mispro_cls_logits,
+            "h_mispro_bin": h_mispro_bin,
+            "h_mispro_cls": h_mispro_cls,
+            
             "fuse_attn": fuse_attn,
             "fuse_attn_dec": fuse_attn_dec,
             "enc_out": enc_out,
@@ -938,8 +853,14 @@ class TransformerMDD_TP_encdec_gating(sb.Brain):
         feats = predictions["feats"]
         attn_map = predictions["attn_map"]
         hyps = predictions.get("hyps", [])  # [B, T_p+1] or None if not applicable
-        p_mispro_logits = predictions["p_mispro_logits"]  # [B, T_c, C]
-        h_mispro = predictions["h_mispro"]  # [B, T_c, C]
+        # p_mispro_logits = predictions["p_mispro_logits"]  # [B, T_c, C]
+        p_mispro_bin_logits = predictions["p_mispro_bin_logits"]  # [B, T_c, 1]
+        p_mispro_cls_logits = predictions["p_mispro_cls_logits"]  # [B, T_c, 4]
+        # p_mispro_logits = torch.cat((p_mispro_bin_logits, p_mispro_cls_logits), dim=-1)
+        
+        h_mispro_bin = predictions["h_mispro_bin"]  # [B, T_c, D]
+        h_mispro_cls = predictions["h_mispro_cls"]
+        # h_mispro = predictions["h_mispro"]  # [B, T_c, C]
         fuse_attn = predictions["fuse_attn"]  # [B, T_c, T_s] or similar
         fuse_attn_dec = predictions["fuse_attn_dec"]  # [B, T_c, T_p] or similar
         enc_out = predictions["enc_out"]  # [B, T_s, D]
@@ -961,7 +882,9 @@ class TransformerMDD_TP_encdec_gating(sb.Brain):
         perceiveds_eos, perceived_lens_eos = batch.phn_encoded_perceived_eos
         ids = batch.id
         
+        # assume mispro_label is 4 classes: 0-no, 1-sub, 2-del, 3-ins
         mispro_label, mispro_label_lens = batch.mispro_label
+        mispro_label_bin = (mispro_label > 0).long()  # Convert to binary: 0 (no), 1 (any mispronunciation)
         
         # if sb.Stage.TRAIN == stage and hasattr(self.hparams, "wav_augment"):
         #     wavs, wav_lens = self.hparams.wav_augment(wavs, wav_lens)
@@ -983,10 +906,13 @@ class TransformerMDD_TP_encdec_gating(sb.Brain):
             loss_dec_out = self.hparams.seq_cost(p_dec_out, perceiveds_eos, perceived_lens_eos)
         else:
             loss_dec_out = self.hparams.seq_cost(p_dec_out, targets_eos, target_lens_eos)
-        
-        loss_mispro = self.hparams.mispro_cost(inputs=h_mispro,
-                                               targets=mispro_label, 
+            
+        loss_mispro = self.hparams.mispro_cost_bin(inputs=h_mispro_bin,
+                                               targets=mispro_label_bin, 
                                                length=mispro_label_lens)
+        
+        loss_mispro_cls = self.hparams.mispro_cost_cls(p_mispro_cls_logits, mispro_label, mispro_label_lens)
+        loss_mispro_all = loss_mispro + loss_mispro_cls
         
         # guided attention loss on ga
         # loss_ga_model = sb.nnet.loss.guidedattn_loss.GuidedAttentionLoss(sigma=0.2)
@@ -1014,7 +940,7 @@ class TransformerMDD_TP_encdec_gating(sb.Brain):
         loss = (
             self.hparams.ctc_weight * loss_ctc
             + (1 - self.hparams.ctc_weight) * loss_dec_out
-            + loss_mispro 
+            + loss_mispro_all 
             + loss_ga * 10
         )
 
@@ -1129,7 +1055,9 @@ class TransformerMDD_TP_encdec_gating(sb.Brain):
                     self.seq_metrics.append(ids, log_probabilities=p_dec_out, targets=perceiveds_eos, length=perceived_lens_eos)
                 else:
                     self.seq_metrics.append(ids, log_probabilities=p_dec_out, targets=targets_eos, length=target_lens_eos)
-                self.mispro_metrics.append(ids, h_mispro, mispro_label, mispro_label_lens)
+                self.mispro_metrics.append(ids, h_mispro_bin, mispro_label_bin, mispro_label_lens)
+                self.mispro_metrics_cls.append(ids, p_mispro_cls_logits, mispro_label, mispro_label_lens)
+                
                 # TODO: Guided Attention metrics
                 # self.ga_metrics.append(ids, attention=fuse_attn, 
                 #                        target_lengths=(mispro_label_lens * mispro_label.shape[1]).int(),
@@ -1259,6 +1187,8 @@ class TransformerMDD_TP_encdec_gating(sb.Brain):
                     wandb.log({"loss_ctc_head": loss_ctc.item()}, step=self.hparams.epoch_counter.current)
                 if loss_mispro is not None:
                     wandb.log({"loss_mispro": loss_mispro.item()}, step=self.hparams.epoch_counter.current)
+                if loss_mispro_cls is not None:
+                    wandb.log({"loss_mispro_cls": loss_mispro_cls.item()}, step=self.hparams.epoch_counter.current)
                 if loss_ga is not None:
                     wandb.log({"loss_ga": loss_ga.item()}, step=self.hparams.epoch_counter.current)
             except Exception:
@@ -1291,6 +1221,7 @@ class TransformerMDD_TP_encdec_gating(sb.Brain):
                 max_key="mpd_f1_seq",
                 # max_key="mpd_f1",
             )
+        pdb.set_trace()
         # Load pretrained components if specified
         if getattr(self.hparams, 'load_pretrained_components', False):
             pretrained_path = getattr(self.hparams, 'pretrained_model_path', '')
@@ -1335,6 +1266,7 @@ class TransformerMDD_TP_encdec_gating(sb.Brain):
                     "ctc_loss": self.ctc_metrics.summarize("average"),
                     "seq_loss": self.seq_metrics.summarize("average"),
                     "mispro_loss": self.mispro_metrics.summarize("average"),
+                    "mispro_loss_cls": self.mispro_metrics_cls.summarize("average"),
                     "PER": per,
                     "mpd_f1": mpd_f1,
                     "PER_seq": per_seq,
@@ -1357,6 +1289,7 @@ class TransformerMDD_TP_encdec_gating(sb.Brain):
                     train_stats={"loss": self.train_loss,
                                  "ctc_loss": self.ctc_metrics.summarize("average"),
                                  "mispro_loss": self.mispro_metrics.summarize("average"),
+                                 "mispro_loss_cls": self.mispro_metrics_cls.summarize("average"),
                                  "seq_loss": self.seq_metrics.summarize("average"), 
                                  },
                     valid_stats=valid_stats,

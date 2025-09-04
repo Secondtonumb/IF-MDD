@@ -27,12 +27,14 @@ data_folder_save: "./data"
 train_annotation: !ref <data_folder_save>/train-train.json
 valid_annotation: !ref <data_folder_save>/train-dev.json
 test_annotation: !ref <data_folder_save>/test.json
+# Extra data
+train_annotation_extra: !ref <data_folder_save>/train-train_with_extra.json
+use_extra_train_data: False
 
 # generate training id for output folder
 # generate_training_id: !apply:trainer.generate_training_id.generate_training_id [!ref <perceived_ssl_model_id>, !ref <canonical_ssl_model_id>, !ref <feature_fusion>, !ref <prefix>]
-# evaluate key:
 
-evaluate_key: "mpd_f1" # use "mpd_f1_seq" for Transformer decoder path best mpd f1
+evaluate_key: "mpd_f1_seq" # use "mpd_f1_seq" for Transformer decoder path best mpd f1
                             # "PER_seq" for Transformer decoder's best error rate
                             # "PER" for ctc path best error rate
                             # "mpd_f1" for ctc path best mpd f1
@@ -56,9 +58,17 @@ modules:
     TransASR: !ref <TransASR>
     d_out: !ref <d_out>
     phn_emb: !ref <phn_emb>
+    
     fuse_net: !ref <fuse_net>
+    fuse_net_dec: !ref <fuse_net>  # separate fuse net for dec
+
     mispro_head: !ref <mispro_head>
+    mispro_head_binary_out: !ref <mispro_head_binary_out>
+    mispro_head_class_out: !ref <mispro_head_class_out>
     mem_proj: !ref <mem_proj>
+    mem_proj_cnn_post_enc: !ref <mem_proj_cnn_post_enc>
+    mem_proj_dec: !ref <mem_proj_dec>
+    fuse_proj: !ref <fuse_proj>
 
 perceived_ssl: !apply:trainer.AutoSSLoader.AutoSSLLoader
     model_name: !ref <perceived_ssl_model>
@@ -67,7 +77,7 @@ perceived_ssl: !apply:trainer.AutoSSLoader.AutoSSLLoader
     save_path: !ref <pretrained_models_path>
     output_all_hiddens: False
 
-preceived_ssl_emb_layer: -1 # 0~12 for wav2vec2, 0~23 for wavlm, -1 for last layer
+preceived_ssl_emb_layer: -1
 
 # canonical_ssl: !apply:trainer.AutoSSLoader.AutoSSLLoader
 #     model_name: !ref <canonical_ssl_model>
@@ -87,49 +97,95 @@ ctc_lin:  !new:speechbrain.nnet.linear.Linear
     input_size: !ref <dnn_neurons>
     n_neurons: !ref <output_neurons>  # 40 phonemes + 1 blank + 1 err
 
+# ctc_head_targeting
+ctc_head_target: "perceived"  # Options: "perceived", "canonical"
+
+# Seq head targeting
+decoder_target: "target" # Options: "target" "perceived";  len(perceived) = len(canonical), aligned
+
+# decoding with mispronunciation detection strategy
+allow_mispro_threshold: false
+mispro_threshold: -0.8
+
+# confidence thresholding
+allow_confidence_thresholding: false
+confidence_threshold: -0.8
+
+# eval with silence
+eval_with_silence: true
+
 # transformer
 nhead: 8
 d_ffn: 1024
-num_encoder_layers: 2
+num_encoder_layers: 0
 num_decoder_layers: 2
 encoder_module: transformer # conformer, branchformer
 attention_type: RelPosMHAXL # regularMHA， RoPEMHA (with conformer)
 causal: true
 # activation: gelu
 
-TransASR: !new:speechbrain.lobes.models.transformer.TransformerASR.TransformerASR
+# TransASR: !new:speechbrain.lobes.models.transformer.TransformerASR.TransformerASR
+#     tgt_vocab: !ref <output_neurons>
+#     input_size: !ref <dnn_neurons>
+#     d_model: !ref <dnn_neurons>
+#     nhead: !ref <nhead>
+#     num_encoder_layers: !ref <num_encoder_layers>
+#     num_decoder_layers: !ref <num_decoder_layers>
+#     d_ffn: !ref <d_ffn>
+#     output_hidden_states: True
+#     normalize_before: True
+#     kernel_size: 9
+#     encoder_module: !ref <encoder_module>
+#     attention_type: !ref <attention_type>
+#     causal: !ref <causal>
+#     activation: !ref <activation>
+
+output_ASR_hidden_state: True
+TransASR: !new:utils.MyTransformer.TransDecOnly.TransformerDecoderOnlyASR
     tgt_vocab: !ref <output_neurons>
     input_size: !ref <dnn_neurons>
     d_model: !ref <dnn_neurons>
     nhead: !ref <nhead>
-    num_encoder_layers: !ref <num_encoder_layers>
+    num_encoder_layers: 0
     num_decoder_layers: !ref <num_decoder_layers>
     d_ffn: !ref <d_ffn>
-    output_hidden_states: True
+    output_hidden_states: !ref <output_ASR_hidden_state>
     normalize_before: True
     kernel_size: 9
     encoder_module: !ref <encoder_module>
     attention_type: !ref <attention_type>
     causal: !ref <causal>
-    # activation: !ref <activation>
+    activation: !ref <activation>
+
+# TransASR: !new:speechbrain.lobes.models.transformer.Transformer.TransformerDecoder
+#     num_layers: !ref <num_decoder_layers>
+#     nhead: !ref <nhead>
+#     d_ffn: !ref <d_ffn>
+#     d_model: !ref <dnn_neurons>
+#     activation: !ref <activation>
+#     attention_type: "RelPosMHAXL"
+#     causal: true
 
 d_out: !new:speechbrain.nnet.linear.Linear
     input_size: !ref <dnn_neurons>
     n_neurons: !ref <output_neurons>  # 40 phonemes + 1 blank + 1 err
 
-# mispro_head: For mispronunciation detection
-mispro_head: !new:torch.nn.Sequential
-  - !ref <mispro_cnn1>
-  - !new:torch.nn.BatchNorm1d
-      num_features: 128
-  - !new:torch.nn.GELU {}
-  - !ref <mispro_cnn2>
-  - !new:torch.nn.BatchNorm1d
-      num_features: 64
-  - !new:torch.nn.GELU {}
-  - !ref <mispro_cnn3>
-  - !new:torch.nn.GELU {}
+# Text prompt module
+phn_emb_head: !new:torch.nn.Embedding
+        num_embeddings: !ref <output_neurons>
+        embedding_dim: !ref <dnn_neurons>
+phn_emb: !new:torch.nn.Sequential
+    - !ref <phn_emb_head>
+    - !new:torch.nn.LayerNorm
+        normalized_shape: !ref <dnn_neurons>
 
+# Mispro class:
+Correct: 0
+Substitution: 1
+Deletion: 2
+Insertion: 3
+
+# mispro_head: For mispronunciation detection
 mispro_cnn1: !new:torch.nn.Conv1d
     in_channels: !ref <dnn_neurons>
     out_channels: 128
@@ -144,45 +200,68 @@ mispro_cnn2: !new:torch.nn.Conv1d
     stride: 1
     padding: 2
 
-mispro_cnn3: !new:torch.nn.Conv1d
+mispro_head_binary_out: !new:torch.nn.Conv1d
     in_channels: 64
     out_channels: 1
-    kernel_size: 5
+    kernel_size: 1
     stride: 1
-    padding: 2
-    bias: true     # 最后一层可以保留 bias
+    padding: 0
 
-# Text prompt module
-phn_emb: !new:torch.nn.Sequential
-    - !new:torch.nn.Embedding
-      num_embeddings: !ref <output_neurons>
-      embedding_dim: !ref <dnn_neurons>
-    - !new:torch.nn.LayerNorm
-      normalized_shape: !ref <dnn_neurons>
-    # - !new:speechbrain.lobes.models.dual_path.PyTorchPositionalEncoding
-    #   d_model: !ref <dnn_neurons>
-    #   dropout: 0.1
-    #   max_len: 1000
+mispro_head_class_out: !new:torch.nn.Linear
+    in_features: 64
+    out_features: 4
+
+mispro_head: !new:torch.nn.Sequential
+  - !ref <mispro_cnn1>
+  - !new:torch.nn.BatchNorm1d
+      num_features: 128
+  - !new:torch.nn.GELU {}
+  - !ref <mispro_cnn2>
+  - !new:torch.nn.BatchNorm1d
+      num_features: 64
 
 # Memory projection (applied to encoder memory before feeding into fuse_net)
 # Set mem_proj_out_dim to match fuse_net d_model (defaults to <dnn_neurons>)
 mem_proj_out_dim: !ref <dnn_neurons>
 
 # With RelPosMHAXL, avoid adding absolute positional encoding on memory to prevent mixing abs+rel encodings.
+mem_proj_linear: !new:torch.nn.Linear
+    in_features: !ref <mem_proj_out_dim>
+    out_features: !ref <dnn_neurons>
+    # bias: true
+
+# mapping Transformer encoder's output to fuse_net's d_model
 mem_proj: !new:torch.nn.Sequential
   - !ref <mem_proj_linear>
   - !new:torch.nn.LayerNorm
       normalized_shape: !ref <mem_proj_out_dim>
   - !new:torch.nn.ReLU
 
-mem_proj_linear: !new:torch.nn.Linear
-    in_features: !ref <mem_proj_out_dim>
-    out_features: !ref <dnn_neurons>
-    # bias: true
+# A downsampling CNN after Transformer encoder to reduce memory length
+# Helps guide attention to focus on important parts
+post_encoder_reduction_factor: 4
+mem_proj_cnn: !new:torch.nn.Conv1d
+    in_channels: !ref <dnn_neurons>
+    out_channels: !ref <dnn_neurons>
+    kernel_size: !ref <post_encoder_reduction_factor>
+    stride: !ref <post_encoder_reduction_factor>
+    padding: 0
+    
+mem_proj_cnn_post_enc:  !new:torch.nn.Sequential
+    - !ref <mem_proj_cnn>
+    - !new:torch.nn.BatchNorm1d
+        num_features: !ref <dnn_neurons>
+
+# mapping Transformer encoder's output to fuse_net's d_model
+mem_proj_dec: !new:torch.nn.Sequential
+  - !ref <mem_proj_linear>
+  - !new:torch.nn.LayerNorm
+      normalized_shape: !ref <mem_proj_out_dim>
+  - !new:torch.nn.ReLU
 
 # memory
 # Fusion network
-fuse_enc_or_dec: "enc"
+fuse_enc_or_dec: "encdec"
 fuse_net_layers: 2
 
 fuse_net: !new:speechbrain.lobes.models.transformer.Transformer.TransformerDecoder
@@ -193,6 +272,21 @@ fuse_net: !new:speechbrain.lobes.models.transformer.Transformer.TransformerDecod
     activation: !ref <activation>
     attention_type: "RelPosMHAXL"
     causal: true
+
+fuse_net_dec: !new:speechbrain.lobes.models.transformer.Transformer.TransformerDecoder
+    num_layers: !ref <fuse_net_layers>
+    nhead: !ref <nhead>
+    d_ffn: !ref <d_ffn>
+    d_model: !ref <dnn_neurons>
+    activation: !ref <activation>
+    attention_type: "RelPosMHAXL"
+    causal: true
+
+# concat the fuse features from enc and dec
+fuse_proj: !new:torch.nn.Linear
+    in_features: !ref <dnn_neurons> + <dnn_neurons>  # if concat enc and dec fuse features
+    out_features: !ref <dnn_neurons>
+    # bias: true
 
 # ─── Autoregressive Greedy Searcher ──────────────────────────────────────
 # valid_search: !new:speechbrain.decoders.seq2seq.S2STransformerBeamSearcher
@@ -247,8 +341,7 @@ dnn_neurons: 384
 freeze_perceived_ssl: False
 freeze_canonical_ssl: False
 freeze_perceived_feature_extractor: True  # freeze the CNN extractor in wav2vec
-freeze_canonical_feature_extractor: True         # Freeze Whisper encoder?
-
+freeze_canonical_feature_extractor: True  # Freeze Whisper encoder?
 
 log_softmax: !new:speechbrain.nnet.activations.Softmax
     apply_log: True
@@ -263,12 +356,17 @@ seq_cost: !name:speechbrain.nnet.losses.kldiv_loss
     reduction: batchmean
     label_smoothing: 0.1
 
-mispro_cost: !name:speechbrain.nnet.losses.bce_loss
+# Mispro detection loss
+mispro_cost_bin: !name:speechbrain.nnet.losses.bce_loss
     reduction: batchmean
     pos_weight: !apply:torch.Tensor.to
         - !new:torch.Tensor
             - [2.0]
         - "cuda:0"
+
+mispro_cost_cls: !name:speechbrain.nnet.losses.kldiv_loss
+    reduction: batchmean
+
 # guided attention cost： speechbrain.nnet.loss.guidedattn_loss.GuidedAttentionLoss
 sigma: 0.4 # smaller sigma force model to learn diagnostic features
 ga_cost: !name:speechbrain.nnet.loss.guidedattn_loss.GuidedAttentionLoss
@@ -282,13 +380,19 @@ eos_index: 43
 
 model: !new:torch.nn.ModuleList
     - [!ref <enc>,
-     !ref <phn_emb>,
      !ref <ctc_lin>,
+     !ref <phn_emb>,
      !ref <fuse_net>,
+     !ref <fuse_net_dec>,
      !ref <mispro_head>,
+     !ref <mispro_head_binary_out>,
+     !ref <mispro_head_class_out>,
      !ref <TransASR>,
      !ref <d_out>,
      !ref <mem_proj>,
+     !ref <mem_proj_cnn_post_enc>,
+     !ref <mem_proj_dec>,
+     !ref <fuse_proj>,
      ]
 
 adam_opt_class: !name:torch.optim.Adam
@@ -308,9 +412,9 @@ checkpointer: !new:speechbrain.utils.checkpoints.Checkpointer
 checkpointer_recover: !new:speechbrain.utils.checkpoints.Checkpointer
     checkpoints_dir: !ref <pretrained_model_path>
     recoverables:
-        model: !ref <model>
         perceived_ssl: !ref <perceived_ssl>
     allow_partial_load: True
+    #  model: !ref <model>
 
 augmentation: !new:speechbrain.augment.time_domain.SpeedPerturb
     orig_freq: !ref <sample_rate>
@@ -339,6 +443,10 @@ mispro_stats: !name:speechbrain.utils.metric_stats.MetricStats
             - !new:torch.Tensor
                 - [2.0]
             - "cuda:0"
+
+mispro_class_stats: !name:speechbrain.utils.metric_stats.MetricStats
+    metric: !name:speechbrain.nnet.losses.kldiv_loss
+        reduction: batch
 
 ga_stats: !name:speechbrain.utils.metric_stats.MetricStats
     metric: !name:speechbrain.nnet.loss.guidedattn_loss.GuidedAttentionLoss
@@ -384,15 +492,13 @@ min_epochs_before_metric_freeze: 20   # Minimum epochs before considering metric
 # Dataloader options
 train_dataloader_opts:
     batch_size: !ref <batch_size>
-
+    
 valid_dataloader_opts:
     batch_size: !ref <batch_size>
 
 test_dataloader_opts:
     batch_size: 1
-    num_workers: 0
 
-    
 noam_annealing: !new:speechbrain.nnet.schedulers.NewBobScheduler
     initial_value: !ref <lr>
     annealing_factor: 0.8

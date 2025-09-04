@@ -11,19 +11,6 @@ For commercial use, please contact the author.
 This script implements the main training pipeline for the MDD system using
 various SSL models for speech recognition and pronunciation assessment.
 """
-"""
-MDD (Mispronunciation Detection and Diagnosis) System - Main Training Script
-
-Author: Haopeng (Kevin) Geng
-Institution: University of Tokyo
-Year: 2025
-
-This code is provided for non-commercial use only.
-For commercial use, please contact the author.
-
-This script implements the main training pipeline for the MDD system using
-various SSL models for speech recognition and pronunciation assessment.
-"""
 
 import os
 import sys
@@ -59,6 +46,8 @@ from models.TransducerConformerEnc import TransducerMDDConformerEnc
 from models.Transformer_TP import TransformerMDD_TP
 from models.Transformer_TP_ver2 import TransformerMDD_TP_ver2
 from models.Transformer_TP_fuse import TransformerMDD_TP_encdec
+from models.Transformer_TP_fuse_gate import TransformerMDD_TP_encdec_gate
+
 # from models.phn_mono_ssl_model_ver2 import Hybrid_CTC_Attention, Hybrid_CTC_Attention_ver2
 
 # from models.phn_mono_ssl_model_ver3 import Hybrid_CTC_Attention_SB
@@ -83,10 +72,16 @@ class BaseDataIOPrep:
     def _prepare_datasets(self):
         """Prepare train, valid, and test datasets with sorting."""
         # 1. Declarations:
-        train_data = sb.dataio.dataset.DynamicItemDataset.from_json(
-            json_path=self.hparams["train_annotation"],
-            replacements={"data_root": self.data_folder},
-        )
+        if self.hparams["use_extra_train_data"]:
+            train_data = sb.dataio.dataset.DynamicItemDataset.from_json(
+                json_path=self.hparams["train_annotation_extra"],
+                replacements={"data_root": self.data_folder},
+            )
+        else:
+            train_data = sb.dataio.dataset.DynamicItemDataset.from_json(
+                json_path=self.hparams["train_annotation"],
+                replacements={"data_root": self.data_folder},
+            )
         
         # Apply sorting
         if self.hparams["sorting"] == "ascending":
@@ -396,7 +391,7 @@ class LLMDataIOPrep(BaseDataIOPrep):
 
         return train_data, valid_data, test_data, self.label_encoder
 
-
+    
 class TimestampDataIOPrep(BaseDataIOPrep):
     """Data IO preparation with timestamp information."""
     
@@ -765,6 +760,7 @@ class TimestampDataIOPrepforHybridCTCAttn(TimestampDataIOPrep):
         return train_data, valid_data, test_data, self.label_encoder
 
 if __name__ == "__main__":
+    # main()
     # CLI:
     hparams_file, run_opts, overrides = sb.parse_arguments(sys.argv[1:])
     # log the running sys.argv[0: ] to logger
@@ -823,6 +819,8 @@ if __name__ == "__main__":
         asr_brain_class = TransformerMDD_TP_ver2
     elif hparams["feature_fusion"] == "TransformerMDD_TP_encdec":
         asr_brain_class = TransformerMDD_TP_encdec
+    elif hparams["feature_fusion"] == "TransformerMDD_TP_encdec_gate":
+        asr_brain_class = TransformerMDD_TP_encdec_gate
     elif hparams["feature_fusion"] == "TransformerMDD_with_extra_loss":
         asr_brain_class = TransformerMDD_with_extra_loss
     elif hparams["feature_fusion"] == "TransformerMDD_dual_path":
@@ -890,42 +888,48 @@ if __name__ == "__main__":
     )
 
     # Training/validation loop
+    try:
+        asr_brain.fit(
+            asr_brain.hparams.epoch_counter,
+            train_data,
+            valid_data,
+            train_loader_kwargs=hparams["train_dataloader_opts"],
+            valid_loader_kwargs=hparams["valid_dataloader_opts"],
+        )
+    except StopIteration:
+        print("Training stopped early due to no improvement.")
+    
+    # Test
+    if hparams.get("evaluate_key", True):
+        key = hparams["evaluate_key"]
+        if key == "mpd_f1" or key == "mpd_f1_seq":
+            asr_brain.evaluate(
+                test_data,
+                test_loader_kwargs=hparams["test_dataloader_opts"],
+                max_key=key
+            )
+        elif key == "PER" or key == "PER_seq":
+            asr_brain.evaluate(
+                test_data,
+                test_loader_kwargs=hparams["test_dataloader_opts"],
+                min_key=key,
+            )
+    
+    # select 10 test data for debug
+    # import pdb; pdb.set_trace()
+    # test_data = test_data.select(range(10))  # Select first 10 for debugging
+    # records = test_data.data_ids[:10]
 
-    # try:
-    #     asr_brain.fit(
-    #         asr_brain.hparams.epoch_counter,
-    #         train_data,
-    #         valid_data,
-    #         train_loader_kwargs=hparams["train_dataloader_opts"],
-    #         valid_loader_kwargs=hparams["valid_dataloader_opts"],
-    #     )
-    # except StopIteration:
-    #     print("Training stopped early due to no improvement.")
-    
-    # # Test
-    # if hparams.get("evaluate_key", True):
-    #     key = hparams["evaluate_key"]
-    #     if key == "mpd_f1" or key == "mpd_f1_seq":
-    #         asr_brain.evaluate(
-    #             test_data,
-    #             test_loader_kwargs=hparams["test_dataloader_opts"],
-    #             max_key=key
-    #     )
-    #     elif key == "PER" or key == "PER_seq":
-    #         asr_brain.evaluate(
-    #             test_data,
-    #             test_loader_kwargs=hparams["test_dataloader_opts"],
-    #             min_key=key,
-    #         )
-    
-# === Add placeholder gather_ctc_aligned_reps at top of file ===
+    # test_data_ = test_data.filtered_sorted(key_test={"id": lambda x: x in records},)
+    # === Add placeholder gather_ctc_aligned_reps at top of file ===
+
     # DEBUG MODE
-    train_record = test_data.data_ids[:1024]  # Select first 128 for debugging
-    valid_record = valid_data.data_ids[:128]  # Select first 32 for debugging
-    test_record = test_data.data_ids[:900]  # Select first 32 for debugging
-    train_data_ = train_data.filtered_sorted(key_test={"id": lambda x: x in train_record},)
-    valid_data_ = valid_data.filtered_sorted(key_test={"id": lambda x: x in valid_record},)
-    test_data_ = test_data.filtered_sorted(key_test={"id": lambda x: x in test_record},)
+    # train_record = test_data.data_ids[:1024]  # Select first 128 for debugging
+    # valid_record = valid_data.data_ids[:128]  # Select first 32 for debugging
+    # test_record = test_data.data_ids[:32]  # Select first 32 for debugging
+    # train_data_ = train_data.filtered_sorted(key_test={"id": lambda x: x in train_record},)
+    # valid_data_ = valid_data.filtered_sorted(key_test={"id": lambda x: x in valid_record},)
+    # test_data_ = test_data.filtered_sorted(key_test={"id": lambda x: x in test_record},)
     
     # try:
     #     asr_brain.fit(
@@ -938,19 +942,10 @@ if __name__ == "__main__":
     # except StopIteration:
     #     print("Training stopped early due to no improvement.")
     
-    # Test
-    if hparams.get("evaluate_key", True):
-        key = hparams["evaluate_key"]
-        if key == "mpd_f1" or key == "mpd_f1_seq":
-            asr_brain.evaluate(
-                test_data_,
-                test_loader_kwargs=hparams["test_dataloader_opts"],
-                max_key=key
-        )
-        elif key == "PER" or key == "PER_seq":
-            
-            asr_brain.evaluate(
-                test_data_,
-                test_loader_kwargs=hparams["test_dataloader_opts"],
-                min_key=key,
-            )
+    # # Test
+    # asr_brain.evaluate(
+    #     test_data_,
+    #     test_loader_kwargs=hparams["test_dataloader_opts"],
+    #     # min_key="PER",
+    #     max_key="mpd_f1_seq",  # use max_key for mpd_f1
+    # )

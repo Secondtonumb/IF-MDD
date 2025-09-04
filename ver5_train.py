@@ -46,6 +46,7 @@ from models.TransducerConformerEnc import TransducerMDDConformerEnc
 from models.Transformer_TP import TransformerMDD_TP
 from models.Transformer_TP_ver2 import TransformerMDD_TP_ver2
 from models.Transformer_TP_fuse import TransformerMDD_TP_encdec
+from models.Transformer_TP_fuse_gating import TransformerMDD_TP_encdec_gating
 
 # from models.phn_mono_ssl_model_ver2 import Hybrid_CTC_Attention, Hybrid_CTC_Attention_ver2
 
@@ -384,6 +385,135 @@ class LLMDataIOPrep(BaseDataIOPrep):
 
         return train_data, valid_data, test_data, self.label_encoder
 
+
+class LLMDataIOPrep_ver2(LLMDataIOPrep):
+    # Allow mispro label in various types, 0=correct, 1=substitution, 2=deletion, 3=insertion
+    # if phn_list_canonical != phn_list_perceived:
+    # #     if len(phn_list_canonical) != sil and len(phn_list_perceived) != sil: substitution
+    # # else if len(phn_list_canonical) ==sil and len(phn_list_perceived) != sil: insertion
+    # # else if len(phn_list_canonical) != sil and len(phn_list_perceived) == sil: deletion
+    def _create_text_pipelines(self):
+        """Create text processing pipelines with mispronunciation labels."""
+        @sb.utils.data_pipeline.takes("perceived_train_target", "canonical_aligned", "perceived_aligned")
+        @sb.utils.data_pipeline.provides(
+            "phn_list_target",
+            "phn_encoded_list_target",
+            "phn_encoded_target",
+            "phn_list_target_bos",
+            "phn_encoded_list_target_bos",
+            "phn_encoded_target_bos",
+            "phn_list_target_eos",
+            "phn_encoded_list_target_eos",
+            "phn_encoded_target_eos",
+            
+            "phn_list_canonical",
+            "phn_encoded_list_canonical",
+            "phn_encoded_canonical",
+            "phn_list_canonical_bos",
+            "phn_encoded_list_canonical_bos",
+            "phn_encoded_canonical_bos",
+            "phn_list_canonical_eos",
+            "phn_encoded_list_canonical_eos",
+            "phn_encoded_canonical_eos",
+
+            "phn_list_perceived",
+            "phn_encoded_list_perceived",
+            "phn_encoded_perceived",
+            "phn_list_perceived_bos",
+            "phn_encoded_list_perceived_bos",
+            "phn_encoded_perceived_bos",
+            "phn_list_perceived_eos",
+            "phn_encoded_list_perceived_eos",
+            "phn_encoded_perceived_eos",
+            
+            "mispro_label",
+        )
+        def text_pipeline_test(target, canonical, perceived):
+            phn_list_target = target.strip().split()
+            yield phn_list_target
+            phn_encoded_list_target = self.label_encoder.encode_sequence(phn_list_target)
+            yield phn_encoded_list_target
+            phn_encoded_target = torch.LongTensor(phn_encoded_list_target)
+            yield phn_encoded_target
+            
+            phn_list_target_bos = ["<bos>"] + phn_list_target
+            yield phn_list_target_bos
+            phn_encoded_list_target_bos = self.label_encoder.encode_sequence(phn_list_target_bos)
+            yield phn_encoded_list_target_bos
+            phn_encoded_target_bos = torch.LongTensor(phn_encoded_list_target_bos)
+            yield phn_encoded_target_bos
+            
+            phn_list_target_eos = phn_list_target + ["<eos>"]
+            yield phn_list_target_eos
+            phn_encoded_list_target_eos = self.label_encoder.encode_sequence(phn_list_target_eos)
+            yield phn_encoded_list_target_eos
+            phn_encoded_target_eos = torch.LongTensor(phn_encoded_list_target_eos)
+            yield phn_encoded_target_eos
+            
+
+            phn_list_canonical = canonical.strip().split()
+            yield phn_list_canonical
+            phn_encoded_list_canonical = self.label_encoder.encode_sequence(phn_list_canonical)
+            yield phn_encoded_list_canonical
+            phn_encoded_canonical = torch.LongTensor(phn_encoded_list_canonical)
+            yield phn_encoded_canonical
+            
+            phn_list_canonical_bos = ["<bos>"] + phn_list_canonical
+            yield phn_list_canonical_bos
+            phn_encoded_list_canonical_bos = self.label_encoder.encode_sequence(phn_list_canonical_bos)
+            yield phn_encoded_list_canonical_bos
+            phn_encoded_canonical_bos = torch.LongTensor(phn_encoded_list_canonical_bos)
+            yield phn_encoded_canonical_bos
+
+            phn_list_canonical_eos = phn_list_canonical + ["<eos>"]
+            yield phn_list_canonical_eos
+            phn_encoded_list_canonical_eos = self.label_encoder.encode_sequence(phn_list_canonical_eos)
+            yield phn_encoded_list_canonical_eos
+            phn_encoded_canonical_eos = torch.LongTensor(phn_encoded_list_canonical_eos)
+            yield phn_encoded_canonical_eos
+            
+            phn_list_perceived = perceived.strip().split()
+            yield phn_list_perceived
+            phn_encoded_list_perceived = self.label_encoder.encode_sequence(phn_list_perceived)
+            yield phn_encoded_list_perceived
+            phn_encoded_perceived = torch.LongTensor(phn_encoded_list_perceived)
+            yield phn_encoded_perceived
+            
+            phn_list_perceived_bos = ["<bos>"] + phn_list_perceived
+            yield phn_list_perceived_bos
+            phn_encoded_list_perceived_bos = self.label_encoder.encode_sequence(phn_list_perceived_bos)
+            yield phn_encoded_list_perceived_bos
+            phn_encoded_perceived_bos = torch.LongTensor(phn_encoded_list_perceived_bos)
+            yield phn_encoded_perceived_bos
+
+            phn_list_perceived_eos = phn_list_perceived + ["<eos>"]
+            yield phn_list_perceived_eos
+            phn_encoded_list_perceived_eos = self.label_encoder.encode_sequence(phn_list_perceived_eos)
+            yield phn_encoded_list_perceived_eos
+            phn_encoded_perceived_eos = torch.LongTensor(phn_encoded_list_perceived_eos)
+            yield phn_encoded_perceived_eos
+
+            # mispro_label = [1 if p != c else 0 for p, c in zip(phn_list_perceived, phn_list_canonical)]
+            mispro_label = []
+            for p, c in zip(phn_list_perceived, phn_list_canonical):
+                if p != c:
+                    if p == "sil" and c != "sil":
+                        mispro_label.append(3)  # insertion
+                    elif p != "sil" and c == "sil":
+                        mispro_label.append(2)  # deletion
+                    elif p != "sil" and c != "sil":
+                        mispro_label.append(1)  # substitution
+                    else:
+                        raise ValueError("Unexpected case in mispronunciation labeling")
+                else:
+                    mispro_label.append(0)  # correct
+                        
+            mispro_label = torch.LongTensor(mispro_label)
+        
+            yield mispro_label
+
+        return text_pipeline_test
+    
 class TimestampDataIOPrep(BaseDataIOPrep):
     """Data IO preparation with timestamp information."""
     
@@ -775,6 +905,7 @@ if __name__ == "__main__":
     # DataPrep = LLMDataIOPrep(hparams)
     DataPrep = LLMDataIOPrep(hparams)
     train_data, valid_data, test_data, label_encoder = DataPrep.prepare()
+    import pdb; pdb.set_trace()
     # Model Selection
     if hparams["feature_fusion"] == "TransformerMDD":
         asr_brain_class = TransformerMDD
@@ -811,6 +942,8 @@ if __name__ == "__main__":
         asr_brain_class = TransformerMDD_TP_ver2
     elif hparams["feature_fusion"] == "TransformerMDD_TP_encdec":
         asr_brain_class = TransformerMDD_TP_encdec
+    elif hparams["feature_fusion"] == "TransformerMDD_TP_encdec_gating":
+        asr_brain_class = TransformerMDD_TP_encdec_gating
     elif hparams["feature_fusion"] == "TransformerMDD_with_extra_loss":
         asr_brain_class = TransformerMDD_with_extra_loss
     elif hparams["feature_fusion"] == "TransformerMDD_dual_path":
@@ -899,7 +1032,6 @@ if __name__ == "__main__":
                 max_key=key
             )
         elif key == "PER" or key == "PER_seq":
-            
             asr_brain.evaluate(
                 test_data,
                 test_loader_kwargs=hparams["test_dataloader_opts"],
