@@ -1,0 +1,293 @@
+# Hyperparameters toggles
+prefix: ""
+
+## SSL features Selection
+pretrained_models_path: pretrained_models/
+
+
+# select pretrained SSL models
+perceived_ssl_model: "wavlm_base" # in pretrained_models
+canonical_ssl_model: Null
+
+# # models hidden size, varies by model
+ENCODER_DIM: 768
+
+# # How to fuse the features
+feature_fusion: "mono"        # Options: "mono" for single ssl, "dual_ssl_enc" for dual ssl encoder, "dual_loss" for single SSL dual ssl loss
+blend_alpha: 0.5              # If using "blend" fusion
+
+# Input files
+# Data files
+data_folder_save: "./data"
+train_annotation: !ref <data_folder_save>/train-train_times.json
+valid_annotation: !ref <data_folder_save>/train-dev_times.json
+test_annotation: !ref <data_folder_save>/test_times.json
+
+# generate training id for output folder
+# generate_training_id: !apply:trainer.generate_training_id.generate_training_id [!ref <perceived_ssl_model_id>, !ref <canonical_ssl_model_id>, !ref <feature_fusion>, !ref <prefix>]
+
+# output files
+output_folder: !ref exp_l2/<perceived_ssl_model>_<canonical_ssl_model>_<feature_fusion>_<prefix>
+per_file: !ref <output_folder>/per_<evaluate_key>.txt
+mpd_file: !ref <output_folder>/mpd_<evaluate_key>.txt
+save_folder: !ref <output_folder>/save
+train_log: !ref <output_folder>/train_log.txt
+
+# evaluate key:
+evaluate_key: "mpd_f1" # "PER" for best error rate model
+                       # "mpd_f1" for best mpd f1 model
+
+max_save_models: 3 # Maximum number of saved models for each metrics 
+
+# Modules (SpeechBrain lobes)
+modules:
+    perceived_ssl: !ref <perceived_ssl>
+    canonical_ssl: !ref <canonical_ssl>
+    enc: !ref <enc>
+    enc_lin: !ref <enc_lin>
+    emb: !ref <emb>
+    dec: !ref <dec>
+    dec_lin: !ref <dec_lin>
+    Tjoint: !ref <Tjoint>
+    output: !ref <output>
+    Transenc: !ref <Transenc>
+
+perceived_ssl: !apply:trainer.AutoSSLoader.AutoSSLLoader
+    model_name: !ref <perceived_ssl_model>
+    freeze: !ref <freeze_perceived_ssl>
+    freeze_feature_extractor: !ref <freeze_perceived_feature_extractor>
+    save_path: !ref <pretrained_models_path>
+    output_all_hiddens: False
+
+preceived_ssl_emb_layer: -1 # 0~12 for wav2vec2, 0~23 for wavlm, -1 for last layer
+
+canonical_ssl: !apply:trainer.AutoSSLoader.AutoSSLLoader
+    model_name: !ref <canonical_ssl_model>
+    freeze: !ref <freeze_canonical_ssl>     
+    freeze_feature_extractor: !ref <freeze_perceived_feature_extractor>
+    save_path: !ref <pretrained_models_path>
+    output_all_hiddens: False
+
+canonical_ssl_emb_layer: -1 # 0~12 for wav2vec2, 0~23 for wavlm, -1 for last layer
+
+####################### Model Parameters #######################################
+
+# Transformer
+d_model: 2048
+nhead: 8
+num_encoder_layers: 6
+num_decoder_layers: 6
+d_ffn: 2048
+transformer_dropout: 0.1
+activation: !name:torch.nn.GELU
+encoder_module: conformer # transformer, branchformer
+
+
+# dropout: 0.15
+dnn_layers: 2
+dnn_blocks: 1
+dnn_neurons: 512
+dec_neurons: 128
+joint_dim: 44
+
+# Outputs
+output_neurons: 44
+# Outputs
+blank_index: 0
+bos_index: 42
+eos_index: 43
+
+# Decoding parameters
+beam_size: 4
+nbest: 1
+# by default {state,expand}_beam = 2.3 as mention in paper
+# https://arxiv.org/abs/1904.02619
+state_beam: 1.0
+expand_beam: 1.0
+
+# TransEnc
+num_layers: 2
+
+
+ctc_lin: !new:speechbrain.nnet.linear.Linear
+    input_size: !ref <dnn_neurons>
+    n_neurons: !ref <output_neurons>
+
+d_out: !new:speechbrain.nnet.linear.Linear
+    input_size: !ref <dnn_neurons>
+    n_neurons: !ref <output_neurons>
+
+enc: !new:speechbrain.lobes.models.VanillaNN.VanillaNN
+    input_shape: [null, null, !ref <ENCODER_DIM>]
+    activation: !ref <activation>
+    dnn_blocks: !ref <dnn_layers>
+    dnn_neurons: !ref <dnn_neurons>
+    
+Transenc: !new:speechbrain.lobes.models.transformer.Transformer.TransformerEncoder
+    num_layers: !ref <num_layers>
+    nhead: !ref <nhead>
+    d_model: !ref <dnn_neurons>
+    d_ffn: !ref <d_ffn>
+    dropout: 0.1
+    activation: !ref <activation>
+    # input_shape: [null, null, !ref <ENCODER_DIM>]
+
+enc_lin: !new:speechbrain.nnet.linear.Linear
+    input_size: !ref <dnn_neurons>
+    n_neurons: !ref <joint_dim>
+    bias: False
+
+emb: !new:speechbrain.nnet.embedding.Embedding
+    num_embeddings: !ref <output_neurons>
+    consider_as_one_hot: True
+    blank_id: !ref <blank_index>
+
+dec: !new:speechbrain.nnet.RNN.GRU
+    input_shape: [null, null, !ref <output_neurons> - 1]
+    hidden_size: !ref <dec_neurons>
+    num_layers: 1
+    dropout: 0.0
+    bidirectional: False
+
+dec_lin: !new:speechbrain.nnet.linear.Linear
+    input_size: !ref <dec_neurons>
+    n_neurons: !ref <joint_dim>
+    bias: False
+
+Tjoint: !new:speechbrain.nnet.transducer.transducer_joint.Transducer_joint
+    joint: sum # joint [sum | concat]
+    nonlinearity: !ref <activation>
+
+output: !new:speechbrain.nnet.linear.Linear
+    input_size: !ref <joint_dim>
+    n_neurons: !ref <output_neurons>  # 42 phonemes + 1 blank
+    bias: False
+
+transducer_cost: !name:speechbrain.nnet.losses.transducer_loss
+    use_torchaudio: True
+    blank_index: !ref <blank_index>
+
+## Models to be trained and saved by Adam optimizer
+model: !new:torch.nn.ModuleList
+    - [!ref <enc>, !ref <Transenc>, !ref <enc_lin>, !ref <emb>, !ref <dec>, !ref <dec_lin>, !ref <output>]
+
+
+Greedysearcher: !new:speechbrain.decoders.transducer.TransducerBeamSearcher
+    decode_network_lst: [!ref <emb>, !ref <dec>, !ref <dec_lin>]
+    tjoint: !ref <Tjoint>
+    classifier_network: [!ref <output>]
+    blank_id: !ref <blank_index>
+    beam_size: 1
+    nbest: 1
+
+BeamSearcher: !new:speechbrain.decoders.transducer.TransducerBeamSearcher
+    decode_network_lst: [!ref <emb>, !ref <dec>, !ref <dec_lin>]
+    tjoint: !ref <Tjoint>
+    classifier_network: [!ref <output>]
+    blank_id: !ref <blank_index>
+    beam_size: !ref <beam_size>
+    nbest: !ref <nbest>
+    state_beam: !ref <state_beam>
+    expand_beam: !ref <expand_beam>
+
+# Decoding parameters
+min_decode_ratio: 0.1
+max_decode_ratio: 0.7
+valid_search_interval: 5
+valid_beam_size: 1 # We do greedy here so it's faster to decode ...
+test_beam_size: 5
+ctc_weight_decode: 0.3
+scorer_beam_scale: 0.3
+ctc_weight: 0.3
+
+# Model parameters
+#activation: !name:torch.nn.LeakyReLU
+freeze_perceived_ssl: False
+freeze_canonical_ssl: False
+freeze_perceived_feature_extractor: False  # freeze the CNN extractor in wav2vec
+freeze_canonical_feature_extractor: False         # Freeze Whisper encoder?
+
+log_softmax: !new:speechbrain.nnet.activations.Softmax
+    apply_log: True
+
+ctc_cost: !name:speechbrain.nnet.losses.ctc_loss
+    blank_index: !ref <blank_index>
+
+adam_opt_class: !name:torch.optim.Adam
+    lr: !ref <lr>
+
+pretrained_opt_class: !name:torch.optim.Adam
+    lr: !ref <lr_pretrained>
+
+noam_annealing: !new:speechbrain.nnet.schedulers.NoamScheduler
+    lr_initial: !ref <lr>
+    n_warmup_steps: !ref <warmup_steps>
+
+checkpointer: !new:speechbrain.utils.checkpoints.Checkpointer
+    checkpoints_dir: !ref <save_folder>
+    recoverables:
+        model: !ref <model>
+        perceived_ssl: !ref <perceived_ssl>
+        counter: !ref <epoch_counter>
+
+# augmentation: !new:speechbrain.augment.time_domain.SpeedPerturb
+#     orig_freq: !ref <sample_rate>
+#     speeds: [95, 100, 105]
+
+epoch_counter: !new:speechbrain.utils.epoch_loop.EpochCounter
+    limit: !ref <number_of_epochs>
+
+train_logger: !new:speechbrain.utils.train_logger.FileTrainLogger
+    save_file: !ref <train_log>
+
+ctc_stats: !name:speechbrain.utils.metric_stats.MetricStats
+    metric: !name:speechbrain.nnet.losses.ctc_loss
+        blank_index: !ref <blank_index>
+        reduction: batch
+
+seqlabel_stats: !name:speechbrain.utils.metric_stats.MetricStats
+    metric:  !name:speechbrain.nnet.losses.kldiv_loss
+        reduction: batch
+        label_smoothing: 0.1
+
+transducer_stats: !name:speechbrain.utils.metric_stats.MetricStats
+    metric: !name:speechbrain.nnet.losses.transducer_loss
+        use_torchaudio: True
+        blank_index: !ref <blank_index>
+        reduction: none
+        
+per_stats: !name:speechbrain.utils.metric_stats.ErrorRateStats
+
+# # TIMIT
+# timit_local_data_folder: "/common/db/TIMIT"  # Path to TIMIT datase
+
+seed: 3047
+__set_seed: !apply:torch.manual_seed [!ref <seed>]
+
+# training parameters
+number_of_epochs: 300
+batch_size: 32
+lr: 0.0008
+sorting: ascending
+sample_rate: 16000
+gradient_accumulation: 4
+lr_pretrained: 0.0001
+warmup_steps: 8000 # 0 for no warmup, or set to 8000 for warmup
+
+# Mix-Precision Training
+auto_mix_prec: true
+# or
+precision: fp16         # 支持 "fp32"、"fp16" 或 "bf16"
+
+# Dataloader options
+# Dataloader options
+train_dataloader_opts:
+    batch_size: !ref <batch_size>
+    num_workers: 0
+
+valid_dataloader_opts:
+    batch_size: !ref <batch_size>
+    num_workers: 0
+
+test_dataloader_opts:
+    batch_size: 1

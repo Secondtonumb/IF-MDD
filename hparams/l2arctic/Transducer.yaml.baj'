@@ -1,0 +1,282 @@
+# ############################################################################
+# Model: E2E ASR with Transducer ASR
+# Encoder: Wav2vec
+# Decoder: LiGRU + beamsearch
+# losses: Transducer
+# Training: TIMIT
+# Authors:  Abdel Heba, Titouan Percollet, Loren Lugosch, Mirco Ravanelli, Sung-Lin Yeh 2021
+# ############################################################################
+
+
+# Hyperparameters toggles
+prefix: ""
+
+## SSL features Selection
+pretrained_models_path: pretrained_models/
+# pretrained_models:
+# {
+#     "wav2vec2_base": "facebook/wav2vec2-base", # 768
+#     "hubert_base": "facebook/hubert-base-ls960", # 768
+#     "wavlm_base": "microsoft/wavlm-base", # 768
+#     "wavlm_base_plus": "microsoft/wavlm-base-plus", # 768
+#     "hubert_multilingual": "utter-project/mHuBERT-147", # 768
+#     "clap" : "laion/clap-htsat-fused", # 768
+#     "data2vec_base": "facebook/data2vec-audio-base", # 768
+    
+#     "wav2vec2_large": "facebook/wav2vec2-large", # 1024
+#     "hubert_large": "facebook/hubert-large-ls960", # 1024
+#     "wavlm_large": "microsoft/wavlm-large-plus", # 1024
+#     "data2vec_large": "facebook/data2vec-audio-large", #1024
+#     "whisper_medium": "openai/whisper-medium", # 1024
+    
+#     "whisper_large_v3_turbo": "openai/whisper-large-v3-turbo", # 1280
+# }
+
+# Seed needs to be set at top of yaml, before objects with parameters are made
+seed: 3407
+__set_seed: !apply:speechbrain.utils.seed_everything [!ref <seed>]
+output_folder: !ref exp_l2/Transducer/
+test_wer_file: !ref <output_folder>/wer_test.txt
+save_folder: !ref <output_folder>/save
+train_log: !ref <output_folder>/train_log.txt
+
+# URL for the biggest Fairseq english wav2vec2 model.
+wav2vec2_hub: "facebook/wav2vec2-large-lv60"
+wav2vec2_output: 1024
+freeze_wav2vec: False
+
+feature_fusion: "mono"        # Options: "mono" for single ssl, "dual_ssl_enc" for dual ssl encoder, "dual_loss" for single SSL dual ssl loss
+
+freeze_perceived_ssl: False
+freeze_canonical_ssl: False
+freeze_perceived_feature_extractor: True  # freeze the CNN extractor in wav2vec
+freeze_canonical_feature_extractor: True         # Freeze Whisper encoder?
+
+# Data files
+data_folder_save: "./data"
+train_annotation: !ref <data_folder_save>/train-train_times.json
+valid_annotation: !ref <data_folder_save>/train-dev_times.json
+test_annotation: !ref <data_folder_save>/test_times.json
+skip_prep: True # Skip data preparation
+uppercase: False # Must be True when the TIMIT dataset is in the upper-case version
+
+####################### Training Parameters ####################################
+number_of_epochs: 20
+batch_size: 8
+lr: 0.0003
+lr_wav2vec: 0.0001
+sorting: ascending # choose between ascending, descending and random
+precision: fp16 # bf16, fp16 or fp32
+
+# Feature parameters
+sample_rate: 16000
+# n_fft: 400
+# n_mels: 40
+
+####################### Model Parameters #######################################
+activation: !name:torch.nn.LeakyReLU
+# dropout: 0.15
+dnn_blocks: 1
+dnn_neurons: 44
+dec_neurons: 128
+
+# Outputs
+output_neurons: 44
+joint_dim: 44
+blank_index: 0
+
+# Decoding parameters
+beam_size: 4
+nbest: 1
+# by default {state,expand}_beam = 2.3 as mention in paper
+# https://arxiv.org/abs/1904.02619
+state_beam: 1.0
+expand_beam: 1.0
+
+# Mix-Precision Training
+auto_mix_prec: true
+
+# Dataloader options
+train_dataloader_opts:
+    batch_size: !ref <batch_size>
+
+valid_dataloader_opts:
+    batch_size: !ref <batch_size>
+
+test_dataloader_opts:
+    batch_size: !ref <batch_size>
+
+epoch_counter: !new:speechbrain.utils.epoch_loop.EpochCounter
+    limit: !ref <number_of_epochs>
+
+############################## Augmentations ###################################
+
+# Speed perturbation
+speed_perturb: !new:speechbrain.augment.time_domain.SpeedPerturb
+    orig_freq: !ref <sample_rate>
+    speeds: [95, 100, 105]
+
+# Frequency drop: randomly drops a number of frequency bands to zero.
+drop_freq: !new:speechbrain.augment.time_domain.DropFreq
+    drop_freq_low: 0
+    drop_freq_high: 1
+    drop_freq_count_low: 1
+    drop_freq_count_high: 3
+    drop_freq_width: 0.05
+
+# Time drop: randomly drops a number of temporal chunks.
+drop_chunk: !new:speechbrain.augment.time_domain.DropChunk
+    drop_length_low: 1000
+    drop_length_high: 2000
+    drop_count_low: 1
+    drop_count_high: 5
+
+# Augmenter: Combines previously defined augmentations to perform data augmentation
+wav_augment: !new:speechbrain.augment.augmenter.Augmenter
+    min_augmentations: 3
+    max_augmentations: 3
+    augment_prob: 1.0
+    augmentations: [
+        !ref <speed_perturb>,
+        !ref <drop_freq>,
+        !ref <drop_chunk>]
+
+############################## Models ##########################################
+
+# # wav2vec2: !new:speechbrain.integrations.huggingface.wav2vec2.Wav2Vec2
+# wav2vec2: !new:speechbrain.lobes.models.huggingface_transformers.wav2vec2.Wav2Vec2
+#     source: !ref <wav2vec2_hub>
+#     output_norm: True
+#     freeze: !ref <freeze_wav2vec>
+#     save_path: !ref <save_folder>/wav2vec2_checkpoint
+perceived_ssl_model: "wavlm_base" # in pretrained_models
+canonical_ssl_model: Null
+
+wav2vec2: !apply:trainer.AutoSSLoader.AutoSSLLoader
+    model_name: !ref <perceived_ssl_model>
+    freeze: !ref <freeze_perceived_ssl>
+    freeze_feature_extractor: !ref <freeze_perceived_feature_extractor>
+    save_path: !ref <pretrained_models_path>
+
+enc: !new:speechbrain.lobes.models.VanillaNN.VanillaNN
+    input_shape: [null, null, !ref <wav2vec2_output>]
+    activation: !ref <activation>
+    dnn_blocks: !ref <dnn_blocks>
+    dnn_neurons: !ref <dnn_neurons>
+
+enc_lin: !new:speechbrain.nnet.linear.Linear
+    input_size: !ref <dnn_neurons>
+    n_neurons: !ref <joint_dim>
+    bias: False
+
+emb: !new:speechbrain.nnet.embedding.Embedding
+    num_embeddings: !ref <output_neurons>
+    consider_as_one_hot: True
+    blank_id: !ref <blank_index>
+
+dec: !new:speechbrain.nnet.RNN.GRU
+    input_shape: [null, null, !ref <output_neurons> - 1]
+    hidden_size: !ref <dec_neurons>
+    num_layers: 1
+    dropout: 0.0
+    bidirectional: False
+
+dec_lin: !new:speechbrain.nnet.linear.Linear
+    input_size: !ref <dec_neurons>
+    n_neurons: !ref <joint_dim>
+    bias: False
+
+Tjoint: !new:speechbrain.nnet.transducer.transducer_joint.Transducer_joint
+    joint: sum # joint [sum | concat]
+    nonlinearity: !ref <activation>
+
+output: !new:speechbrain.nnet.linear.Linear
+    input_size: !ref <joint_dim>
+    n_neurons: !ref <output_neurons>  # 42 phonemes + 1 blank
+    bias: False
+
+compute_cost: !name:speechbrain.nnet.losses.transducer_loss
+    use_torchaudio: True
+    blank_index: !ref <blank_index>
+
+model: !new:torch.nn.ModuleList [[
+    !ref <enc>,
+    !ref <enc_lin>,
+    !ref <emb>,
+    !ref <dec>,
+    !ref <dec_lin>,
+    !ref <output>
+]]
+
+Greedysearcher: !new:speechbrain.decoders.transducer.TransducerBeamSearcher
+    decode_network_lst: [!ref <emb>, !ref <dec>, !ref <dec_lin>]
+    tjoint: !ref <Tjoint>
+    classifier_network: [!ref <output>]
+    blank_id: !ref <blank_index>
+    beam_size: 1
+    nbest: 1
+
+Beamsearcher: !new:speechbrain.decoders.transducer.TransducerBeamSearcher
+    decode_network_lst: [!ref <emb>, !ref <dec>, !ref <dec_lin>]
+    tjoint: !ref <Tjoint>
+    classifier_network: [!ref <output>]
+    blank_id: !ref <blank_index>
+    beam_size: !ref <beam_size>
+    nbest: !ref <nbest>
+    state_beam: !ref <state_beam>
+    expand_beam: !ref <expand_beam>
+
+adam_opt_class: !name:torch.optim.Adam
+    lr: !ref <lr>
+
+wav2vec_opt_class: !name:torch.optim.Adam
+    lr: !ref <lr_wav2vec>
+
+lr_annealing_adam: !new:speechbrain.nnet.schedulers.NewBobScheduler
+    initial_value: !ref <lr>
+    improvement_threshold: 0.0025
+    annealing_factor: 0.8
+    patient: 0
+
+lr_annealing_wav2vec: !new:speechbrain.nnet.schedulers.NewBobScheduler
+    initial_value: !ref <lr_wav2vec>
+    improvement_threshold: 0.0025
+    annealing_factor: 0.9
+
+modules:
+    wav2vec2: !ref <wav2vec2>
+    enc: !ref <enc>
+    enc_lin: !ref <enc_lin>
+    emb: !ref <emb>
+    dec: !ref <dec>
+    dec_lin: !ref <dec_lin>
+    Tjoint: !ref <Tjoint>
+    output: !ref <output>
+
+checkpointer: !new:speechbrain.utils.checkpoints.Checkpointer
+    checkpoints_dir: !ref <save_folder>
+    recoverables:
+        wav2vec: !ref <wav2vec2>
+        model: !ref <model>
+        lr_annealing_adam: !ref <lr_annealing_adam>
+        lr_annealing_wav2vec: !ref <lr_annealing_wav2vec>
+        counter: !ref <epoch_counter>
+
+train_logger: !new:speechbrain.utils.train_logger.FileTrainLogger
+    save_file: !ref <train_log>
+
+transducer_stats: !name:speechbrain.utils.metric_stats.MetricStats
+    metric: !name:speechbrain.nnet.losses.transducer_loss
+        use_torchaudio: True
+        blank_index: !ref <blank_index>
+        reduction: none
+
+transducer_cost: !name:speechbrain.nnet.losses.transducer_loss
+    use_torchaudio: True
+    blank_index: !ref <blank_index>
+
+per_stats: !name:speechbrain.utils.metric_stats.ErrorRateStats
+
+valid_search_interval: 1
+
+gradient_accumulation: 2 # Number of gradient accumulation steps

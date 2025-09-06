@@ -399,15 +399,15 @@ min_epochs_before_metric_freeze: 20   # Minimum epochs before considering metric
 # Dataloader options
 train_dataloader_opts:
     batch_size: !ref <batch_size>
-    num_workers: 16
+    
 
 valid_dataloader_opts:
     batch_size: !ref <batch_size>
-    num_workers: 16
+    
 
 test_dataloader_opts:
     batch_size: 1
-    num_workers: 16
+    
 
 noam_annealing: !new:speechbrain.nnet.schedulers.NewBobScheduler
     initial_value: !ref <lr>

@@ -18,7 +18,8 @@ import torch
 import logging
 import speechbrain as sb
 from hyperpyyaml import load_hyperpyyaml
-from mpd_eval_v3 import MpdStats
+# from mpd_eval_v3 import MpdStats
+from mpd_eval_v4 import MpdStats
 import librosa
 import json
 import wandb
@@ -629,8 +630,13 @@ if __name__ == "__main__":
     )
 
     # train_data, valid_data, test_data, label_encoder = dataio_prep_for_llm(hparams)
-    train_data, valid_data, test_data, label_encoder = dataio_prep_for_llm_with_timestamps(hparams)
-    import pdb; pdb.set_trace()
+    # train_data, valid_data, test_data, label_encoder = dataio_prep_for_llm_with_timestamps(hparams)
+    # from ver5_train import LLMDataIOPrep
+    from ver5_train_mispro import LLMDataIOPrep_ver2
+    DataPrep = LLMDataIOPrep_ver2(hparams)
+    train_data, valid_data, test_data, label_encoder = DataPrep.prepare()
+    
+    
     # shrink the datasets to a smaller size for debugging
     # if hparams["debug"]:
     #     train_data = train_data.filtered_sorted()[:int(len(train_data) * 0.1)]

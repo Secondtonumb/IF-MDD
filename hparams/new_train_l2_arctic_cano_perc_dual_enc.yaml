@@ -69,12 +69,19 @@ perceived_ssl: !apply:trainer.AutoSSLoader.AutoSSLLoader
     freeze: !ref <freeze_perceived_ssl>
     freeze_feature_extractor: !ref <freeze_perceived_feature_extractor>
     save_path: !ref <pretrained_models_path>
+    output_all_hiddens: False
+
+preceived_ssl_emb_layer: -1
 
 canonical_ssl: !apply:trainer.AutoSSLoader.AutoSSLLoader
     model_name: !ref <canonical_ssl_model>
     freeze: !ref <freeze_canonical_ssl>
     freeze_feature_extractor: !ref <freeze_perceived_feature_extractor>
     save_path: !ref <pretrained_models_path>
+    output_all_hiddens: False
+
+canonical_ssl_emb_layer: -1
+
 
 enc:
   !new:speechbrain.lobes.models.VanillaNN.VanillaNN
@@ -112,6 +119,21 @@ log_softmax: !new:speechbrain.nnet.activations.Softmax
 ctc_cost: !name:speechbrain.nnet.losses.ctc_loss
     blank_index: !ref <blank_index>
     
+mispro_cost: !name:speechbrain.nnet.losses.bce_loss
+    reduction: batchmean
+    pos_weight: !apply:torch.Tensor.to
+        - !new:torch.Tensor
+            - [2.0]
+        - "cuda:0"
+
+mispro_stats: !name:speechbrain.utils.metric_stats.MetricStats
+    metric: !name:speechbrain.nnet.losses.bce_loss
+        reduction: batch
+        pos_weight: !apply:torch.Tensor.to
+            - !new:torch.Tensor
+                - [2.0]
+            - "cuda:0"
+
 # Outputs
 output_neurons: 42 # l2arctic: 40phns(sil)+err+blank=42 # for erj 41 as no err in ERJ
 blank_index: 0

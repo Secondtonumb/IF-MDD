@@ -26,7 +26,8 @@ import wandb
 import time
 import torchaudio
 from speechbrain.inference.text import GraphemeToPhoneme
-# from models.phn_mono_ssl_model import PhnMonoSSLModel,PhnMonoSSLModel_misproBCE
+from models.phn_mono_ssl_model import PhnMonoSSLModel,PhnMonoSSLModel_misproBCE
+from models.phn_mono_ssl_model import PhnMonoSSLModel_RVQforCano
 # from models.phn_mono_ssl_model import PhnMonoSSLModel_withcanoPhnEmb_HMA_CTC, HMA_attn_ctc_to_canonical
 # from models.phn_mono_ssl_model import PhnMonoSSLModel_withcanoPhnEmb_MHA_Guided_Attention_CTC
 # from models.phn_mono_ssl_model import HMA_attn_ctc_to_mispro
@@ -905,7 +906,7 @@ if __name__ == "__main__":
     # DataPrep = LLMDataIOPrep(hparams)
     DataPrep = LLMDataIOPrep(hparams)
     train_data, valid_data, test_data, label_encoder = DataPrep.prepare()
-    import pdb; pdb.set_trace()
+    
     # Model Selection
     if hparams["feature_fusion"] == "TransformerMDD":
         asr_brain_class = TransformerMDD
@@ -913,6 +914,8 @@ if __name__ == "__main__":
         asr_brain_class = TransformerMDD_dual_ctc
     elif hparams["feature_fusion"] == "PhnMonoSSL":
         asr_brain_class = PhnMonoSSLModel
+    elif hparams["feature_fusion"] == "PhnMonoSSL_RVQforCano":
+        asr_brain_class = PhnMonoSSLModel_RVQforCano
     elif hparams["feature_fusion"] == "mono_misproBCE":
         asr_brain_class = PhnMonoSSLModel_misproBCE
     elif hparams["feature_fusion"] == "mono_att_MHA":
