@@ -4,7 +4,8 @@ import torch
 import logging
 import speechbrain as sb
 from hyperpyyaml import load_hyperpyyaml
-from mpd_eval_v3 import MpdStats
+# from mpd_eval_v3 import MpdStats
+from mpd_eval_v4 import MpdStats
 import librosa
 import json
 import wandb
@@ -13,10 +14,12 @@ import torchaudio
 from speechbrain.inference.text import GraphemeToPhoneme
 
 import re
-            
+
+from speechbrain.dataio.dataio import length_to_mask
+
 # Define training procedure
 class PhnDualSSLModel(sb.Brain):
-    def __init__(self, *args, patience=30, **kwargs):
+    def __init__(self, *args, patience=50, **kwargs):
         super().__init__(*args, **kwargs)
         self.patience = patience
         self.no_improve_epochs = 0
@@ -465,22 +468,23 @@ class PhnDualSSLModel_with_SimpleResidual(PhnDualSSLModel):
         # x_can, x_per: [B, T, D]  —— encoder 输出
 
         delta = x_per - x_can     # [B, T, D]
-        logits_diag = self.modules.residual_lin(delta)
-        p_diag = self.hparams.log_softmax(logits_diag)  # [B, T, 2]
+        h_mispro = self.modules.residual_lin(delta)
+        p_diag = self.hparams.sigmoid(h_mispro)  # [B, T, 2]
         # 这里也可以改一下
         p_ctc = self.hparams.blend_alpha * p_ctc_can + (1 - self.hparams.blend_alpha) * p_ctc_per
 
-        return p_ctc, p_ctc_can, p_ctc_per, p_diag, wav_lens
+        return p_ctc, p_ctc_can, p_ctc_per, p_diag, wav_lens, h_mispro
     
     def compute_objectives(self, predictions, batch, stage):
         "Given the network predictions and targets computed the NLL loss."
 
-        p_ctc, p_ctc_can, p_ctc_per, p_diag, wav_lens = predictions
+        p_ctc, p_ctc_can, p_ctc_per, p_diag, wav_lens, h_mispro = predictions
 
         ids = batch.id
         targets, target_lens = batch.phn_encoded_target
         canonicals, canonical_lens = batch.phn_encoded_canonical 
         perceiveds, perceived_lens = batch.phn_encoded_perceived 
+        mispro_label, mispro_label_lens = batch.mispro_label
         # len(perceiveds) == len(canonicals) != len(targets) 
         
         # if stage != sb.Stage.TRAIN:
@@ -497,12 +501,16 @@ class PhnDualSSLModel_with_SimpleResidual(PhnDualSSLModel):
         except:
             mispronunciation_label = torch.Tensor(canonicals[:, :-1] != perceiveds).long()
         # [true=1, false=-1, 0=ignore]
-        loss_ctc_mispro = self.hparams.ctc_cost(
-            p_diag, mispronunciation_label.to(p_diag.device), wav_lens, canonical_lens
-        )  # [B, 2]
+        # loss_ctc_mispro = self.hparams.ctc_cost(
+        #     p_diag, mispronunciation_label.to(p_diag.device), wav_lens, canonical_lens
+        # )  # [B, 2]
+        
+        loss_mispro = self.hparams.mispro_cost(inputs=h_mispro,
+                                               targets=mispro_label, 
+                                               length=mispro_label_lens)
 
         loss = self.hparams.blend_alpha * loss_ctc_can + (1 - self.hparams.blend_alpha) * loss_ctc_per \
-               + self.hparams.mispronunciation_weight * loss_ctc_mispro
+               + self.hparams.mispronunciation_weight * loss_mispro
         # Log both CTC losses to wandb
 
         # Record losses for posterity
@@ -812,7 +820,7 @@ class PhnDualSSLModel_with_SimpleResidual(PhnDualSSLModel):
     
 # Define training procedure
 class PhnDualSSLModel_Hybrid_CTC_Attention(sb.Brain):
-    def __init__(self, *args, patience=30, **kwargs):
+    def __init__(self, *args, patience=50, **kwargs):
         super().__init__(*args, **kwargs)
         self.patience = patience
         self.no_improve_epochs = 0
@@ -859,13 +867,22 @@ class PhnDualSSLModel_Hybrid_CTC_Attention(sb.Brain):
         "Given an input batch it computes the phoneme probabilities."
         batch = batch.to(self.device)
         wavs, wav_lens = batch.sig
+        canonicals, canonical_lens = batch.phn_encoded_canonical 
         # phns_bos, _ = batch.phn_encoded_bos
 
         if stage == sb.Stage.TRAIN:
             if hasattr(self.hparams, "augmentation"):
                 wavs = self.hparams.augmentation(wavs)
         feats_per = self.modules.perceived_ssl(wavs)
+        if len(feats_per.shape) == 4: 
+            feats_per = feats_per[self.hparams.preceived_ssl_emb_layer]
+
         feats_can = self.modules.canonical_ssl(wavs)
+        if len(feats_can.shape) == 4: 
+            feats_can = feats_can[self.hparams.canonical_ssl_emb_layer]
+        
+        # Phn Emb
+        Cano_phn_emb = self.modules.phn_emb(canonicals)  # [B, T_can, D]
         
         x_per = self.modules.enc(feats_per)
         x_can = self.modules.enc_can(feats_can)
@@ -885,27 +902,44 @@ class PhnDualSSLModel_Hybrid_CTC_Attention(sb.Brain):
         #     num_heads=self.hparams.num_heads,
         #     batch_first=True
         # ).to(self.device)
-        attn_output, _ = self.modules.cross_attn(query=x_per, key=x_can, value=x_can, key_padding_mask=None) # [16, 60, 384]
+        # MHA between Cano_Phn and Perceived_SSL
+        # attn_output, _ = self.modules.cross_attn(query=x_per, key=x_can, value=x_can, key_padding_mask=None) # [16, 60, 384]
+        abs_len_wav = torch.round(x_can.size(1) * wav_lens)
+        # import pdb; pdb.set_trace()
+        key_padding_mask = ~length_to_mask(abs_len_wav).bool()
+        attn_output, _ = self.hparams.cross_attn(query=Cano_phn_emb, 
+                                              key=x_can,
+                                              value=x_per,
+                                              key_padding_mask=key_padding_mask,
+                                              
+                                              ) # [16, 25, 384] # [B, T_phn, D]
         # Optionally blend with residual or feedforward
-        attn_output_proj = self.modules.attn_proj(attn_output)
+        h_mispro = self.modules.mispro_head(attn_output)
         
-        p_attn = self.hparams.log_softmax(attn_output_proj)
-        
+        # p_attn = self.hparams.log_softmax(attn_output_proj)
+        if h_mispro.shape[-1] == 1:
+            # Binary classification
+            p_mispro_logit = torch.nn.functional.sigmoid(h_mispro)
+        else:
+            # Multi-class classification
+            p_mispro_logit = torch.nn.functional.log_softmax(h_mispro, dim=-1)  # [B, T, 2]
+
         # Blend p_ctc and p_attn
-        p_ctc = self.hparams.blend_alpha * p_ctc_can + (1 - self.hparams.blend_alpha) * p_ctc_per
-        p_ctc = self.hparams.hybrid_lambda * p_ctc + (1 - self.hparams.hybrid_lambda) * p_attn
+        #p_ctc = self.hparams.blend_alpha * p_ctc_can + (1 - self.hparams.blend_alpha) * p_ctc_per
+        # p_ctc = self.hparams.hybrid_lambda * p_ctc + (1 - self.hparams.hybrid_lambda) * p_attn
         # Return as instructed
-        return p_ctc, p_ctc_can, p_ctc_per, wav_lens
+        return h_mispro, p_mispro_logit, p_ctc_can, p_ctc_per, wav_lens
 
     def compute_objectives(self, predictions, batch, stage):
         "Given the network predictions and targets computed the NLL loss."
 
-        p_ctc, p_ctc_can, p_ctc_per, wav_lens = predictions
+        h_mispro, p_mispro_logit, p_ctc_can, p_ctc_per, wav_lens = predictions
 
         ids = batch.id
         targets, target_lens = batch.phn_encoded_target
         canonicals, canonical_lens = batch.phn_encoded_canonical 
         perceiveds, perceived_lens = batch.phn_encoded_perceived 
+        mispro_label, mispro_label_lens = batch.mispro_label
         # len(perceiveds) == len(canonicals) != len(targets) 
         
         # if stage != sb.Stage.TRAIN:
@@ -914,10 +948,17 @@ class PhnDualSSLModel_Hybrid_CTC_Attention(sb.Brain):
         loss_ctc_can = self.hparams.ctc_cost(p_ctc_can, canonicals, wav_lens, canonical_lens)
         loss_ctc_per_with_silence = self.hparams.ctc_cost(p_ctc_per, perceiveds, wav_lens, perceived_lens)
         loss_ctc_per = self.hparams.ctc_cost(p_ctc_per, targets, wav_lens, target_lens)
-        loss_ctc_and_attn = self.hparams.ctc_cost(p_ctc, targets, wav_lens, target_lens)
+        # loss_ctc_and_attn = self.hparams.ctc_cost(p_ctc, targets, wav_lens, target_lens)
+        if h_mispro.shape[-1] == 1:
+            # Binary classification
+            loss_mispro = self.hparams.mispro_cost(h_mispro, mispro_label, mispro_label_lens)
+        else:
+            # Multi-class classification
+            loss_mispro = self.hparams.mispro_cost(p_mispro_logit, mispro_label, mispro_label_lens)
+        
         
         # Tobe fix
-        loss = self.hparams.blend_alpha * loss_ctc_can + (1 - self.hparams.blend_alpha) * loss_ctc_per + loss_ctc_and_attn
+        loss = self.hparams.blend_alpha * loss_ctc_can + (1 - self.hparams.blend_alpha) * loss_ctc_per + loss_mispro
         # Log both CTC losses to wandb
 
         # Record losses for posterity
@@ -934,6 +975,12 @@ class PhnDualSSLModel_Hybrid_CTC_Attention(sb.Brain):
             # self.ctc_metrics.append(ids, p_ctc, targets, wav_lens, target_lens)
             self.ctc_metrics_can.append(ids, p_ctc_can, canonicals, wav_lens, canonical_lens)
             self.ctc_metrics_per.append(ids, p_ctc_per, targets, wav_lens, target_lens)
+            if h_mispro.shape[-1] == 1:
+                # Binary classification
+                self.mispro_metrics.append(ids, h_mispro, mispro_label, mispro_label_lens)
+            else:
+                # Multi-class classification
+                self.mispro_metrics.append(ids, p_mispro_logit, mispro_label, mispro_label_lens)
 
             self.per_metrics_per.append(
                 ids=ids,
@@ -975,6 +1022,7 @@ class PhnDualSSLModel_Hybrid_CTC_Attention(sb.Brain):
         "Gets called when a stage (either training, validation, test) starts."
         self.ctc_metrics_per = self.hparams.ctc_stats()
         self.ctc_metrics_can = self.hparams.ctc_stats_can()
+        self.mispro_metrics = self.hparams.mispro_stats()
         
         if hasattr(self.hparams, "augmentation"):
             self.modules.perceived_ssl.model.config.apply_spec_augment = True
@@ -994,7 +1042,6 @@ class PhnDualSSLModel_Hybrid_CTC_Attention(sb.Brain):
             per_can = self.per_metrics_can.summarize("error_rate")
             per_per = self.per_metrics_per.summarize("error_rate")
             mpd_f1 = self.mpd_metrics.summarize("mpd_f1")
-
         if stage == sb.Stage.VALID:
 
             self.hparams.train_logger.log_stats(
@@ -1008,6 +1055,7 @@ class PhnDualSSLModel_Hybrid_CTC_Attention(sb.Brain):
                     "loss": stage_loss,
                     "ctc_loss_can": self.ctc_metrics_can.summarize("average"),
                     "ctc_loss_per": self.ctc_metrics_per.summarize("average"),
+                    "mispro_loss": self.mispro_metrics.summarize("average"),
                     "PER_can": per_can,
                     "PER_per": per_per,
                     "mpd_f1": mpd_f1
@@ -1085,6 +1133,7 @@ class PhnDualSSLModel_Hybrid_CTC_Attention(sb.Brain):
                 "valid_loss": stage_loss,
                 "ctc_loss_per": self.ctc_metrics_per.summarize("average"),
                 "ctc_loss_can": self.ctc_metrics_can.summarize("average"),
+                "mispro_loss": self.mispro_metrics.summarize("average"),
                 "PER_per": per_per,
                 "PER_can": per_can,
                 "mpd_f1": mpd_f1,

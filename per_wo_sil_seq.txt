@@ -1,0 +1,25 @@
+Joint CTC-Attention PER stats:
+Average score: 5.93785285949707
+Min error: 1.8259987831115723 id: /work/gm64/m64000/dataset/l2arctic_release_v5.0/TXHC/wav/arctic_a0098.wav
+Max error: 10.049707412719727 id: /work/gm64/m64000/dataset/l2arctic_release_v5.0/ZHAA/wav/arctic_a0098.wav
+%WER 27.78 [ 5 / 18, 2 ins, 0 del, 3 sub ]
+%SER 100.00 [ 2 / 2 ]
+Scored 2 sentences, 0 not present in hyp.
+================================================================================
+ALIGNMENTS
+
+Format:
+<utterance-id>, WER DETAILS
+<eps> ; reference  ; on ; the ; first ;  line
+  I   ;     S      ; =  ;  =  ;   S   ;   D  
+ and  ; hypothesis ; on ; the ; third ; <eps>
+================================================================================
+/work/gm64/m64000/dataset/l2arctic_release_v5.0/TXHC/wav/arctic_a0098.wav, %WER 33.33 [ 3 / 9, 1 ins, 0 del, 2 sub ]
+sh ; ao ; <eps> ; ay ; k ; eh ; r ; iy ; y ; uw
+=  ; S  ;   I   ; =  ; = ; S  ; = ; =  ; = ; = 
+sh ; ae ;   w   ; ay ; k ; ae ; r ; iy ; y ; uw
+================================================================================
+/work/gm64/m64000/dataset/l2arctic_release_v5.0/ZHAA/wav/arctic_a0098.wav, %WER 22.22 [ 2 / 9, 1 ins, 0 del, 1 sub ]
+sh ; ae ; l ; ay ; k ; er ; <eps> ; iy ; y ; uw
+=  ; =  ; = ; =  ; = ; S  ;   I   ; =  ; = ; = 
+sh ; ae ; l ; ay ; k ; ae ;   r   ; iy ; y ; uw

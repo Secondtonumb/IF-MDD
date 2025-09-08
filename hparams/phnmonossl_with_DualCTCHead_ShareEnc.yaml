@@ -75,7 +75,6 @@ modules:
     canonical_ssl: !ref <canonical_ssl>
     perceived_ssl: !ref <perceived_ssl>
     enc: !ref <enc>
-    RVQ: !ref <RVQ>
     ctc_lin: !ref <ctc_lin>
     ctc_cano_lin: !ref <ctc_cano_lin>
     mispro_head: !ref <mispro_head>
@@ -85,18 +84,20 @@ perceived_ssl: !apply:trainer.AutoSSLoader.AutoSSLLoader
     freeze: !ref <freeze_perceived_ssl>
     freeze_feature_extractor: !ref <freeze_perceived_feature_extractor>
     save_path: !ref <pretrained_models_path>
-    output_all_hiddens: False
+    output_all_hiddens: True
+
 preceived_ssl_emb_layer: -1
 
 canonical_ssl: !apply:trainer.AutoSSLoader.AutoSSLLoader
-    model_name: !ref <canonical_ssl_model>
-    freeze: !ref <freeze_canonical_ssl>
+    model_name: !ref <perceived_ssl_model>
+    freeze: !ref <freeze_perceived_ssl>
     freeze_feature_extractor: !ref <freeze_perceived_feature_extractor>
     save_path: !ref <pretrained_models_path>
-    output_all_hiddens: False
+    output_all_hiddens: True
 
 canonical_ssl_emb_layer: -1
 
+shareenc: True   # Whether to share encoder if Canonical and Perceived features are from the same layer
 enc: !new:torch.nn.Sequential
   - !new:speechbrain.lobes.models.VanillaNN.VanillaNN
      input_shape: [null, null, !ref <ENCODER_DIM>]
@@ -105,13 +106,6 @@ enc: !new:torch.nn.Sequential
      dnn_neurons: !ref <dnn_neurons>
   - !new:torch.nn.LayerNorm
      normalized_shape: !ref <dnn_neurons>
-
-RVQ: !new:speechbrain.lobes.models.discrete.dac.ResidualVectorQuantize  # RVQ
-    input_dim: !ref <dnn_neurons>
-    n_codebooks: 9
-    codebook_size: !ref <dnn_neurons>  # typically same as input_dim
-    codebook_dim: 8
-    quantizer_dropout: 0.1
 
 ctc_lin:  !new:speechbrain.nnet.linear.Linear
     input_size: !ref <dnn_neurons>
@@ -148,7 +142,7 @@ output_neurons: 44 # l2arctic: 40phns(sil)+err+blank + eos + bos =44
 blank_index: 0
 
 model: !new:torch.nn.ModuleList
-    - [!ref <enc>, !ref <RVQ>, !ref <ctc_lin>, !ref <ctc_cano_lin>]
+    - [!ref <enc>, !ref <ctc_lin>, !ref <ctc_cano_lin>]
 
 adam_opt_class: !name:torch.optim.Adam
     lr: !ref <lr>
@@ -181,7 +175,6 @@ ctc_stats: !name:speechbrain.utils.metric_stats.MetricStats
         reduction: batch
 
 per_stats: !name:speechbrain.utils.metric_stats.ErrorRateStats
-
 
 # # TIMIT
 # timit_local_data_folder: "/common/db/TIMIT"  # Path to TIMIT datase

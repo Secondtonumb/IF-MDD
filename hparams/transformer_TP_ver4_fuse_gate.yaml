@@ -94,7 +94,7 @@ ctc_lin:  !new:speechbrain.nnet.linear.Linear
     n_neurons: !ref <output_neurons>  # 40 phonemes + 1 blank + 1 err
 
 # ctc input
-ctc_head_input: "enc_out"
+ctc_head_input: "enc_out" 
 
 # ctc_head_targeting
 ctc_head_target: "perceived"  # Options: "perceived", "canonical"

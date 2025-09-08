@@ -69,6 +69,7 @@ modules:
     mem_proj_cnn_post_enc: !ref <mem_proj_cnn_post_enc>
     mem_proj_dec: !ref <mem_proj_dec>
     fuse_proj: !ref <fuse_proj>
+# phn_emb_TransEnc: !ref <phn_emb_TransEnc>
 
 perceived_ssl: !apply:trainer.AutoSSLoader.AutoSSLLoader
     model_name: !ref <perceived_ssl_model>
@@ -148,10 +149,23 @@ d_out: !new:speechbrain.nnet.linear.Linear
 phn_emb_head: !new:torch.nn.Embedding
         num_embeddings: !ref <output_neurons>
         embedding_dim: !ref <dnn_neurons>
+# phn_emb: !new:torch.nn.Sequential
+#     - !ref <phn_emb_head>
+#     - !new:torch.nn.LayerNorm
+#         normalized_shape: !ref <dnn_neurons>
+
 phn_emb: !new:torch.nn.Sequential
     - !ref <phn_emb_head>
     - !new:torch.nn.LayerNorm
         normalized_shape: !ref <dnn_neurons>
+
+# phn_emb_TransEnc: !new:speechbrain.lobes.models.transformer.Transformer.TransformerEncoder
+#     num_layers: 2
+#     nhead: !ref <nhead>
+#     d_ffn: !ref <d_ffn>
+#     d_model: !ref <dnn_neurons>
+#     attention_type: "RelPosMHAXL"
+#     causal: false
 
 # Mispro class:
 Correct: 0
@@ -368,6 +382,7 @@ model: !new:torch.nn.ModuleList
      !ref <mem_proj_dec>,
      !ref <fuse_proj>,
      ]
+# !ref <phn_emb_TransEnc>,
 
 adam_opt_class: !name:torch.optim.Adam
     lr: !ref <lr>
@@ -481,5 +496,6 @@ noam_annealing: !new:speechbrain.nnet.schedulers.NewBobScheduler
 
 # Plot attention for fusion
 plot_attention: true
+plot_attention_interval: 10
 valid_attention_plot_dir: !ref <output_folder>/valid_attention_plots
 test_attention_plot_dir: !ref <output_folder>/test_attention_plots

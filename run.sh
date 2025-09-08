@@ -11,21 +11,12 @@ cd /home/m64000/work/SSL_MDD
 conda activate sb
 
 # ctc only
-python ver5_train.py \
-        hparams/phnmonossl.yaml \
-        --feature_fusion PhnMonoSSL \
-        --perceived_ssl_model wavlm_large \
-        --ENCODER_DIM 1024 \
-        --prefix wavlm_ctc
-
-# ctc only with extra timit training data (main for better ctc segmentation)
-python ver6_train.py \
-        hparams/phnmonossl.yaml \
-        --feature_fusion PhnMonoSSL \
-        --perceived_ssl_model wavlm_large \
-        --ENCODER_DIM 1024 \
-        --prefix wavlm_ctc_extra \
-        --use_extra_train_data True
+# python ver5_train.py \
+#         hparams/phnmonossl.yaml \
+#         --feature_fusion PhnMonoSSL \
+#         --perceived_ssl_model wavlm_large \
+#         --ENCODER_DIM 1024 \
+#         --prefix wavlm_ctc
 
 # # ctc only
 # python ver5_train.py \
@@ -34,6 +25,27 @@ python ver6_train.py \
 #         --perceived_ssl_model wavlm_large \
 #         --ENCODER_DIM 1024 \
 #         --prefix wavlm_ctc
+
+# ctc only with Conformer Encoder
+# 🔺No significant improvement
+# python ver5_train.py \
+#         hparams/phnmonossl_with_TransEnc.yaml \
+#         --feature_fusion PhnMonoSSL \
+#         --perceived_ssl_model wavlm_large \
+#         --ENCODER_DIM 1024 \
+#         --prefix wavlm_ctc_conformerEnc
+
+# ctc only with RVQ
+# IMPORTANT: SSL Encoder need to be frozen when using RVQ
+# python ver5_train.py \
+#         hparams/phnmonossl_with_RVQ.yaml \
+#         --feature_fusion PhnMonoSSL \
+#         --perceived_ssl_model wavlm_large \
+#         --ENCODER_DIM 1024 \
+#         --prefix wavlm_ctc_RVQ \
+#         --freeze_perceived_ssl True \
+#         --freeze_perceived_feature_extractor 
+        
 
 # python ver4_train.py \
 #         hparams/train_l2_arctic_cano_perc_dual_enc.yaml \
@@ -53,6 +65,43 @@ python ver6_train.py \
 #         --num_encoder_layers 2 \
 #         --num_decoder_layers 2 \
 #         --nhead 8 
+
+# Conformer 22 freeze ctc
+# python ver5_train.py \
+#         hparams/transformer.yaml \
+#         --feature_fusion TransformerMDD \
+#         --perceived_ssl_model wavlm_large \
+#         --ENCODER_DIM 1024 \
+#         --prefix conformer_2_2_8_frzctc \
+#         --num_encoder_layers 2 \
+#         --num_decoder_layers 2 \
+#         --nhead 8 \
+#         --encoder_module conformer \
+#         --load_pretrained_components True \
+#         --components_to_load '["ssl", "enc"]' \
+#         --freeze_loaded_components True \
+#         --pretrained_model_path "/home/m64000/work/SSL_MDD/pretrained_models/ShareEnc_PER_12.9250_PER_Cano_5.2734_F1_0.6509.ckpt" 
+
+# Conformer 22 freeze ctc
+# CTC -> Enc -> Line (Freeze)
+# Valid /Test Search using feat_enc output
+# python ver5_train.py \
+#         hparams/transformer.yaml \
+#         --feature_fusion TransformerMDD \
+#         --perceived_ssl_model wavlm_large \
+#         --ENCODER_DIM 1024 \
+#         --prefix conformer_2_2_8_frzctc_all \
+#         --num_encoder_layers 2 \
+#         --num_decoder_layers 2 \
+#         --nhead 8 \
+#         --encoder_module conformer \
+#         --load_pretrained_components True \
+#         --components_to_load '["ssl", "enc"]' \
+#         --freeze_loaded_components True \
+#         --pretrained_model_path "/home/m64000/work/SSL_MDD/pretrained_models/ShareEnc_PER_12.9250_PER_Cano_5.2734_F1_0.6509.ckpt" \
+#         --valid_search_interval 1 \
+#         --ctc_head_input "feat_enc"
+
 
 # # very light transformer
 # python ver5_train.py \
@@ -342,101 +391,36 @@ python ver6_train.py \
 #         --number_of_epochs 100
 
 # Freeze with Best CTC Head metrics
-python ver5_train.py \
-        hparams/transformer_TP_ver4_fuse.yaml \
-        --feature_fusion TransformerMDD_TP_encdec \
-        --perceived_ssl_model wavlm_large \
-        --ENCODER_DIM 1024 \
-        --prefix transformer_2_TP_fuse_2_encdec_conformer_RoPE_frzmetric\
-        --fuse_enc_or_dec encdec \
-        --attention_type RoPEMHA \
-        --valid_search_interval 1 \
-        --encoder_module conformer \
-        --enable_metric_freezing True \
-        --enable_ctc_freezing False \
-        --plot_attention false \
-        --number_of_epochs 100
+# python ver5_train.py \
+#         hparams/transformer_TP_ver4_fuse.yaml \
+#         --feature_fusion TransformerMDD_TP_encdec \
+#         --perceived_ssl_model wavlm_large \
+#         --ENCODER_DIM 1024 \
+#         --prefix transformer_2_TP_fuse_2_encdec_conformer_RoPE_frzmetric\
+#         --fuse_enc_or_dec encdec \
+#         --attention_type RoPEMHA \
+#         --valid_search_interval 1 \
+#         --encoder_module conformer \
+#         --enable_metric_freezing True \
+#         --enable_ctc_freezing False \
+#         --plot_attention false \
+#         --number_of_epochs 100
 
 
-# TransDec‘s output is perceived (aligned phn seq with canonical)
-python ver5_train.py \
-        hparams/transformer_TP_ver4_fuse.yaml \
-        --feature_fusion TransformerMDD_TP_encdec \
-        --perceived_ssl_model wavlm_large \
-        --ENCODER_DIM 1024 \
-        --prefix transformer_2_TP_fuse_2_encdec_conformer_frzctc_dechead_perc \
-        --fuse_enc_or_dec encdec \
-        --attention_type RelPosMHAXL \
-        --valid_search_interval 2 \
-        --encoder_module conformer \
-        --enable_ctc_freezing True \
-        --decoder_target perceived \
-        --number_of_epochs 300
-
-
-
-# Use pretrained CTC head and freeze ctc head ✅
-python ver5_train.py \
-        hparams/transformer_TP_ver4_fuse.yaml \
-        --feature_fusion TransformerMDD_TP_encdec \
-        --perceived_ssl_model wavlm_large \
-        --ENCODER_DIM 1024 \
-        --prefix trans_TP_fuse_2_encdec_conformer_RoPE_fromprectc_frz\
-        --fuse_enc_or_dec encdec \
-        --attention_type RoPEMHA \
-        --valid_search_interval 1 \
-        --encoder_module conformer \
-        --enable_metric_freezing True \
-        --enable_ctc_freezing False \
-        --plot_attention false \
-        --number_of_epochs 100 \
-        --load_pretrained_components False \
-        --pretrained_model_path "/home/kevingenghaopeng/MDD/MDD_ver3/exp_l2arctic/wavlm_large_None_PhnMonoSSL_wavlm_ctc_timit_extra/save/CKPT+best_mpdf1_039_0.6424.ckpt" \
-        --components_to_load '["ssl", "enc", "ctc_head"]' \
-        --freeze_loaded_components True \
-        --use_extra_train_data True
-
-
-# Add Mispronunciation Error Type Classification head 
-python ver5_train_mispro.py \
-        hparams/transformer_TP_ver4_fuse_errclass.yaml \
-        --feature_fusion TransformerMDD_TP_encdec_errclass \
-        --perceived_ssl_model wavlm_large \
-        --ENCODER_DIM 1024 \
-        --prefix fuse_2_encdec_conf_RoPE_fromprectc_frz_errcls\
-        --fuse_enc_or_dec encdec \
-        --attention_type RoPEMHA \
-        --valid_search_interval 1 \
-        --encoder_module conformer \
-        --enable_metric_freezing True \
-        --enable_ctc_freezing False \
-        --plot_attention false \
-        --number_of_epochs 100 \
-        --load_pretrained_components True \
-        --pretrained_model_path "/home/kevingenghaopeng/MDD/MDD_ver3/exp_l2arctic/wavlm_large_None_PhnMonoSSL_wavlm_ctc_timit_extra/save/CKPT+best_mpdf1_039_0.6424.ckpt" \
-        --components_to_load '["ssl", "enc", "ctc_head"]' \
-        --freeze_loaded_components True
-
-## Change TransDec FuseNet into MHA
-
-python ver5_train_mispro.py \
-        hparams/transformer_TP_ver4_fuse_errclass_MHA.yaml \
-        --feature_fusion TransformerMDD_TP_encdec_MHA_errclass \
-        --perceived_ssl_model wavlm_large \
-        --ENCODER_DIM 1024 \
-        --prefix fuse_2_encdec_conf_RoPE_fromprectc_frz_errcls_MHA\
-        --fuse_enc_or_dec encdec \
-        --attention_type RoPEMHA \
-        --encoder_module conformer \
-        --valid_search_interval 1 \
-        --enable_metric_freezing True \
-        --enable_ctc_freezing False \
-        --plot_attention True \
-        --number_of_epochs 100 \
-        --load_pretrained_components True \
-        --pretrained_model_path "/home/kevingenghaopeng/MDD/MDD_ver3/exp_l2arctic/wavlm_large_None_PhnMonoSSL_wavlm_ctc_timit_extra/save/CKPT+best_mpdf1_039_0.6424.ckpt" \
-        --components_to_load '["ssl", "enc", "ctc_head"]' \
-        --freeze_loaded_components True
+# # TransDec‘s output is perceived (aligned phn seq with canonical)
+# python ver5_train.py \
+#         hparams/transformer_TP_ver4_fuse.yaml \
+#         --feature_fusion TransformerMDD_TP_encdec \
+#         --perceived_ssl_model wavlm_large \
+#         --ENCODER_DIM 1024 \
+#         --prefix transformer_2_TP_fuse_2_encdec_conformer_frzctc_dechead_perc \
+#         --fuse_enc_or_dec encdec \
+#         --attention_type RelPosMHAXL \
+#         --valid_search_interval 2 \
+#         --encoder_module conformer \
+#         --enable_ctc_freezing True \
+#         --decoder_target perceived \
+#         --number_of_epochs 300
 
 # # Use XLS-r-1b ばつ
 # python ver5_train.py \
@@ -804,8 +788,9 @@ python ver5_train_mispro.py \
 #        --perceived_ssl_model wav2vec2_large \
 #        --feature_fusion TransducerMDD 
 
+# Dual Path cano + perc
 # python ver4_train.py \
-#         hparams/train_l2_arctic_cano_perc_dual_enc.yaml \
+#         hparams/new_train_l2_arctic_cano_perc_dual_enc.yaml \
 #         --perceived_ssl_model wavlm_large \
 #         --canonical_ssl_model wavlm_large \
 #         --ENCODER_DIM 1024 \
@@ -913,3 +898,63 @@ python ver5_train_mispro.py \
 #        --perceived_ssl_model wav2vec2_base \
 #        --feature_fusion SB --ctc_weight_decode 0.7
 
+## ENC FUSE Only with RoPE MHA, Conformer, Freeze with Best CTC SSL
+# python ver5_train_mispro.py \
+#         hparams/transformer_TP_ver4_fuse_errclass.yaml \
+#         --feature_fusion TransformerMDD_TP_encdec_errclass \
+#         --perceived_ssl_model wavlm_large \
+#         --ENCODER_DIM 1024 \
+#         --prefix fuse_2_enc_conf_RoPE_fromprectc_frz_errcls\
+#         --fuse_enc_or_dec enc \
+#         --attention_type RoPEMHA \
+#         --valid_search_interval 1 \
+#         --encoder_module conformer \
+#         --enable_metric_freezing True \
+#         --enable_ctc_freezing False \
+#         --plot_attention True \
+#         --number_of_epochs 100 \
+#         --load_pretrained_components True \
+#         --pretrained_model_path "/home/m64000/work/SSL_MDD/pretrained_models/ShareEnc_PER_12.9250_PER_Cano_5.2734_F1_0.6509.ckpt" \
+#         --components_to_load '["ssl", "enc"]' \
+#         --freeze_loaded_components True
+
+# ## DEC FUSE Only with RoPE MHA, Conformer, Freeze with Best CTC SSL
+# python ver5_train_mispro.py \
+#         hparams/transformer_TP_ver4_fuse_errclass.yaml \
+#         --feature_fusion TransformerMDD_TP_encdec_errclass \
+#         --perceived_ssl_model wavlm_large \
+#         --ENCODER_DIM 1024 \
+#         --prefix fuse_2_dec_conf_RoPE_fromprectc_frz_errcls\
+#         --fuse_enc_or_dec dec \
+#         --attention_type RoPEMHA \
+#         --valid_search_interval 1 \
+#         --encoder_module conformer \
+#         --enable_metric_freezing False \
+#         --enable_ctc_freezing False \
+#         --plot_attention True \
+#         --number_of_epochs 100 \
+#         --load_pretrained_components True \
+#         --pretrained_model_path "/home/m64000/work/SSL_MDD/pretrained_models/ShareEnc_PER_12.9250_PER_Cano_5.2734_F1_0.6509.ckpt" \
+#         --components_to_load '["ssl", "enc"]' \
+#         --freeze_loaded_components True
+
+# ## ENCDEC FUSE with RoPE MHA, Conformer, Freeze with Best CTC SSL
+python ver5_train_mispro.py \
+        hparams/transformer_TP_ver4_fuse_errclass.yaml \
+        --feature_fusion TransformerMDD_TP_encdec_errclass \
+        --perceived_ssl_model wavlm_large \
+        --ENCODER_DIM 1024 \
+        --prefix fuse_2_encdec_conf_RoPE_fromprectc_frz_errcls\
+        --fuse_enc_or_dec encdec \
+        --attention_type RoPEMHA \
+        --valid_search_interval 1 \
+        --encoder_module conformer \
+        --enable_metric_freezing False \
+        --enable_ctc_freezing False \
+        --plot_attention True \
+        --number_of_epochs 100 \
+        --load_pretrained_components True \
+        --pretrained_model_path "/home/m64000/work/SSL_MDD/pretrained_models/ShareEnc_PER_12.9250_PER_Cano_5.2734_F1_0.6509.ckpt" \
+        --components_to_load '["ssl", "enc"]' \
+        --freeze_loaded_components True \
+        --plot_attention_interval 5

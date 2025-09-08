@@ -43,9 +43,9 @@ class PhnMonoSSLModel(sb.Brain):
         self.best_mpd_f1 = float('-inf')
         self.last_improved_epoch = 0
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        if self.modules.perceived_ssl is not None:
+        if getattr(self.modules, "perceived_ssl", None) is not None:
             self.modules.perceived_ssl.to(self.device)
-        if self.modules.canonical_ssl is not None:
+        if getattr(self.modules, "canonical_ssl", None) is not None:
             self.modules.canonical_ssl.to(self.device)
             
         self.best_valid_loss = float('inf')
@@ -75,25 +75,55 @@ class PhnMonoSSLModel(sb.Brain):
         #     attn_mask = None
 
         feats = self.modules.perceived_ssl(wavs)
+        
         x = self.modules.enc(feats)
-
+        
+        if getattr(self.modules, "ConformerEncoder", None) is not None:
+            from speechbrain.nnet.attention import RelPosEncXL, RelPosMHAXL, RoPEMHA 
+            pos_emb = RelPosEncXL(emb_dim=self.hparams.dnn_neurons)(x).to(self.device)
+            # import pdb; pdb.set_trace()
+            x, _ = self.modules.ConformerEncoder(x, pos_embs=pos_emb)
+        # Get RVQ if exists
+        if getattr(self.modules, "RVQ", None) is not None:
+            # Expect [B, C, T]
+            x = x.transpose(1, 2)  # [B, T, C] -> [B, C, T]
+            discrete_embeddings, codes, latents, commitment_loss, codebook_loss = self.modules.RVQ(x)
+            x = discrete_embeddings.transpose(1, 2)  # [B, C, T] -> [B, T, C]
         # output layer for ctc log-probabilities
         logits = self.modules.ctc_lin(x)
         p_ctc = self.hparams.log_softmax(logits) # (B, T, C)
+        if getattr(self.modules, "RVQ", None) is not None:
+            return p_ctc, wav_lens, commitment_loss, codebook_loss
         return p_ctc, wav_lens
 
     def compute_objectives(self, predictions, batch, stage):
         "Given the network predictions and targets computed the NLL loss."
-        p_ctc, wav_lens = predictions
+        if getattr(self.modules, "RVQ", None) is not None:
+            p_ctc, wav_lens, commitment_loss, codebook_loss = predictions
+        else:
+            p_ctc, wav_lens = predictions
         ids = batch.id
         targets, target_lens = batch.phn_encoded_target
+        
+        canonicals, canonical_lens = batch.phn_encoded_canonical
+        perceiveds, perceived_lens = batch.phn_encoded_perceived
+        
         # Additional: BCE loss on binary mispronunciation prediction
-        if stage != sb.Stage.TRAIN:
-            canonicals, canonical_lens = batch.phn_encoded_canonical
-            perceiveds, perceived_lens = batch.phn_encoded_perceived
+        if self.hparams.training_target == "target":
+            targets = targets
+            target_lens = target_lens
+        elif self.hparams.training_target == "canonical":
+            targets = canonicals
+            target_lens = canonical_lens
+        elif self.hparams.training_target == "perceived":
+            targets = perceiveds
+            target_lens = perceived_lens        
 
         loss_ctc = self.hparams.ctc_cost(p_ctc, targets, wav_lens, target_lens)
-        loss = loss_ctc
+        if getattr(self.modules, "RVQ", None) is not None:
+            loss = loss_ctc + (commitment_loss + codebook_loss)
+        else:
+            loss = loss_ctc
 
         # Record losses for posterity
         if stage != sb.Stage.TRAIN:
@@ -280,8 +310,11 @@ class PhnMonoSSLModel(sb.Brain):
             self.scaler.unscale_(self.adam_optimizer)
 
             if self.check_gradients(loss):
-                self.scaler.step(self.pretrained_opt_class)
-                self.scaler.step(self.adam_optimizer)
+                if any(p.requires_grad for p in self.pretrained_opt_class.param_groups[0]['params']):
+                    self.scaler.step(self.pretrained_opt_class)
+                if any(p.requires_grad for p in self.adam_optimizer.param_groups[0]['params']):
+                    self.scaler.step(self.adam_optimizer)
+
 
             self.scaler.update()
 
@@ -332,16 +365,105 @@ class PhnMonoSSLModel(sb.Brain):
 
         # Initialize optimizers after parameters are configured
         self.init_optimizers()
-
+        
+        # Partial load pretrained components if specified
+        
+        if getattr(self.hparams, 'load_pretrained_components', False):
+            pretrained_path = getattr(self.hparams, 'pretrained_model_path', '')
+            components = getattr(self.hparams, 'components_to_load', ['ssl', 'enc', "ctc_head"])
+            freeze_loaded = getattr(self.hparams, 'freeze_loaded_components', True)
+            
+            if pretrained_path and os.path.exists(pretrained_path):
+                try:
+                    self.load_pretrained_components(
+                        checkpoint_path=pretrained_path,
+                        components_to_load=components,
+                        freeze_loaded=freeze_loaded
+                    )
+                except Exception as e:
+                    print(f"❌ Failed to load pretrained components: {e}")
+                    print("   Continuing with random initialization...")
+            else:
+                print(f"⚠️  Pretrained model path not found: {pretrained_path}")
+                print("   Continuing with random initialization...")
         # Load latest checkpoint to resume training if interrupted
         ## NOTE: make sure to use the "best" model to continual training
         ## so we set the `min_key` argument
-        if self.checkpointer is not None:
+        elif self.checkpointer is not None:
             # TODO: support recover best on PER or mpd_f1 or averaged model of best PER and mpd_f1
             self.checkpointer.recover_if_possible(
                 min_key="PER",
                 # max_key="mpd_f1",
             )
+        
+    def load_pretrained_components(self, checkpoint_path, components_to_load=None, freeze_loaded=True):
+        """
+        Load specific components from a pretrained model checkpoint
+        
+        Args:
+            checkpoint_path (str): Path to the checkpoint directory or file
+            components_to_load (list): List of components to load. 
+                                    Options: ['ssl', 'encoder', 'ctc_head', 'decoder', 'enc_projection']
+                                    If None, loads ['ssl', 'encoder'] by default
+            freeze_loaded (bool): Whether to freeze the loaded components
+        """
+        if components_to_load is None:
+            components_to_load = ['ssl']  # Default: load SSL 
+        
+        print(f"\n🔄 Loading pretrained components from: {checkpoint_path}")
+        print(f"   Components to load: {components_to_load}")
+        # pdb.set_trace()
+                
+        from speechbrain.utils.parameter_transfer import Pretrainer
+
+        pretrainer = Pretrainer(
+            collect_in=self.hparams.pretrained_model_path,      # 把文件收集到这个目录（用软链或拷贝）
+            loadables={
+                "perceived_ssl":     self.modules.perceived_ssl,
+                "model":     self.hparams.model,
+            },
+            paths={
+                # 只写文件名，后面用 default_source 指定“仓库/目录”
+                "perceived_ssl":     "perceived_ssl.ckpt",
+                "model":   "model.ckpt",
+            },
+        )
+        # import pdb; pdb.set_trace()
+        paths = pretrainer.collect_files(default_source=self.hparams.pretrained_model_path)
+        # before = self.modules.perceived_ssl.state_dict()["model.encoder.layers.23.final_layer_norm.weight"]
+        pretrainer.load_collected()
+
+        # Freeze loaded components if requested
+        if freeze_loaded:
+            for component in components_to_load:
+                if component == 'ssl':
+                    for param in self.modules.perceived_ssl.parameters():
+                        param.requires_grad = False
+                    self.ssl_frozen = True
+                    print("   🔒 SSL model frozen")
+                    
+                elif component == 'encoder':
+                    for param in self.modules.TransASR.encoder.parameters():
+                        param.requires_grad = False
+                    if hasattr(self.modules.TransASR, 'custom_src_module'):
+                        for param in self.modules.TransASR.custom_src_module.parameters():
+                            param.requires_grad = False
+                    self.encoder_frozen = True
+                    print("   🔒 Encoder frozen")
+                    
+                elif component == 'enc':
+                    if hasattr(self.modules, 'enc'):
+                        for param in self.modules.enc.parameters():
+                            param.requires_grad = False
+                        print("   🔒 Encoder projection frozen")
+                        
+                elif component == 'ctc_head':
+                    for param in self.modules.ctc_lin.parameters():
+                        param.requires_grad = False
+                    print("   🔒 CTC head frozen")
+    
+        # print(f"   ✅ Successfully loaded components: {loaded_components}")
+        # return loaded_components
 
 class PhnMonoSSLModel_misproBCE(PhnMonoSSLModel):
     def __init__(self, *args,):
@@ -359,11 +481,20 @@ class PhnMonoSSLModel_misproBCE(PhnMonoSSLModel):
         mis_pro_labels, mis_pro_lens = batch.mispro_label
         canonicals, canonical_lens = batch.phn_encoded_canonical
         perceiveds, perceived_lens = batch.phn_encoded_perceived
+        
+        if self.hparams.training_target == "target":
+            targets = targets
+            target_lens = target_lens
+        elif self.hparams.training_target == "canonical":
+            targets = canonicals
+            target_lens = canonical_lens
+        elif self.hparams.training_target == "perceived":
+            targets = perceiveds
+            target_lens = perceived_lens        
 
         sequence = sb.decoders.ctc_greedy_decode(
             p_ctc, wav_lens, blank_id=self.hparams.blank_index
         )
-        
         
         loss_ctc = self.hparams.ctc_cost(p_ctc, targets, wav_lens, target_lens)
         loss_mirpro_BCElike_ctc = self.hparams.ctc_cost_mispro(
@@ -1072,7 +1203,7 @@ class HMA_attn_ctc_to_mispro(PhnMonoSSLModel_withcanoPhnEmb_HMA_CTC):
         # _, timings = self.ctc_segmentation_align(p_ctc, targets, wav_len=wav_lens, target_len=target_lens, blank_id=self.hparams.blank_index, char_list=char_list)
         # predict_phn_timings, predict_phn_probs, _ = timings["timings"], timings["char_probs"], timings["state_list"]
         
-        import pdb; pdb.set_trace()
+        # import pdb; pdb.set_trace()
 
 
         loss = loss_ctc + 5 * loss_mispro + loss_label_seq
@@ -1389,3 +1520,485 @@ class PhnMonoSSLModel_withcanoPhnEmb_MHA_Guided_Attention_CTC(PhnMonoSSLModel_wi
             # if self.hparams.perceived_ssl is not None and not self.hparams.perceived_ssl.freeze:
             self.checkpointer.add_recoverable("adam_opt", self.adam_optimizer)
             self.checkpointer.add_recoverable("pretrained_opt", self.pretrained_opt_class)
+
+class PhnMonoSSLModel_RVQforCano(PhnMonoSSLModel):
+    def compute_forward(self, batch, stage):
+        "Given an input batch it computes the phoneme probabilities."
+        batch = batch.to(self.device)
+        wavs, wav_lens = batch.sig
+        # phns_bos, _ = batch.phn_encoded_bos
+
+        if stage == sb.Stage.TRAIN:
+            if hasattr(self.hparams, "augmentation"):
+                wavs = self.hparams.augmentation(wavs)
+
+        # some wav2vec models (e.g. large-lv60) needs attention_mask
+        # if self.modules.perceived_ssl.feature_extractor.return_attention_mask:
+        #     attn_mask = make_attn_mask(wavs, wav_lens)
+        # else:
+        #     attn_mask = None
+
+        feats = self.modules.perceived_ssl(wavs)
+        if feats.dim() == 4:
+            feats = feats[self.hparams.preceived_ssl_emb_layer]
+
+        x = self.modules.enc(feats)
+        if getattr(self.modules, "ConformerEncoder", None) is not None:
+            from speechbrain.nnet.attention import RelPosEncXL, RelPosMHAXL, RoPEMHA 
+            pos_emb = RelPosEncXL(emb_dim=self.hparams.dnn_neurons)(x).to(self.device)
+            # import pdb; pdb.set_trace()
+            x, _ = self.modules.ConformerEncoder(x, pos_embs=pos_emb)
+        # Get RVQ if exists
+        if getattr(self.modules, "RVQ", None) is not None:
+            # Expect [B, C, T]
+            x = x.transpose(1, 2)  # [B, T, C] -> [B, C, T]
+            discrete_embeddings, codes, latents, commitment_loss, codebook_loss = self.modules.RVQ(x)
+            import pdb; pdb.set_trace()
+            # Use continuous embeddings for perceived phoneme CTC, while discrete codes for canonical phoneme CTC
+            perc_x = x.transpose(1, 2)  # [B, C, T] -> [B, T, C] 
+            cano_x = discrete_embeddings.transpose(1, 2)  # [B, C, T] -> [B, T, C]
+        # else:
+        # output layer for ctc log-probabilities
+        logits = self.modules.ctc_lin(perc_x)
+        p_ctc = self.hparams.log_softmax(logits) # (B, T, C)
+        # Canonical 
+        cano_logits = self.modules.ctc_cano_lin(cano_x)
+        p_cano_ctc = self.hparams.log_softmax(cano_logits) # (
+        
+        if self.modules.RVQ is not None:
+            return p_ctc, p_cano_ctc, wav_lens, commitment_loss, codebook_loss
+        return p_ctc, wav_lens
+
+    def compute_objectives(self, predictions, batch, stage):
+        "Given the network predictions and targets computed the NLL loss."
+        if self.modules.RVQ is not None:
+            p_ctc, p_cano_ctc, wav_lens, commitment_loss, codebook_loss = predictions
+        else:
+            p_ctc, wav_lens = predictions
+        ids = batch.id
+        targets, target_lens = batch.phn_encoded_target
+        
+        canonicals, canonical_lens = batch.phn_encoded_canonical
+        perceiveds, perceived_lens = batch.phn_encoded_perceived
+
+        loss_ctc = self.hparams.ctc_cost(p_ctc, targets, wav_lens, target_lens)
+        loss_cano_ctc = self.hparams.ctc_cost(p_cano_ctc, canonicals, wav_lens, canonical_lens) 
+        
+        if self.modules.RVQ is not None:
+            loss = loss_ctc + loss_cano_ctc + (commitment_loss + codebook_loss)
+        else:
+            loss = loss_ctc
+
+        # Record losses for posterity
+        if stage != sb.Stage.TRAIN:
+            # Note: sb.decoders.ctc_greedy_decode will also remove padded tokens
+            # that is, it return a list of list with different lengths
+            sequence = sb.decoders.ctc_greedy_decode(
+                p_ctc, wav_lens, blank_id=self.hparams.blank_index
+            )
+            sequence_cano = sb.decoders.ctc_greedy_decode(
+                p_cano_ctc, wav_lens, blank_id=self.hparams.blank_index
+            )
+            
+            self.ctc_metrics.append(ids, p_ctc, targets, wav_lens, target_lens)
+            self.ctc_cano_metrics.append(ids, p_cano_ctc, canonicals, wav_lens, canonical_lens)
+            
+            self.per_metrics.append(
+                ids=ids,
+                predict=sequence,
+                target=targets,
+                predict_len=None,
+                target_len=target_lens,
+                ind2lab=self.label_encoder.decode_ndim,
+            )
+            
+            self.per_cano_metrics.append(
+                ids=ids,
+                predict=sequence_cano,
+                target=canonicals,
+                predict_len=None,
+                target_len=canonical_lens,
+                ind2lab=self.label_encoder.decode_ndim,
+            )
+            
+            self.mpd_metrics.append(
+                ids=ids,
+                predict=sequence,
+                canonical=canonicals,
+                perceived=perceiveds,
+                predict_len=None,
+                canonical_len=canonical_lens,
+                perceived_len=perceived_lens,
+                ind2lab=self.label_encoder.decode_ndim,
+            )
+
+        return loss
+    
+    def on_stage_start(self, stage, epoch):
+        "Gets called when a stage (either training, validation, test) starts."
+        self.ctc_metrics = self.hparams.ctc_stats()
+        self.ctc_cano_metrics = self.hparams.ctc_stats()
+        if hasattr(self.hparams, "augmentation"):
+            self.modules.perceived_ssl.model.config.apply_spec_augment = True
+
+        if stage != sb.Stage.TRAIN:
+  
+            self.per_metrics = self.hparams.per_stats()
+            self.per_cano_metrics = self.hparams.per_stats()
+            self.mpd_metrics = MpdStats()
+    
+    def on_stage_end(self, stage, stage_loss, epoch):
+        """Gets called at the end of a epoch."""
+        if stage == sb.Stage.TRAIN:
+            self.train_loss = stage_loss
+        else:
+            per = self.per_metrics.summarize("error_rate")
+            per_cano = self.per_cano_metrics.summarize("error_rate")        
+            mpd_f1 = self.mpd_metrics.summarize("mpd_f1")
+
+        if stage == sb.Stage.VALID:
+            # Log stats
+            self.hparams.train_logger.log_stats(
+                stats_meta={
+                    "epoch": epoch,
+                    "lr_adam": self.adam_optimizer.param_groups[0]["lr"],
+                    "lr_pretrained": self.pretrained_opt_class.param_groups[0]["lr"],
+                },
+                train_stats={"loss": self.train_loss},
+                valid_stats={
+                    "loss": stage_loss,
+                    "ctc_loss": self.ctc_metrics.summarize("average"),
+                    "ctc_cano_loss": self.ctc_cano_metrics.summarize("average"),
+                    "PER": per,
+                    "PER_cano": per_cano,
+                    "mpd_f1": mpd_f1
+                },
+            )
+            # Save best Models (only keep the single best for each metric)
+            improved = False
+            # Save best PER model (lower is better)
+            # if per < self.best_per:
+            #     ckpt_name = f"best_per_{epoch:03d}_{per:.4f}.ckpt"
+            #     self.checkpointer.save_and_keep_only(
+            #         meta={"PER": per, "mpd_f1": mpd_f1, "epoch": epoch},
+            #         name=ckpt_name,
+            #         num_to_keep=2,
+            #         min_keys=["PER", "PER_cano"]
+            #     )
+            #     self.best_per = per
+            #     improved = True
+            # # Save best mpd_f1 model (higher is better)
+            # if mpd_f1 > self.best_mpd_f1:
+            #     ckpt_name = f"best_mpdf1_{epoch:03d}_{mpd_f1:.4f}.ckpt"
+            #     self.checkpointer.save_and_keep_only(
+            #         meta={"PER": per, "mpd_f1": mpd_f1, "epoch": epoch},
+            #         name=ckpt_name,
+            #         num_to_keep=2,
+            #         max_keys=["mpd_f1"]
+            #     )
+            #     self.best_mpd_f1 = mpd_f1
+            #     improved = True
+            ckpt_name = f"{epoch:03d}_PER_{per:.4f}_PER_Cano_{per_cano:.4f}_F1_{mpd_f1:.4f}.ckpt"
+
+            self.checkpointer.save_and_keep_only(
+                meta={"PER": per, "PER_cano": per_cano, "mpd_f1": mpd_f1, "epoch": epoch},
+                name=ckpt_name,
+                num_to_keep=3,
+                importance_keys=[
+                    lambda ckpt: (-ckpt.meta["PER"], -ckpt.meta["PER_cano"], ckpt.meta["mpd_f1"]),  # lower PER, lower PER_cano, higher mpd_f1
+                ]
+            )
+
+            # Early stopping logic: only track best valid loss, do not save checkpoint for valid loss
+            if stage_loss < self.best_valid_loss or len(self.best_valid_loss_list) < 10:
+                ckpt_name = f"best_valid_loss_{epoch:03d}_{stage_loss:.4f}.ckpt"
+                # Do NOT save checkpoint for valid loss (just update stats)
+                self.best_valid_loss_list.append((stage_loss, epoch, ckpt_name))
+                self.best_valid_loss_list = sorted(self.best_valid_loss_list, key=lambda x: x[0])[:10]
+                self.best_valid_loss = self.best_valid_loss_list[0][0]
+                improved = True
+
+            if improved:
+                self.no_improve_epochs = 0
+                self.last_improved_epoch = epoch
+            else:
+                self.no_improve_epochs += 1
+
+            # Logging
+            wandb.log({
+                "epoch": epoch,
+                "train_loss": self.train_loss,
+                "valid_loss": stage_loss,
+                "ctc_loss": self.ctc_metrics.summarize("average"),
+                "ctc_cano_loss": self.ctc_cano_metrics.summarize("average"),
+                "PER": per,
+                "PER_cano": per_cano,
+                "mpd_f1": mpd_f1,
+            }, step=epoch)
+            # Early stop if patience exceeded
+            if self.no_improve_epochs >= self.patience:
+                print(f"Early stopping at epoch {epoch} (no improvement for {self.patience} epochs)")
+                raise StopIteration
+
+        if stage == sb.Stage.TEST:
+            self.hparams.train_logger.log_stats(
+                stats_meta={"Epoch loaded": self.hparams.epoch_counter.current},
+                test_stats={"loss": stage_loss, "PER": per, "mpd_f1": mpd_f1, "PER_cano": per_cano},
+            )
+            # 
+            with open(self.hparams.per_file, "w") as w:
+                w.write("CTC loss stats:\n")
+                self.ctc_metrics.write_stats(w)
+                w.write("\nPER stats:\n")
+                self.per_metrics.write_stats(w)
+                print(
+                    "CTC and PER stats written to file",
+                    self.hparams.per_file,
+                )
+            if getattr(self.hparams, "ctc_cano_file", None) is None:
+                self.hparams.ctc_cano_file = self.hparams.per_file + ".cano.txt"
+                with open(self.hparams.ctc_cano_file, "w") as w:
+                    w.write("Canonical CTC loss stats:\n")
+                    self.ctc_cano_metrics.write_stats(w)
+                    w.write("\nCanonical PER stats:\n")
+                    self.per_cano_metrics.write_stats(w)
+                    print(
+                        "Canonical CTC and PER stats written to file",
+                        self.hparams.ctc_cano_file,
+                    )
+            with open(self.hparams.mpd_file, "w") as m:
+                m.write("MPD results and stats:\n")
+                self.mpd_metrics.write_stats(m)
+                print(
+                    "MPD results and stats written to file",
+                    self.hparams.mpd_file,
+                )
+                
+class PhnMonoSSLModel_DualCTCHead(PhnMonoSSLModel):
+    """PhnMonoSSLModel with dual CTC heads for perceived and canonical phonemes.
+        Perceived feature from middle layers, Canonical from Last layer.
+        Ver 1: seperate enc after SSL, expecially for different SSL Layers for Canonical and Perceived features.
+        Ver 2: share enc if Canonical and Perceived features are from the same layer, and allow shareenc=True
+    """
+    def compute_forward(self, batch, stage):
+        "Given an input batch it computes the phoneme probabilities."
+        batch = batch.to(self.device)
+        wavs, wav_lens = batch.sig
+
+        if stage == sb.Stage.TRAIN:
+            if hasattr(self.hparams, "augmentation"):
+                wavs = self.hparams.augmentation(wavs)
+
+        feats = self.modules.perceived_ssl(wavs)
+        assert feats.dim() == 4  # (B, L, T, D)
+        feats_cano = feats[self.hparams.preceived_ssl_emb_layer]
+        feats_perc = feats[self.hparams.canonical_ssl_emb_layer]
+        # If Canonical Feature and Perceived Feature are from the same layer and allow share encoder, 
+        if self.hparams.preceived_ssl_emb_layer == self.hparams.canonical_ssl_emb_layer and self.hparams.shareenc and getattr(self.modules, "enc_cano", None) == None:
+            feats_perc = feats_cano
+            x_perc = self.modules.enc(feats_perc)
+            x_cano = x_perc
+            
+        else:
+            # Use a separate encoder for Canonical feature
+            try:
+                x_cano = self.modules.enc_cano(feats_cano)
+                x_perc = self.modules.enc(feats_perc)
+            except:
+                if self.hparams.preceived_ssl_emb_layer != self.hparams.canonical_ssl_emb_layer:
+                    raise ValueError("Please define a separate encoder for Canonical feature as it is from a different SSL layer.")
+
+        
+        if getattr(self.modules, "ConformerEncoder", None) is not None:
+            from speechbrain.nnet.attention import RelPosEncXL, RelPosMHAXL, RoPEMHA 
+            pos_emb = RelPosEncXL(emb_dim=self.hparams.dnn_neurons)(x_perc).to(self.device)
+            x_perc, _ = self.modules.ConformerEncoder(x_perc, pos_embs=pos_emb)
+
+        # output layer for ctc log-probabilities
+        logits = self.modules.ctc_lin(x_cano)
+        p_ctc = self.hparams.log_softmax(logits) # (B, T, C)
+        
+        # Canonical 
+        cano_logits = self.modules.ctc_cano_lin(x_cano)
+        p_cano_ctc = self.hparams.log_softmax(cano_logits) # (B, T, C)
+        
+        return p_ctc, p_cano_ctc, wav_lens
+
+    def compute_objectives(self, predictions, batch, stage):
+        "Given the network predictions and targets computed the NLL loss."
+
+        p_ctc, p_cano_ctc, wav_lens = predictions
+        ids = batch.id
+        targets, target_lens = batch.phn_encoded_target
+        
+        canonicals, canonical_lens = batch.phn_encoded_canonical
+        perceiveds, perceived_lens = batch.phn_encoded_perceived
+
+        loss_ctc = self.hparams.ctc_cost(p_ctc, targets, wav_lens, target_lens)
+        loss_cano_ctc = self.hparams.ctc_cost(p_cano_ctc, canonicals, wav_lens, canonical_lens) 
+        
+        loss = loss_ctc + loss_cano_ctc
+
+        # Record losses for posterity
+        if stage != sb.Stage.TRAIN:
+            # Note: sb.decoders.ctc_greedy_decode will also remove padded tokens
+            # that is, it return a list of list with different lengths
+            sequence = sb.decoders.ctc_greedy_decode(
+                p_ctc, wav_lens, blank_id=self.hparams.blank_index
+            )
+            sequence_cano = sb.decoders.ctc_greedy_decode(
+                p_cano_ctc, wav_lens, blank_id=self.hparams.blank_index
+            )
+            
+            self.ctc_metrics.append(ids, p_ctc, targets, wav_lens, target_lens)
+            self.ctc_cano_metrics.append(ids, p_cano_ctc, canonicals, wav_lens, canonical_lens)
+            
+            self.per_metrics.append(
+                ids=ids,
+                predict=sequence,
+                target=targets,
+                predict_len=None,
+                target_len=target_lens,
+                ind2lab=self.label_encoder.decode_ndim,
+            )
+            
+            self.per_cano_metrics.append(
+                ids=ids,
+                predict=sequence_cano,
+                target=canonicals,
+                predict_len=None,
+                target_len=canonical_lens,
+                ind2lab=self.label_encoder.decode_ndim,
+            )
+            
+            self.mpd_metrics.append(
+                ids=ids,
+                predict=sequence,
+                canonical=canonicals,
+                perceived=perceiveds,
+                predict_len=None,
+                canonical_len=canonical_lens,
+                perceived_len=perceived_lens,
+                ind2lab=self.label_encoder.decode_ndim,
+            )
+
+        return loss
+    
+    def on_stage_start(self, stage, epoch):
+        "Gets called when a stage (either training, validation, test) starts."
+        self.ctc_metrics = self.hparams.ctc_stats()
+        self.ctc_cano_metrics = self.hparams.ctc_stats()
+        if hasattr(self.hparams, "augmentation"):
+            self.modules.perceived_ssl.model.config.apply_spec_augment = True
+
+        if stage != sb.Stage.TRAIN:
+  
+            self.per_metrics = self.hparams.per_stats()
+            self.per_cano_metrics = self.hparams.per_stats()
+            self.mpd_metrics = MpdStats()
+    
+    def on_stage_end(self, stage, stage_loss, epoch):
+        """Gets called at the end of a epoch."""
+        if stage == sb.Stage.TRAIN:
+            self.train_loss = stage_loss
+        else:
+            per = self.per_metrics.summarize("error_rate")
+            per_cano = self.per_cano_metrics.summarize("error_rate")        
+            mpd_f1 = self.mpd_metrics.summarize("mpd_f1")
+
+        if stage == sb.Stage.VALID:
+            # Log stats
+            self.hparams.train_logger.log_stats(
+                stats_meta={
+                    "epoch": epoch,
+                    "lr_adam": self.adam_optimizer.param_groups[0]["lr"],
+                    "lr_pretrained": self.pretrained_opt_class.param_groups[0]["lr"],
+                },
+                train_stats={"loss": self.train_loss},
+                valid_stats={
+                    "loss": stage_loss,
+                    "ctc_loss": self.ctc_metrics.summarize("average"),
+                    "ctc_cano_loss": self.ctc_cano_metrics.summarize("average"),
+                    "PER": per,
+                    "PER_cano": per_cano,
+                    "mpd_f1": mpd_f1
+                },
+            )
+            # Save best Models (only keep the single best for each metric)
+            improved = False
+
+            ckpt_name = f"{epoch:03d}_PER_{per:.4f}_PER_Cano_{per_cano:.4f}_F1_{mpd_f1:.4f}.ckpt"
+
+            self.checkpointer.save_and_keep_only(
+                meta={"PER": per, "PER_cano": per_cano, "mpd_f1": mpd_f1, "epoch": epoch},
+                name=ckpt_name,
+                num_to_keep=3,
+                importance_keys=[
+                    lambda ckpt: (-ckpt.meta["PER"], -ckpt.meta["PER_cano"], ckpt.meta["mpd_f1"]),  # lower PER, lower PER_cano, higher mpd_f1
+                ]
+            )
+
+            # Early stopping logic: only track best valid loss, do not save checkpoint for valid loss
+            if stage_loss < self.best_valid_loss or len(self.best_valid_loss_list) < 10:
+                ckpt_name = f"best_valid_loss_{epoch:03d}_{stage_loss:.4f}.ckpt"
+                # Do NOT save checkpoint for valid loss (just update stats)
+                self.best_valid_loss_list.append((stage_loss, epoch, ckpt_name))
+                self.best_valid_loss_list = sorted(self.best_valid_loss_list, key=lambda x: x[0])[:10]
+                self.best_valid_loss = self.best_valid_loss_list[0][0]
+                improved = True
+
+            if improved:
+                self.no_improve_epochs = 0
+                self.last_improved_epoch = epoch
+            else:
+                self.no_improve_epochs += 1
+
+            # Logging
+            wandb.log({
+                "epoch": epoch,
+                "train_loss": self.train_loss,
+                "valid_loss": stage_loss,
+                "ctc_loss": self.ctc_metrics.summarize("average"),
+                "ctc_cano_loss": self.ctc_cano_metrics.summarize("average"),
+                "PER": per,
+                "PER_cano": per_cano,
+                "mpd_f1": mpd_f1,
+            }, step=epoch)
+            # Early stop if patience exceeded
+            if self.no_improve_epochs >= self.patience:
+                print(f"Early stopping at epoch {epoch} (no improvement for {self.patience} epochs)")
+                raise StopIteration
+
+        if stage == sb.Stage.TEST:
+            self.hparams.train_logger.log_stats(
+                stats_meta={"Epoch loaded": self.hparams.epoch_counter.current},
+                test_stats={"loss": stage_loss, "PER": per, "mpd_f1": mpd_f1, "PER_cano": per_cano},
+            )
+            # 
+            with open(self.hparams.per_file, "w") as w:
+                w.write("CTC loss stats:\n")
+                self.ctc_metrics.write_stats(w)
+                w.write("\nPER stats:\n")
+                self.per_metrics.write_stats(w)
+                print(
+                    "CTC and PER stats written to file",
+                    self.hparams.per_file,
+                )
+            if getattr(self.hparams, "ctc_cano_file", None) is None:
+                self.hparams.ctc_cano_file = self.hparams.per_file + ".cano.txt"
+                with open(self.hparams.ctc_cano_file, "w") as w:
+                    w.write("Canonical CTC loss stats:\n")
+                    self.ctc_cano_metrics.write_stats(w)
+                    w.write("\nCanonical PER stats:\n")
+                    self.per_cano_metrics.write_stats(w)
+                    print(
+                        "Canonical CTC and PER stats written to file",
+                        self.hparams.ctc_cano_file,
+                    )
+            with open(self.hparams.mpd_file, "w") as m:
+                m.write("MPD results and stats:\n")
+                self.mpd_metrics.write_stats(m)
+                print(
+                    "MPD results and stats written to file",
+                    self.hparams.mpd_file,
+                )

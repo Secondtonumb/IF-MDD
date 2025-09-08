@@ -237,7 +237,7 @@ class TransformerMDD_TP_encdec_errclass(sb.Brain):
         # pdb.set_trace()
                 
         from speechbrain.utils.parameter_transfer import Pretrainer
-        pdb.set_trace()
+        
         pretrainer = Pretrainer(
             collect_in=self.hparams.pretrained_model_path,      # 把文件收集到这个目录（用软链或拷贝）
             loadables={
@@ -611,7 +611,14 @@ class TransformerMDD_TP_encdec_errclass(sb.Brain):
         attn_map = None
         
         # Cano Phn Emb:
+        # pdb.set_trace()
         Cano_emb = self.modules.phn_emb(canonicals)  # [B, T_c, D]
+        if getattr(self.hparams, "phn_emb_TransEnc", None) is not None:
+            Cano_pos = RelPosEncXL(emb_dim=self.hparams.dnn_neurons)(Cano_emb).to(self.device)
+            Cano_emb, _ = self.modules.phn_emb_TransEnc(Cano_emb)
+        # Cano_pos = RelPosEncXL(emb_dim=self.hparams.dnn_neurons)(Cano_emb).to(self.device)
+        # Cano_emb, _ = self.modules.phn_emb_TransEnc(Cano_emb, pos_embs=Cano_pos)  # [B, T_c, D]
+        # pdb.set_trace()
         
         if self.hparams.decoder_target == "perceived":
             # using aligned cano/perc' s result as transformer decoder's result.
@@ -631,7 +638,6 @@ class TransformerMDD_TP_encdec_errclass(sb.Brain):
                 enc_out, dec_out = outs
             # Option 2, fuse Canononical Emb and mispro after Encoder.
             
-
             if "enc" in self.hparams.fuse_enc_or_dec:
                 memory = enc_out
                 memory = self.modules.mem_proj(memory)  # [B, T_s, D]
@@ -674,6 +680,9 @@ class TransformerMDD_TP_encdec_errclass(sb.Brain):
                 
                 # tgt_mask=tgt_causal_mask,
                 # print("Warning: No fuse net is used!")
+            # If dec only, use dec's fuse_feat
+            if self.hparams.fuse_enc_or_dec == "dec":
+                fuse_feat = fuse_feat_dec
             h_mispro = self.hparams.mispro_head(fuse_feat.transpose(1, 2))
             # for binary detection, 
             h_mispro_bin = self.hparams.mispro_head_binary_out(h_mispro)
@@ -747,7 +756,9 @@ class TransformerMDD_TP_encdec_errclass(sb.Brain):
                     fuse_feat_ = torch.cat((fuse_feat, fuse_feat_dec), dim=-1)
                     fuse_feat = self.modules.fuse_proj(fuse_feat_)  # [B, T, D]
                     # tgt_mask=tgt_causal_mask,
-            
+                        # If dec only, use dec's fuse_feat
+                if self.hparams.fuse_enc_or_dec == "dec":
+                    fuse_feat = fuse_feat_dec
                 h_mispro = self.hparams.mispro_head(fuse_feat.transpose(1, 2))
                 # h_mispro = h_mispro.transpose(1, 2)  # [B, T_c, D]
                 # p_mispro_logits = torch.nn.functional.sigmoid(h_mispro)  # Log probabilities
@@ -772,25 +783,28 @@ class TransformerMDD_TP_encdec_errclass(sb.Brain):
                 attn_map = None
         
             valid_search_interval = self.hparams.valid_search_interval
+            plot_interval = self.hparams.plot_attention_interval
             if current_epoch % valid_search_interval == 0:
                 hyps, top_lengths, top_scores, top_log_probs = self.hparams.valid_search(enc_out.detach(), wav_lens)
                 attn_map = None
-                if self.hparams.plot_attention:
+                if self.hparams.plot_attention and (current_epoch % plot_interval == 0):
                     # Plot the last layer attention
                     import random
                     select_id = random.choice(range(len(batch.id)))
-                    for index, (attn, c_id) in enumerate(zip(fuse_attn[-1], batch.id)):
-                        if index != select_id:
-                            continue
-                        from pathlib import Path
-                        # 
-                        if len(attn.shape) == 2:
-                            attn = attn.unsqueeze(0)  # Add batch dimension [n, T_p, T_s]
-                        c_id = "_".join(c_id.split("/")[-3:])
+                    if locals().get('fuse_attn', None) is not None:
+                        for index, (attn, c_id) in enumerate(zip(fuse_attn[-1], batch.id)):
+                            if index != select_id:
+                                continue
+                            from pathlib import Path
+                            # 
+                            if len(attn.shape) == 2:
+                                attn = attn.unsqueeze(0)  # Add batch dimension [n, T_p, T_s]
+                            c_id = "_".join(c_id.split("/")[-3:])
 
-                        output_dir = Path(self.hparams.valid_attention_plot_dir) / f"{current_epoch:03d}"
-                        plot_attention(attn.cpu(), self.hparams.nhead, c_id, output_dir)
-                    if fuse_attn_dec is not None:
+                            output_dir = Path(self.hparams.valid_attention_plot_dir) / f"{current_epoch:03d}"
+                            plot_attention(attn.cpu(), self.hparams.nhead, c_id, output_dir)
+                    
+                    if locals().get('fuse_attn_dec', None) is not None:
                         for index, (attn, c_id) in enumerate(zip(fuse_attn_dec[-1], batch.id)):
                             if index != select_id:
                                 continue
@@ -808,20 +822,20 @@ class TransformerMDD_TP_encdec_errclass(sb.Brain):
                 attn_map = None
                 if self.hparams.plot_attention:
                     # Plot attention map
-                    for attn, c_id in zip(fuse_attn[-1], batch.id):
-                        from pathlib import Path
-                        if len(attn.shape) == 2:
-                            attn = attn.unsqueeze(0)  # Add batch dimension [n, T_p, T_s]
-                        c_id = "_".join(c_id.split("/")[-3:])
-                        plot_attention(attn.cpu(), self.hparams.nhead, c_id, self.hparams.test_attention_plot_dir)
-                    if fuse_attn_dec is not None:
+                    if locals().get('fuse_attn', None) is None:
+                        for attn, c_id in zip(fuse_attn[-1], batch.id):
+                            from pathlib import Path
+                            if len(attn.shape) == 2:
+                                attn = attn.unsqueeze(0)  # Add batch dimension [n, T_p, T_s]
+                            c_id = "_".join(c_id.split("/")[-3:])
+                            plot_attention(attn.cpu(), self.hparams.nhead, c_id, self.hparams.test_attention_plot_dir)
+                    if locals().get('fuse_attn_dec', None) is not None:
                         for attn, c_id in zip(fuse_attn_dec[-1], batch.id):
                             from pathlib import Path
                             if len(attn.shape) == 2:
                                 attn = attn.unsqueeze(0)  # Add batch dimension [n, T_p, T_s]
                             c_id = "_".join(c_id.split("/")[-3:])
                             plot_attention(attn.cpu(), self.hparams.nhead, c_id, self.hparams.test_attention_plot_dir+"_dec")
-            
 
         return {
             "p_ctc_feat": p_ctc_logits,  # [B, T_s, C]
@@ -835,8 +849,8 @@ class TransformerMDD_TP_encdec_errclass(sb.Brain):
             "h_mispro_bin": h_mispro_bin,
             "h_mispro_cls": h_mispro_cls,
             
-            "fuse_attn": fuse_attn,
-            "fuse_attn_dec": fuse_attn_dec,
+            "fuse_attn": fuse_attn if 'fuse_attn' in locals() else None,
+            "fuse_attn_dec": fuse_attn_dec if 'fuse_attn_dec' in locals() else None,
             "enc_out": enc_out,
             "dec_out": dec_out,
             "Cano_emb": Cano_emb,
@@ -918,13 +932,13 @@ class TransformerMDD_TP_encdec_errclass(sb.Brain):
         # guided attention loss on ga
         # loss_ga_model = sb.nnet.loss.guidedattn_loss.GuidedAttentionLoss(sigma=0.2)
         # pdb.set_trace()
-        
+        loss_ga = 0
         # Use Last Layer's MHA 
-        attn_last = fuse_attn[-1] 
-        attn_ga = attn_last.mean(dim=1)  # [B, T_p]
         if "enc" in self.hparams.fuse_enc_or_dec:
+            attn_last = fuse_attn[-1] 
+            attn_ga = attn_last.mean(dim=1)  # [B, T_p]
             # FUSE_attn [B, T_p, T_s]
-            loss_ga = self.hparams.ga_cost()(attn_ga, 
+            loss_ga += self.hparams.ga_cost()(attn_ga, 
                                            target_lengths=(canonical_lens * Cano_emb.shape[1]).int(),
                                            input_lengths=((wav_lens * enc_out.shape[1]) / self.hparams.post_encoder_reduction_factor).int()
                                             )
@@ -1058,7 +1072,6 @@ class TransformerMDD_TP_encdec_errclass(sb.Brain):
                     self.seq_metrics.append(ids, log_probabilities=p_dec_out, targets=targets_eos, length=target_lens_eos)
                 self.mispro_metrics.append(ids, h_mispro_bin, mispro_label_bin, mispro_label_lens)
                 self.mispro_metrics_cls.append(ids, p_mispro_cls_logits, mispro_label, mispro_label_lens)
-                
                 # TODO: Guided Attention metrics
                 # self.ga_metrics.append(ids, attention=fuse_attn, 
                 #                        target_lengths=(mispro_label_lens * mispro_label.shape[1]).int(),
@@ -1213,16 +1226,7 @@ class TransformerMDD_TP_encdec_errclass(sb.Brain):
         # Initialize optimizers after parameters are configured
         self.init_optimizers()
 
-        # Load latest checkpoint to resume training if interrupted
-        ## NOTE: make sure to use the "best" model to continual training
-        ## so we set the `min_key` argument
-        if self.checkpointer is not None:
-            # TODO: support recover best on PER or mpd_f1 or averaged model of best PER and mpd_f1
-            self.checkpointer.recover_if_possible(
-                max_key="mpd_f1_seq",
-                # max_key="mpd_f1",
-            )
-        pdb.set_trace()
+        
         # Load pretrained components if specified
         if getattr(self.hparams, 'load_pretrained_components', False):
             pretrained_path = getattr(self.hparams, 'pretrained_model_path', '')
@@ -1242,6 +1246,18 @@ class TransformerMDD_TP_encdec_errclass(sb.Brain):
             else:
                 print(f"⚠️  Pretrained model path not found: {pretrained_path}")
                 print("   Continuing with random initialization...")
+        # Load latest checkpoint to resume training if interrupted
+        ## NOTE: make sure to use the "best" model to continual training
+        ## so we set the `min_key` argument
+        elif self.checkpointer is not None:
+            # TODO: support recover best on PER or mpd_f1 or averaged model of best PER and mpd_f1
+            self.checkpointer.recover_if_possible(
+                max_key="mpd_f1_seq",
+                # max_key="mpd_f1",
+                # importance_keys=[
+                #     lambda ckpt: (-ckpt.meta.get("PER_seq", 1e6), ckpt.meta.get("mpd_f1_seq", 0), -ckpt.meta.get("PER", 1e6), ckpt.meta.get("mpd_f1", 0)),
+                # ]
+            )
 
     def on_stage_end(self, stage, stage_loss, epoch):
         current_stage = self.hparams.epoch_counter.current
@@ -1296,51 +1312,66 @@ class TransformerMDD_TP_encdec_errclass(sb.Brain):
                     valid_stats=valid_stats,
                 )                # Save best 3 models for each metric using simplified approach
                 improved = False
+                ckpt_name = f"{epoch:03d}_PER_{per:.4f}_PER_seq_{per_seq:.4f}_F1_{mpd_f1:.4f}_F1_seq_{mpd_f1_seq:.4f}.ckpt"
+                self.checkpointer.save_and_keep_only(
+                    meta={
+                        "epoch": epoch,"PER": per,"mpd_f1": mpd_f1,"PER_seq": per_seq,"mpd_f1_seq": mpd_f1_seq},
+                    name=ckpt_name,
+                    num_to_keep=4,
+                    importance_keys=[
+                        lambda ckpt: (
+                            -ckpt.meta.get("PER_seq", 1e6),
+                            ckpt.meta.get("mpd_f1_seq", 0),
+                            -ckpt.meta.get("PER", 1e6),
+                            ckpt.meta.get("mpd_f1", 0)
+                            ),
+                    ]
+                )
                 
-                def save_best_model(metric_name, current_value, best_value, best_list, ckpt_prefix, 
-                                meta_key, key_type, is_higher_better):
-                    should_save = (current_value > best_value if is_higher_better else current_value < best_value) or len(best_list) < 3
+                # def save_best_model(metric_name, current_value, best_value, best_list, ckpt_prefix, 
+                #                 meta_key, key_type, is_higher_better):
+                #     should_save = (current_value > best_value if is_higher_better else current_value < best_value) or len(best_list) < 3
                     
-                    if should_save:
-                        ckpt_name = f"{ckpt_prefix}_{epoch:03d}_{current_value:.4f}.ckpt"
-                        meta = {"epoch": epoch, metric_name: current_value, meta_key: current_value}
-                        if metric_name.endswith("_seq"):
-                            meta.update({"PER_seq": per_seq, "mpd_f1_seq": mpd_f1_seq})
-                        else:
-                            meta.update({"PER": per, "mpd_f1": mpd_f1})
+                #     if should_save:
+                #         ckpt_name = f"{ckpt_prefix}_{epoch:03d}_{current_value:.4f}.ckpt"
+                #         meta = {"epoch": epoch, metric_name: current_value, meta_key: current_value}
+                #         if metric_name.endswith("_seq"):
+                #             meta.update({"PER_seq": per_seq, "mpd_f1_seq": mpd_f1_seq})
+                #         else:
+                #             meta.update({"PER": per, "mpd_f1": mpd_f1})
                         
-                        self.checkpointer.save_and_keep_only(
-                            meta=meta,
-                            name=ckpt_name,
-                            num_to_keep=self.hparams.max_save_models * 4,
-                            **{key_type: [meta_key]}
-                        )
+                #         self.checkpointer.save_and_keep_only(
+                #             meta=meta,
+                #             name=ckpt_name,
+                #             num_to_keep=self.hparams.max_save_models * 4,
+                #             **{key_type: [meta_key]}
+                #         )
                         
-                        best_list.append((current_value, epoch, ckpt_name))
-                        best_list.sort(key=lambda x: -x[0] if is_higher_better else x[0])
-                        best_list[:] = best_list[:self.hparams.max_save_models]
-                        return best_list[0][0], True
-                    return best_value, False
+                #         best_list.append((current_value, epoch, ckpt_name))
+                #         best_list.sort(key=lambda x: -x[0] if is_higher_better else x[0])
+                #         best_list[:] = best_list[:self.hparams.max_save_models]
+                #         return best_list[0][0], True
+                #     return best_value, False
                     
-                # Save models for each metric
-                # self.best_per, per_improved = save_best_model(
-                #     "per", per, self.best_per, self.best_per_list, 
-                #     "best_per", "best_PER", "min_keys", False)
+                # # Save models for each metric
+                # # self.best_per, per_improved = save_best_model(
+                # #     "per", per, self.best_per, self.best_per_list, 
+                # #     "best_per", "best_PER", "min_keys", False)
                 
-                # self.best_mpd_f1, mpd_improved = save_best_model(
-                #     "mpd_f1", mpd_f1, self.best_mpd_f1, self.best_mpd_f1_list,
-                #     "best_mpdf1", "best_mpd_f1", "max_keys", True)
+                # # self.best_mpd_f1, mpd_improved = save_best_model(
+                # #     "mpd_f1", mpd_f1, self.best_mpd_f1, self.best_mpd_f1_list,
+                # #     "best_mpdf1", "best_mpd_f1", "max_keys", True)
                 
-                self.best_per_seq, per_seq_improved = save_best_model(
-                    "per_seq", per_seq, self.best_per_seq, self.best_per_seq_list,
-                    "best_per_seq", "best_PER_seq", "min_keys", False)
+                # self.best_per_seq, per_seq_improved = save_best_model(
+                #     "per_seq", per_seq, self.best_per_seq, self.best_per_seq_list,
+                #     "best_per_seq", "best_PER_seq", "min_keys", False)
                 
-                self.best_mpd_f1_seq, mpd_seq_improved = save_best_model(
-                    "mpd_f1_seq", mpd_f1_seq, self.best_mpd_f1_seq, self.best_mpd_f1_seq_list,
-                    "best_mpd_f1_seq", "best_mpd_f1_seq", "max_keys", True)
+                # self.best_mpd_f1_seq, mpd_seq_improved = save_best_model(
+                #     "mpd_f1_seq", mpd_f1_seq, self.best_mpd_f1_seq, self.best_mpd_f1_seq_list,
+                #     "best_mpd_f1_seq", "best_mpd_f1_seq", "max_keys", True)
                 
-                # improved = per_improved or mpd_improved or per_seq_improved or mpd_seq_improved
-                improved = per_seq_improved or mpd_seq_improved
+                # # improved = per_improved or mpd_improved or per_seq_improved or mpd_seq_improved
+                # improved = per_seq_improved or mpd_seq_improved
 
                 # Early stopping logic: only track best valid loss, do not save checkpoint for valid loss
                 if stage_loss < self.best_valid_loss or len(self.best_valid_loss_list) < 10:

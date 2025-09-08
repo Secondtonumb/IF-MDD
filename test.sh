@@ -28,7 +28,6 @@ nvidia-smi
 # ek_idx=$(( PBS_ARRAY_INDEX % ${#confidence_thresholds[@]} ))
 # confidence_threshold=${confidence_thresholds[$ek_idx]}
 
-
 # # Make a array with PBS_ARRAY_INDEX to assign to different evaluate keys
 
 # python ver5_evaluate.py \

@@ -494,7 +494,6 @@ def mpd_summary(total_wer_details):
         "recall": RECALL,
     }
     
-
 def print_mpd_details(wer_details, mpd_stats, mpd_file):
     
     # OLD metrics
@@ -561,7 +560,6 @@ def print_mpd_details(wer_details, mpd_stats, mpd_file):
                          file=mpd_file)
         print("True Accept: {}, False Rejection: {}, False Accept: {}, True Reject: {}, Corr Diag: {}, Err Diag: {}".format(\
                 det["ta"], det["fr"], det["fa"], det["tr"], det["cor_diag"], det["err_diag"]), file=mpd_file)
-
 
 def mpd_stats(align_c2p, align_c2h, c, p, h):
     """
@@ -630,7 +628,6 @@ def mpd_stats(align_c2p, align_c2h, c, p, h):
         fa += len(align_c2p[j:])
 
     return ta, fr, fa, tr, cor_diag, err_diag
-
 
 def mpd_stats(align_c2p, align_c2h, c, p, h):
     """
@@ -757,8 +754,6 @@ def main(args):
     per_file = open(args.per_file, "w")
     mpd_file = open(args.mpd_file, "w")
     mpd_eval_on_dataset(json_data, mpd_file, per_file)
-
-
 
 
 if __name__ == "__main__":

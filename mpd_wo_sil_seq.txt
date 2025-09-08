@@ -1,0 +1,35 @@
+Joint CTC-Attention MPD results and stats:
+In original annotation: 
+Total Eq: 16, Total Sub: 2, Total Del: 2, Total Ins: 0
+Overall MPD results: 
+True Accept: 15, False Rejection: 1, False Accept: 2, True Rejection: 2, Corr Diag: 0, Err Diag: 2
+Percentages/Counts: TA%/TA: 93.75/15  FR%/FR: 6.25/1  FA%/FA: 50.00/2  TR%/TR: 50.00/2  Cor_diag%/Cor_diag: 0.00/0  Err_diag%/Err_diag: 100.00/2
+Precision: 0.6666666666666666, Recall: 0.5, F1: 0.5714285714285715
+NEW MPD stats: 
+Total Eq: 15, Total Sub: 2, Total Del: 2, Total Ins: 0
+New MPD results: 
+True Accept: 15, False Rejection: 1, False Accept: 2, True Rejection: 2, Correct Diag: 0, Error Diag: 2
+Percentages/Counts: TA%/TA: 93.75/15  FR%/FR: 6.25/1  FA%/FA: 50.00/2  TR%/TR: 50.00/2  Correct_diag%/Correct_diag: 0.00/0  Error_diag%/Error_diag: 100.00/2
+New Precision: 0.6666666666666666, New Recall: 0.5, New F1: 0.5714285714285715
+================================================================================
+/work/gm64/m64000/dataset/l2arctic_release_v5.0/TXHC/wav/arctic_a0098.wav
+Human annotation: Canonical vs Perceived:
+sh ; ae ;   l   ; ay ; k ; eh ; r ; iy ; y ; uw
+=  ; S  ;   D   ; =  ; = ; =  ; = ; =  ; = ; = 
+sh ; ao ; <eps> ; ay ; k ; eh ; r ; iy ; y ; uw
+Model Prediction: Canonical vs Hypothesis:
+sh ; ae ; l ; ay ; k ; eh ; r ; iy ; y ; uw
+=  ; =  ; S ; =  ; = ; S  ; = ; =  ; = ; = 
+sh ; ae ; w ; ay ; k ; ae ; r ; iy ; y ; uw
+True Accept: 7, False Rejection: 1, False Accept: 1, True Reject: 1, Corr Diag: 0, Err Diag: 1
+================================================================================
+/work/gm64/m64000/dataset/l2arctic_release_v5.0/ZHAA/wav/arctic_a0098.wav
+Human annotation: Canonical vs Perceived:
+sh ; ae ; l ; ay ; k ; eh ;   r   ; iy ; y ; uw
+=  ; =  ; = ; =  ; = ; S  ;   D   ; =  ; = ; = 
+sh ; ae ; l ; ay ; k ; er ; <eps> ; iy ; y ; uw
+Model Prediction: Canonical vs Hypothesis:
+sh ; ae ; l ; ay ; k ; eh ; r ; iy ; y ; uw
+=  ; =  ; = ; =  ; = ; S  ; = ; =  ; = ; = 
+sh ; ae ; l ; ay ; k ; ae ; r ; iy ; y ; uw
+True Accept: 8, False Rejection: 0, False Accept: 1, True Reject: 1, Corr Diag: 0, Err Diag: 1

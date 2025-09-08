@@ -1014,16 +1014,16 @@ if __name__ == "__main__":
     )
 
     # Training/validation loop
-    try:
-        asr_brain.fit(
-            asr_brain.hparams.epoch_counter,
-            train_data,
-            valid_data,
-            train_loader_kwargs=hparams["train_dataloader_opts"],
-            valid_loader_kwargs=hparams["valid_dataloader_opts"],
-        )
-    except StopIteration:
-        print("Training stopped early due to no improvement.")
+    # try:
+    #     asr_brain.fit(
+    #         asr_brain.hparams.epoch_counter,
+    #         train_data,
+    #         valid_data,
+    #         train_loader_kwargs=hparams["train_dataloader_opts"],
+    #         valid_loader_kwargs=hparams["valid_dataloader_opts"],
+    #     )
+    # except StopIteration:
+    #     print("Training stopped early due to no improvement.")
     
     # Test
     if hparams.get("evaluate_key", True):

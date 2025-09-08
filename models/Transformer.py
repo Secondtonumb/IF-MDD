@@ -214,7 +214,7 @@ class TransformerMDD(sb.Brain):
             print("   Freezing Encoder and SSL model...")
             
             self.freeze_encoder_and_ssl()
-    
+
     def load_pretrained_components(self, checkpoint_path, components_to_load=None, freeze_loaded=True):
         """
         Load specific components from a pretrained model checkpoint
@@ -228,81 +228,32 @@ class TransformerMDD(sb.Brain):
         """
         if components_to_load is None:
             components_to_load = ['ssl']  # Default: load SSL 
-        pdb.set_trace()
+        
         print(f"\n🔄 Loading pretrained components from: {checkpoint_path}")
         print(f"   Components to load: {components_to_load}")
-        
-        # Load the checkpoint
-        if os.path.isdir(checkpoint_path):
-            # Find the checkpoint file in the directory
-            ckpt_files = [f for f in os.listdir(checkpoint_path) if f.endswith('.ckpt')]
-            if not ckpt_files:
-                raise ValueError(f"No .ckpt files found in {checkpoint_path}")
-            # Use the most recent checkpoint
-            ckpt_files.sort()
-            checkpoint_file = os.path.join(checkpoint_path, ckpt_files[-1])
-            print(f"   Using checkpoint: {ckpt_files[-1]}")
-            # pdb.set_trace()
+        # pdb.set_trace()
+                
+        from speechbrain.utils.parameter_transfer import Pretrainer
 
-        else:
-            checkpoint_file = checkpoint_path
+        pretrainer = Pretrainer(
+            collect_in=self.hparams.pretrained_model_path,      # 把文件收集到这个目录（用软链或拷贝）
+            loadables={
+                "perceived_ssl":     self.modules.perceived_ssl,
+                "model":     self.hparams.model,
+            },
+            paths={
+                # 只写文件名，后面用 default_source 指定“仓库/目录”
+                "perceived_ssl":     "perceived_ssl.ckpt",
+                "model":   "model.ckpt",
+            },
+        )
         
-        # Load checkpoint
-        checkpoint = torch.load(checkpoint_file, map_location=self.device)
+        paths = pretrainer.collect_files(default_source=self.hparams.pretrained_model_path)
         
-        # Extract model state dict
-        if 'model' in checkpoint:
-            pretrained_state = checkpoint['model']
-        else:
-            pretrained_state = checkpoint
-        
-        # Get current model state
-        current_state = self.modules.state_dict()
-        
-        # Component mapping
-        component_mapping = {
-            'ssl': ['perceived_ssl'],
-            'encoder': ['TransASR.encoder', 'TransASR.custom_src_module'],
-            'enc_projection': ['enc'],
-            'ctc_head': ['ctc_lin'],
-            'decoder': ['TransASR.decoder', 'd_out']
-        }
-        pdb.set_trace()
-        # Load specified components
-        loaded_components = []
-        for component in components_to_load:
-            if component not in component_mapping:
-                print(f"   ⚠️  Warning: Unknown component '{component}', skipping...")
-                continue
-                
-            module_prefixes = component_mapping[component]
-            for prefix in module_prefixes:
-                # Find matching keys
-                matching_keys = [k for k in pretrained_state.keys() if k.startswith(prefix)]
-                if not matching_keys:
-                    print(f"   ⚠️  Warning: No parameters found for {prefix} in checkpoint")
-                    continue
-                
-                # Load matching parameters
-                loaded_count = 0
-                for key in matching_keys:
-                    if key in current_state:
-                        try:
-                            current_state[key] = pretrained_state[key]
-                            loaded_count += 1
-                        except Exception as e:
-                            print(f"   ❌ Error loading {key}: {e}")
-                    else:
-                        print(f"   ⚠️  Key {key} not found in current model")
-                
-                if loaded_count > 0:
-                    loaded_components.append(prefix)
-                    print(f"   ✅ Loaded {loaded_count} parameters for {prefix}")
-        pdb.set_trace()
-        # Load the updated state dict
-        self.modules.load_state_dict(current_state, strict=False)
+        pretrainer.load_collected()
         
         # Freeze loaded components if requested
+        # pdb.set_trace()
         if freeze_loaded:
             for component in components_to_load:
                 if component == 'ssl':
@@ -320,7 +271,7 @@ class TransformerMDD(sb.Brain):
                     self.encoder_frozen = True
                     print("   🔒 Encoder frozen")
                     
-                elif component == 'enc_projection':
+                elif component == 'enc':
                     if hasattr(self.modules, 'enc'):
                         for param in self.modules.enc.parameters():
                             param.requires_grad = False
@@ -330,9 +281,6 @@ class TransformerMDD(sb.Brain):
                     for param in self.modules.ctc_lin.parameters():
                         param.requires_grad = False
                     print("   🔒 CTC head frozen")
-        pdb.set_trace()
-        print(f"   ✅ Successfully loaded components: {loaded_components}")
-        return loaded_components
     
     def load_from_checkpoint_manual(self, checkpoint_path, ssl_only=False, encoder_only=False, 
                                   freeze_ssl=True, freeze_encoder=True):
@@ -538,15 +486,26 @@ class TransformerMDD(sb.Brain):
         hyps = None
         attn_map = None
 
+        feats_enc = self.modules.enc(feats)
+        
+        # pdb.set_trace()
         if sb.Stage.TRAIN == stage:
             enc_out, hidden, dec_out = self.modules.TransASR(
-                src=feats,
+                src=feats_enc,
                 tgt=targets_bos,
                 wav_len=wav_lens,
                 pad_idx=0, 
             )
             # CTC head
-            h_ctc_feat = self.modules.ctc_lin(enc_out)  # [B, T_s, C]
+            ## feats_enc: the output of SSL encoder + FC
+            ## enc_out: TransformerASR's Encoder's output (Conformer)
+            ctc_head_input = getattr(self.hparams, "ctc_head_input", "enc_out")
+            # pdb.set_trace()
+            if ctc_head_input == "feat_enc":
+                h_ctc_feat = self.modules.ctc_lin(feats_enc)  # [B, T_s, C]
+            elif ctc_head_input == "enc_out":
+                # Using encoder output
+                h_ctc_feat = self.modules.ctc_lin(enc_out)  # [B, T_s, C]
             p_ctc_logits = self.hparams.log_softmax(h_ctc_feat)  # Log probabilities
 
             # seq2seq head
@@ -556,14 +515,26 @@ class TransformerMDD(sb.Brain):
         else:
             with torch.no_grad():
                 enc_out, hidden, dec_out = self.modules.TransASR(
-                    src=feats,
+                    src=feats_enc,
                     tgt=targets_bos,
                     wav_len=wav_lens,
                     pad_idx=0,  # Assuming 0 is the padding index
                 )
-                h_ctc_feat = self.modules.ctc_lin(enc_out)  # [B, T_s, C]
+                # CTC head
+                ## feats_enc: the output of SSL encoder + FC
+                ## enc_out: TransformerASR's Encoder's output (Conformer)
+                ctc_head_input = getattr(self.hparams, "ctc_head_input", "enc_out")
+                # pdb.set_trace()
+                if ctc_head_input == "feat_enc":
+                    h_ctc_feat = self.modules.ctc_lin(feats_enc)  # [B, T_s, C]
+                elif ctc_head_input == "enc_out":
+                    # Using encoder output
+                    h_ctc_feat = self.modules.ctc_lin(enc_out)  # [B, T_s, C]
                 p_ctc_logits = self.hparams.log_softmax(h_ctc_feat)  # Log probabilities
 
+                # seq2seq head
+                h_seq_feat = self.modules.d_out(dec_out)  # [B, T_p+1, C]
+                p_seq_logits = self.hparams.log_softmax(h_seq_feat)  # Log probabilities
                 # seq2seq head
                 h_seq_feat = self.modules.d_out(dec_out)  # [B, T_p+1, C]
                 p_seq_logits = self.hparams.log_softmax(h_seq_feat)  # Log probabilities
@@ -573,10 +544,19 @@ class TransformerMDD(sb.Brain):
         
             valid_search_interval = self.hparams.valid_search_interval
             if current_epoch % valid_search_interval == 0:
-                hyps, top_lengths, top_scores, top_log_probs = self.hparams.valid_search(enc_out.detach(), wav_lens)
+                # hyps, top_lengths, top_scores, top_log_probs = self.hparams.valid_search(enc_out.detach(), wav_lens)
+                if ctc_head_input == "feat_enc":
+                    hyps, top_lengths, top_scores, top_log_probs = self.hparams.valid_search(feats_enc.detach(), wav_lens)
+                elif ctc_head_input == "enc_out":
+                    hyps, top_lengths, top_scores, top_log_probs = self.hparams.valid_search(enc_out.detach(), wav_lens)
                 attn_map = None
+                # pdb.set_trace()
             if stage == sb.Stage.TEST:
-                hyps, top_lengths, top_scores, top_log_probs = self.hparams.test_search(enc_out.detach(), wav_lens)
+                # hyps, top_lengths, top_scores, top_log_probs = self.hparams.test_search(enc_out.detach(), wav_lens)
+                if ctc_head_input == "feat_enc":
+                    hyps, top_lengths, top_scores, top_log_probs = self.hparams.test_search(feats_enc.detach(), wav_lens)
+                elif ctc_head_input == "enc_out":
+                    hyps, top_lengths, top_scores, top_log_probs = self.hparams.test_search(enc_out.detach(), wav_lens)
                 attn_map = None
         return {
             "p_ctc_feat": p_ctc_logits,  # [B, T_s, C]
@@ -756,13 +736,6 @@ class TransformerMDD(sb.Brain):
         # Load latest checkpoint to resume training if interrupted
         ## NOTE: make sure to use the "best" model to continual training
         ## so we set the `min_key` argument
-        if self.checkpointer is not None:
-            # TODO: support recover best on PER or mpd_f1 or averaged model of best PER and mpd_f1
-            self.checkpointer.recover_if_possible(
-                min_key="PER",
-                # max_key="mpd_f1",
-            )
-        
         # Load pretrained components if specified
         if getattr(self.hparams, 'load_pretrained_components', False):
             pretrained_path = getattr(self.hparams, 'pretrained_model_path', '')
@@ -783,6 +756,13 @@ class TransformerMDD(sb.Brain):
                 print(f"⚠️  Pretrained model path not found: {pretrained_path}")
                 print("   Continuing with random initialization...")
 
+        elif self.checkpointer is not None:
+            # TODO: support recover best on PER or mpd_f1 or averaged model of best PER and mpd_f1
+            self.checkpointer.recover_if_possible(
+                min_key="PER",
+                # max_key="mpd_f1",
+            )
+        
     def on_stage_end(self, stage, stage_loss, epoch):
         current_stage = self.hparams.epoch_counter.current
         """Gets called at the end of a epoch."""
@@ -829,50 +809,23 @@ class TransformerMDD(sb.Brain):
                     valid_stats=valid_stats,
                 )                # Save best 3 models for each metric using simplified approach
                 improved = False
-                
-                def save_best_model(metric_name, current_value, best_value, best_list, ckpt_prefix, 
-                                meta_key, key_type, is_higher_better):
-                    should_save = (current_value > best_value if is_higher_better else current_value < best_value) or len(best_list) < 3
-                    
-                    if should_save:
-                        ckpt_name = f"{ckpt_prefix}_{epoch:03d}_{current_value:.4f}.ckpt"
-                        meta = {"epoch": epoch, metric_name: current_value, meta_key: current_value}
-                        if metric_name.endswith("_seq"):
-                            meta.update({"PER_seq": per_seq, "mpd_f1_seq": mpd_f1_seq})
-                        else:
-                            meta.update({"PER": per, "mpd_f1": mpd_f1})
-                        
-                        self.checkpointer.save_and_keep_only(
-                            meta=meta,
-                            name=ckpt_name,
-                            num_to_keep=5,
-                            **{key_type: [meta_key]}
-                        )
-                        
-                        best_list.append((current_value, epoch, ckpt_name))
-                        best_list.sort(key=lambda x: -x[0] if is_higher_better else x[0])
-                        best_list[:] = best_list[:3]
-                        return best_list[0][0], True
-                    return best_value, False
-                    
-                # Save models for each metric
-                self.best_per, per_improved = save_best_model(
-                    "per", per, self.best_per, self.best_per_list, 
-                    "best_per", "best_PER", "min_keys", False)
-                
-                self.best_mpd_f1, mpd_improved = save_best_model(
-                    "mpd_f1", mpd_f1, self.best_mpd_f1, self.best_mpd_f1_list,
-                    "best_mpdf1", "best_mpd_f1", "max_keys", True)
-                
-                self.best_per_seq, per_seq_improved = save_best_model(
-                    "per_seq", per_seq, self.best_per_seq, self.best_per_seq_list,
-                    "best_per_seq", "best_PER_seq", "min_keys", False)
-                
-                self.best_mpd_f1_seq, mpd_seq_improved = save_best_model(
-                    "mpd_f1_seq", mpd_f1_seq, self.best_mpd_f1_seq, self.best_mpd_f1_seq_list,
-                    "best_mpd_f1_seq", "best_mpd_f1_seq", "max_keys", True)
-                
-                improved = per_improved or mpd_improved or per_seq_improved or mpd_seq_improved
+
+                ckpt_name = f"{epoch:03d}_PER_{per:.4f}_PER_seq_{per_seq:.4f}_F1_{mpd_f1:.4f}_F1_seq_{mpd_f1_seq:.4f}.ckpt"
+
+                self.checkpointer.save_and_keep_only(
+                    meta={
+                        "epoch": epoch,
+                        "PER": per,
+                        "mpd_f1": mpd_f1,
+                        "PER_seq": per_seq,
+                        "mpd_f1_seq": mpd_f1_seq
+                    },
+                    name=ckpt_name,
+                    num_to_keep=3,
+                    importance_keys=[
+                        lambda ckpt: (-ckpt.meta["PER_seq"], ckpt.meta["mpd_f1_seq"], -ckpt.meta["PER"], ckpt.meta["mpd_f1"]),  # lower PER, lower PER_seq, higher mpd_f1, lower mpd_f1_seq
+                    ]
+                )
 
                 # Early stopping logic: only track best valid loss, do not save checkpoint for valid loss
                 if stage_loss < self.best_valid_loss or len(self.best_valid_loss_list) < 10:
@@ -1033,6 +986,7 @@ class TransformerMDD(sb.Brain):
             # normalize the loss by gradient_accumulation and scale for mixed precision
             self.scaler.scale(loss / self.hparams.gradient_accumulation).backward()
             self.scaler.unscale_(self.adam_optimizer)
+            # pdb.set_trace()
             if not self.ssl_frozen:
                 self.scaler.unscale_(self.pretrained_opt_class)
             
@@ -1109,6 +1063,7 @@ class TransformerMDD_dual_ctc(TransformerMDD):
                 wav_len=wav_lens,
                 pad_idx=0, 
             )
+            
             # CTC head
             h_ctc_feat = self.modules.ctc_lin_after_enc(enc_out)  # [B, T_s, C]
             p_ctc_logits = self.hparams.log_softmax(h_ctc_feat)  # Log probabilities

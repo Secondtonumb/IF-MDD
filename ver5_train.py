@@ -27,7 +27,9 @@ import time
 import torchaudio
 from speechbrain.inference.text import GraphemeToPhoneme
 from models.phn_mono_ssl_model import PhnMonoSSLModel,PhnMonoSSLModel_misproBCE
+from models.phn_mono_ssl_model import PhnMonoSSLModel_DualCTCHead
 from models.phn_mono_ssl_model import PhnMonoSSLModel_RVQforCano
+
 # from models.phn_mono_ssl_model import PhnMonoSSLModel_withcanoPhnEmb_HMA_CTC, HMA_attn_ctc_to_canonical
 # from models.phn_mono_ssl_model import PhnMonoSSLModel_withcanoPhnEmb_MHA_Guided_Attention_CTC
 # from models.phn_mono_ssl_model import HMA_attn_ctc_to_mispro
@@ -914,6 +916,8 @@ if __name__ == "__main__":
         asr_brain_class = TransformerMDD_dual_ctc
     elif hparams["feature_fusion"] == "PhnMonoSSL":
         asr_brain_class = PhnMonoSSLModel
+    elif hparams["feature_fusion"] == "PhnMonoSSL_DualCTCHead":
+        asr_brain_class = PhnMonoSSLModel_DualCTCHead
     elif hparams["feature_fusion"] == "PhnMonoSSL_RVQforCano":
         asr_brain_class = PhnMonoSSLModel_RVQforCano
     elif hparams["feature_fusion"] == "mono_misproBCE":
