@@ -2002,3 +2002,116 @@ class PhnMonoSSLModel_DualCTCHead(PhnMonoSSLModel):
                     "MPD results and stats written to file",
                     self.hparams.mpd_file,
                 )
+                
+class PhnMonoSSLModel_RVQforBoth(PhnMonoSSLModel_DualCTCHead):
+    def compute_forward(self, batch, stage):
+        "Given an input batch it computes the phoneme probabilities."
+        batch = batch.to(self.device)
+        wavs, wav_lens = batch.sig
+        # phns_bos, _ = batch.phn_encoded_bos
+
+        if stage == sb.Stage.TRAIN:
+            if hasattr(self.hparams, "augmentation"):
+                wavs = self.hparams.augmentation(wavs)
+
+        # some wav2vec models (e.g. large-lv60) needs attention_mask
+        # if self.modules.perceived_ssl.feature_extractor.return_attention_mask:
+        #     attn_mask = make_attn_mask(wavs, wav_lens)
+        # else:
+        #     attn_mask = None
+
+        feats = self.modules.perceived_ssl(wavs)
+        if feats.dim() == 4:
+            feats = feats[self.hparams.preceived_ssl_emb_layer]
+
+        x = self.modules.enc(feats)
+        if getattr(self.modules, "ConformerEncoder", None) is not None:
+            from speechbrain.nnet.attention import RelPosEncXL, RelPosMHAXL, RoPEMHA 
+            pos_emb = RelPosEncXL(emb_dim=self.hparams.dnn_neurons)(x).to(self.device)
+            # import pdb; pdb.set_trace()
+            x, _ = self.modules.ConformerEncoder(x, pos_embs=pos_emb)
+        # Get RVQ if exists
+        if getattr(self.modules, "RVQ", None) is not None:
+            # Expect [B, C, T]
+            x = x.transpose(1, 2)  # [B, T, C] -> [B, C, T]
+            discrete_embeddings, codes, latents, commitment_loss, codebook_loss = self.modules.RVQ(x)
+            # Use discrete representations for both perceived and canonical phoneme CTC
+            perc_x = discrete_embeddings.transpose(1, 2)  # [B, C, T] -> [B, T, C]
+            cano_x = discrete_embeddings.transpose(1, 2)  # [B, C, T] -> [B, T, C]
+            
+        # else:
+        # output layer for ctc log-probabilities
+        logits = self.modules.ctc_lin(perc_x)
+        p_ctc = self.hparams.log_softmax(logits) # (B, T, C)
+        # Canonical 
+        cano_logits = self.modules.ctc_cano_lin(cano_x)
+        p_cano_ctc = self.hparams.log_softmax(cano_logits) # (
+        
+        if self.modules.RVQ is not None:
+            return p_ctc, p_cano_ctc, wav_lens, commitment_loss, codebook_loss
+        return p_ctc, wav_lens
+
+    def compute_objectives(self, predictions, batch, stage):
+        "Given the network predictions and targets computed the NLL loss."
+        if self.modules.RVQ is not None:
+            p_ctc, p_cano_ctc, wav_lens, commitment_loss, codebook_loss = predictions
+        else:
+            p_ctc, wav_lens = predictions
+        ids = batch.id
+        targets, target_lens = batch.phn_encoded_target
+        
+        canonicals, canonical_lens = batch.phn_encoded_canonical
+        perceiveds, perceived_lens = batch.phn_encoded_perceived
+
+        loss_ctc = self.hparams.ctc_cost(p_ctc, targets, wav_lens, target_lens)
+        loss_cano_ctc = self.hparams.ctc_cost(p_cano_ctc, canonicals, wav_lens, canonical_lens) 
+        
+        if self.modules.RVQ is not None:
+            loss = loss_ctc + loss_cano_ctc + (commitment_loss + codebook_loss)
+        else:
+            loss = loss_ctc
+
+        # Record losses for posterity
+        if stage != sb.Stage.TRAIN:
+            # Note: sb.decoders.ctc_greedy_decode will also remove padded tokens
+            # that is, it return a list of list with different lengths
+            sequence = sb.decoders.ctc_greedy_decode(
+                p_ctc, wav_lens, blank_id=self.hparams.blank_index
+            )
+            sequence_cano = sb.decoders.ctc_greedy_decode(
+                p_cano_ctc, wav_lens, blank_id=self.hparams.blank_index
+            )
+            
+            self.ctc_metrics.append(ids, p_ctc, targets, wav_lens, target_lens)
+            self.ctc_cano_metrics.append(ids, p_cano_ctc, canonicals, wav_lens, canonical_lens)
+            
+            self.per_metrics.append(
+                ids=ids,
+                predict=sequence,
+                target=targets,
+                predict_len=None,
+                target_len=target_lens,
+                ind2lab=self.label_encoder.decode_ndim,
+            )
+            
+            self.per_cano_metrics.append(
+                ids=ids,
+                predict=sequence_cano,
+                target=canonicals,
+                predict_len=None,
+                target_len=canonical_lens,
+                ind2lab=self.label_encoder.decode_ndim,
+            )
+            
+            self.mpd_metrics.append(
+                ids=ids,
+                predict=sequence,
+                canonical=canonicals,
+                perceived=perceiveds,
+                predict_len=None,
+                canonical_len=canonical_lens,
+                perceived_len=perceived_lens,
+                ind2lab=self.label_encoder.decode_ndim,
+            )
+
+        return loss

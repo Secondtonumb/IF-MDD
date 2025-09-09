@@ -33,6 +33,7 @@ from speechbrain.decoders.utils import (
 
 import torch.nn as nn
 import torch.nn.functional as F
+import numpy as np
 
 from utils.layers.utils import make_pad_mask
 from utils.plot.plot_attn import plot_attention
@@ -778,64 +779,73 @@ class TransformerMDD_TP_encdec_errclass(sb.Brain):
                 # seq2seq head
                 h_seq_feat = self.modules.d_out(dec_out)  # [B, T_p+1, C]
                 p_seq_logits = self.hparams.log_softmax(h_seq_feat)  # Log probabilities
-                
-                hyps = None
+
+                hyps = p_seq_logits.argmax(dim=-1)  # [B, T_p+1] # no masking
+                from speechbrain.utils.data_utils import undo_padding
+                # List with no padding
+                hyps = undo_padding(hyps, target_lens_bos)
                 attn_map = None
         
             valid_search_interval = self.hparams.valid_search_interval
             plot_interval = self.hparams.plot_attention_interval
-            if current_epoch % valid_search_interval == 0:
+            # Apply Search only for AR mode
+            if current_epoch % valid_search_interval == 0 and self.hparams.valid_decode_mode == "AR":
                 hyps, top_lengths, top_scores, top_log_probs = self.hparams.valid_search(enc_out.detach(), wav_lens)
                 attn_map = None
-                if self.hparams.plot_attention and (current_epoch % plot_interval == 0):
-                    # Plot the last layer attention
-                    import random
-                    select_id = random.choice(range(len(batch.id)))
-                    if locals().get('fuse_attn', None) is not None:
-                        for index, (attn, c_id) in enumerate(zip(fuse_attn[-1], batch.id)):
-                            if index != select_id:
-                                continue
-                            from pathlib import Path
-                            # 
-                            if len(attn.shape) == 2:
-                                attn = attn.unsqueeze(0)  # Add batch dimension [n, T_p, T_s]
-                            c_id = "_".join(c_id.split("/")[-3:])
-
-                            output_dir = Path(self.hparams.valid_attention_plot_dir) / f"{current_epoch:03d}"
-                            plot_attention(attn.cpu(), self.hparams.nhead, c_id, output_dir)
-                    
-                    if locals().get('fuse_attn_dec', None) is not None:
-                        for index, (attn, c_id) in enumerate(zip(fuse_attn_dec[-1], batch.id)):
-                            if index != select_id:
-                                continue
-                            from pathlib import Path
-                            # 
-                            if len(attn.shape) == 2:
-                                attn = attn.unsqueeze(0)  # Add batch dimension [n, T_p, T_s]
-                            c_id = "_".join(c_id.split("/")[-3:])
-                            output_dir = Path(self.hparams.valid_attention_plot_dir) / f"{current_epoch:03d}_dec"
-                            plot_attention(attn.cpu(), self.hparams.nhead, c_id, output_dir)
-
-
-            if stage == sb.Stage.TEST:
+            
+            if stage == sb.Stage.TEST and self.hparams.test_decode_mode == "AR":
                 hyps, top_lengths, top_scores, top_log_probs = self.hparams.test_search(enc_out.detach(), wav_lens)
                 attn_map = None
-                if self.hparams.plot_attention:
-                    # Plot attention map
-                    if locals().get('fuse_attn', None) is None:
-                        for attn, c_id in zip(fuse_attn[-1], batch.id):
-                            from pathlib import Path
-                            if len(attn.shape) == 2:
-                                attn = attn.unsqueeze(0)  # Add batch dimension [n, T_p, T_s]
-                            c_id = "_".join(c_id.split("/")[-3:])
-                            plot_attention(attn.cpu(), self.hparams.nhead, c_id, self.hparams.test_attention_plot_dir)
-                    if locals().get('fuse_attn_dec', None) is not None:
-                        for attn, c_id in zip(fuse_attn_dec[-1], batch.id):
-                            from pathlib import Path
-                            if len(attn.shape) == 2:
-                                attn = attn.unsqueeze(0)  # Add batch dimension [n, T_p, T_s]
-                            c_id = "_".join(c_id.split("/")[-3:])
-                            plot_attention(attn.cpu(), self.hparams.nhead, c_id, self.hparams.test_attention_plot_dir+"_dec")
+
+            if self.hparams.plot_attention and (current_epoch % plot_interval == 0):
+                # Plot the last layer attention
+                import random
+                select_id = random.choice(range(len(batch.id)))
+                if locals().get('fuse_attn', None) is not None:
+                    for index, (attn, c_id) in enumerate(zip(fuse_attn[-1], batch.id)):
+                        if index != select_id:
+                            continue
+                        from pathlib import Path
+                        # 
+                        if len(attn.shape) == 2:
+                            attn = attn.unsqueeze(0)  # Add batch dimension [n, T_p, T_s]
+                        c_id = "_".join(c_id.split("/")[-3:])
+
+                        output_dir = Path(self.hparams.valid_attention_plot_dir) / f"{current_epoch:03d}"
+                        plot_attention(attn.cpu(), self.hparams.nhead, c_id, output_dir)
+                
+                if locals().get('fuse_attn_dec', None) is not None:
+                    for index, (attn, c_id) in enumerate(zip(fuse_attn_dec[-1], batch.id)):
+                        if index != select_id:
+                            continue
+                        from pathlib import Path
+                        # 
+                        if len(attn.shape) == 2:
+                            attn = attn.unsqueeze(0)  # Add batch dimension [n, T_p, T_s]
+                        c_id = "_".join(c_id.split("/")[-3:])
+                        output_dir = Path(self.hparams.valid_attention_plot_dir) / f"{current_epoch:03d}_dec"
+                        plot_attention(attn.cpu(), self.hparams.nhead, c_id, output_dir)
+
+            # if stage == sb.Stage.TEST and self.hparams.test_decode_mode == "AR":
+            #     hyps, top_lengths, top_scores, top_log_probs = self.hparams.test_search(enc_out.detach(), wav_lens)
+            #     attn_map = None
+
+            # if self.hparams.plot_attention:
+            #     # Plot attention map
+            #     if locals().get('fuse_attn', None) is None:
+            #         for attn, c_id in zip(fuse_attn[-1], batch.id):
+            #             from pathlib import Path
+            #             if len(attn.shape) == 2:
+            #                 attn = attn.unsqueeze(0)  # Add batch dimension [n, T_p, T_s]
+            #             c_id = "_".join(c_id.split("/")[-3:])
+            #             plot_attention(attn.cpu(), self.hparams.nhead, c_id, self.hparams.test_attention_plot_dir)
+            #     if locals().get('fuse_attn_dec', None) is not None:
+            #         for attn, c_id in zip(fuse_attn_dec[-1], batch.id):
+            #             from pathlib import Path
+            #             if len(attn.shape) == 2:
+            #                 attn = attn.unsqueeze(0)  # Add batch dimension [n, T_p, T_s]
+            #             c_id = "_".join(c_id.split("/")[-3:])
+            #             plot_attention(attn.cpu(), self.hparams.nhead, c_id, self.hparams.test_attention_plot_dir+"_dec")
 
         return {
             "p_ctc_feat": p_ctc_logits,  # [B, T_s, C]
@@ -867,6 +877,7 @@ class TransformerMDD_TP_encdec_errclass(sb.Brain):
         p_dec_out = predictions["p_dec_out"]
         feats = predictions["feats"]
         attn_map = predictions["attn_map"]
+        # pdb.set_trace()
         hyps = predictions.get("hyps", [])  # [B, T_p+1] or None if not applicable
         # p_mispro_logits = predictions["p_mispro_logits"]  # [B, T_c, C]
         p_mispro_bin_logits = predictions["p_mispro_bin_logits"]  # [B, T_c, 1]
@@ -879,7 +890,7 @@ class TransformerMDD_TP_encdec_errclass(sb.Brain):
         fuse_attn = predictions["fuse_attn"]  # [B, T_c, T_s] or similar
         fuse_attn_dec = predictions["fuse_attn_dec"]  # [B, T_c, T_p] or similar
         enc_out = predictions["enc_out"]  # [B, T_s, D]
-        dec_out = predictions["dec_out"]  # [B, T_p+1,
+        dec_out = predictions["dec_out"]  # [B, T_p+1, D]
         Cano_emb = predictions["Cano_emb"]  # [B, T_c, D]
         top_log_probs = predictions["top_log_probs"]
         top_lengths = predictions["top_lengths"]
@@ -1056,6 +1067,7 @@ class TransformerMDD_TP_encdec_errclass(sb.Brain):
                 elif self.hparams.ctc_head_target == "canonical":
                     self.ctc_metrics.append(ids, p_ctc_feat, canonicals, wav_lens, canonical_lens)
 
+                # Using Joint Decoder's confidence on each frame to do threshold-based masking
                 if self.hparams.allow_confidence_thresholding:
                     mask = (top_log_probs < self.hparams.confidence_threshold).float()
                     # replace mask phn inx with err index
@@ -1065,6 +1077,19 @@ class TransformerMDD_TP_encdec_errclass(sb.Brain):
                     mask = mask[:, :sequence_decoder_out_confience_thre.shape[1]]
                     sequence_decoder_out_confience_thre[mask.bool()] = err_inx
                     sequence_decoder_out = sequence_decoder_out_confience_thre.cpu().numpy()
+                
+                # ---- 插入：使用 mispro_class 对 sequence_decoder_out (hyps) 做修改 ----
+                # pdb.set_trace()
+                if self.hparams.apply_mispro_to_hyps == True:
+                    # pdb.set_trace()
+                    sequence_decoder_out = self._apply_mispro_to_hyps(sequence_decoder_out, p_mispro_cls_logits, mode="default")
+                    # sequence_decoder_out = self._apply_mispro_to_hyps(hyps, p_mispro_cls_logits, mode="ignore_sub")
+                    # pdb.set_trace()
+                    # pdb.set_trace()
+                    # sequence_decoder_out = self._apply_mispro_to_hyps(canonicals, p_mispro_cls_logits, mode="default")
+                # pdb.set_trace()
+                # pdb.set_trace()
+                # ------------------------------------------------------------------
 
                 if self.hparams.decoder_target == "perceived":
                     self.seq_metrics.append(ids, log_probabilities=p_dec_out, targets=perceiveds_eos, length=perceived_lens_eos)
@@ -1275,6 +1300,10 @@ class TransformerMDD_TP_encdec_errclass(sb.Brain):
                 mpd_f1 = self.mpd_metrics.summarize("mpd_f1")
                 per_seq = self.per_metrics_seq.summarize("error_rate")
                 mpd_f1_seq = self.mpd_metrics_seq.summarize("mpd_f1")
+
+                mispro_loss = self.mispro_metrics.summarize("average")
+                mispro_loss_cls = self.mispro_metrics_cls.summarize("average")
+                
                 current_epoch = self.hparams.epoch_counter.current
                 valid_search_interval = self.hparams.valid_search_interval
                 # Log stats
@@ -1442,6 +1471,7 @@ class TransformerMDD_TP_encdec_errclass(sb.Brain):
                 )
             # pdb.set_trace()
             # if not files for joint decoding, create files
+
             if not hasattr(self.hparams, 'per_seq_file'):
                 self.hparams.per_seq_file = self.hparams.per_file.replace(".txt", "_seq.txt")
             with open(self.hparams.per_seq_file, "w") as w:
@@ -1573,3 +1603,75 @@ class TransformerMDD_TP_encdec_errclass(sb.Brain):
                 self.adam_optimizer.zero_grad()    
 
         return loss.detach().cpu()
+
+    def _apply_mispro_to_hyps(self, sequence_decoder_out, p_mispro_cls_logits, mode):
+        """Apply mispronunciation class predictions to sequence_decoder_out.
+
+        Rules:
+          - Substitution (1): replace token with err
+          - Deletion (2): remove token
+          - Insertion (3): insert an err token
+        Accepts sequence_decoder_out as list/np.array/torch.tensor and returns list[list[int]].
+        """
+        # If no predictions provided, return input unchanged
+        if p_mispro_cls_logits is None:
+            return sequence_decoder_out
+
+        err_inx = self.label_encoder.lab2ind.get("err", None)
+        if err_inx is None:
+            return sequence_decoder_out
+
+        # helper: convert various types to list[list[int]]
+        def _to_list_of_lists_local(obj):
+            if isinstance(obj, list):
+                if len(obj) > 0 and isinstance(obj[0], (list, tuple)):
+                    return [list(x) for x in obj]
+                return [list(obj)]
+            if isinstance(obj, np.ndarray):
+                if obj.ndim == 1:
+                    return [obj.tolist()]
+                return [row.tolist() for row in obj]
+            if torch.is_tensor(obj):
+                if obj.dim() == 1:
+                    return [obj.cpu().tolist()]
+                return [row.cpu().tolist() for row in obj]
+            # fallback
+            return [list(obj)]
+
+        dec_list_local = _to_list_of_lists_local(sequence_decoder_out)
+        mispro_pred = p_mispro_cls_logits.argmax(-1).cpu().tolist()  # [B, T_c]
+
+        new_dec_out = []
+        for b, seq_row in enumerate(dec_list_local):
+            preds_b = mispro_pred[b] if b < len(mispro_pred) else []
+            out_row = []
+            min_len = min(len(seq_row), len(preds_b))
+            # iterate aligned portion
+            for i in range(min_len):
+                cls = int(preds_b[i])
+                if cls == 0:  # Correct
+                    out_row.append(seq_row[i])
+                elif cls == 1:  # Substitution -> replace with err
+                    if mode == "default":
+                        out_row.append(err_inx)
+                    elif mode == "ignore_sub":
+                        # Use original sub as diagnosis result
+                        out_row.append(seq_row[i])
+                elif cls == 2:  # Deletion -> skip this token
+                    continue
+                elif cls == 3:  # Insertion -> insert an err here
+                    out_row.append(err_inx)
+                else:
+                    out_row.append(seq_row[i])
+            # append any remaining tokens in seq_row beyond preds
+            if len(seq_row) > min_len:
+                out_row.extend(seq_row[min_len:])
+            # if preds are longer than seq_row, handle insert-only preds
+            if len(preds_b) > min_len:
+                for j in range(min_len, len(preds_b)):
+                    cls = int(preds_b[j])
+                    if cls == 3:
+                        out_row.append(err_inx)
+            new_dec_out.append(out_row)
+
+        return new_dec_out
