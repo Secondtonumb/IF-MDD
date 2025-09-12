@@ -31,6 +31,7 @@ from speechbrain.decoders.utils import (
     inflate_tensor,
     mask_by_condition,
 )
+from speechbrain.dataio.dataio import length_to_mask
 
 import torch.nn as nn
 import torch.nn.functional as F
@@ -90,21 +91,6 @@ class TransformerMDD_TP_encdec_gating(sb.Brain):
         self.per_history = []
         self.f1_history = []
 
-        # ---- Optional mispro -> sequence integration hyperparams ----
-        # These can be overridden in hparams yaml. If integrate_mispro_into_seq is False, code is skipped.
-        self.integrate_mispro_into_seq = getattr(self.hparams, 'integrate_mispro_into_seq', False)
-        self.mispro_gate_alpha = getattr(self.hparams, 'mispro_gate_alpha', 0.5)
-        self.bias_err_with_mispro = getattr(self.hparams, 'bias_err_with_mispro', True)
-        self.mispro_err_bias = getattr(self.hparams, 'mispro_err_bias', 1.0)
-        # Adapter to project decoder states for gated residual; created lazily to ensure dnn_neurons exists
-        pdb.set_trace()
-        if self.integrate_mispro_into_seq:
-            d_model = getattr(self.hparams, 'dnn_neurons', None)
-            if d_model is not None:
-                self.mispro_dec_adapter = torch.nn.Linear(d_model, d_model, bias=True).to(self.device)
-            else:
-                print('[Warn] dnn_neurons not found; mispro_dec_adapter not initialized.')
-    
     def freeze_encoder_and_ssl(self):
         """Freeze encoder and SSL model parameters"""
         if not self.encoder_frozen:
@@ -271,6 +257,7 @@ class TransformerMDD_TP_encdec_gating(sb.Brain):
         # before = self.modules.perceived_ssl.state_dict()["model.encoder.layers.23.final_layer_norm.weight"]
         
         pretrainer.load_collected()
+        
         # after = self.modules.perceived_ssl.state_dict()["model.encoder.layers.23.final_layer_norm.weight"]
         # print(f"   Before loading: {before}")
         # print(f"   After loading: {after}")
@@ -365,6 +352,12 @@ class TransformerMDD_TP_encdec_gating(sb.Brain):
                             param.requires_grad = False
                     self.encoder_frozen = True
                     print("   🔒 Encoder frozen")
+                elif component == 'decoder':
+                    for param in self.modules.TransASR.decoder.parameters():
+                        param.requires_grad = False
+                    for param in self.modules.d_out.parameters():
+                        param.requires_grad = False
+                    print("   🔒 Decoder frozen")
                     
                 elif component == 'enc':
                     if hasattr(self.modules, 'enc'):
@@ -589,6 +582,9 @@ class TransformerMDD_TP_encdec_gating(sb.Brain):
         "Gets called when a stage (either training, va lidation, test) starts."
         self.ctc_metrics = self.hparams.ctc_stats()
         self.seq_metrics = self.hparams.seqlabel_stats()
+        if getattr(self.hparams, "gate_net", None) is not None:
+            self.seq_metrics_fuse = self.hparams.seqlabel_stats()
+        
         self.mispro_metrics = self.hparams.mispro_stats()
         if hasattr(self.hparams, "augmentation"):
             self.modules.perceived_ssl.model.config.apply_spec_augment = True
@@ -702,57 +698,19 @@ class TransformerMDD_TP_encdec_gating(sb.Brain):
                 # Using encoder output
                 h_ctc_feat = self.modules.ctc_lin(enc_out)  # [B, T_s, C]
             p_ctc_logits = self.hparams.log_softmax(h_ctc_feat)  # Log probabilities
-
-            # seq2seq head
+            
+            # # seq2seq head
+            # Apply linear Gating
             h_seq_feat = self.modules.d_out(dec_out)  # [B, T_p+1, C]
             p_seq_logits = self.hparams.log_softmax(h_seq_feat)  # Log probabilities
-            # ----- Integrate mispro probabilities into seq logits (TRAIN) -----
-            pdb.set_trace()
-            if self.integrate_mispro_into_seq:
-                try:
-                    # h_mispro shape: [B, T_c, 1]; fuse_attn aligns canonical tokens to encoder/decoder memory.
-                    # We first build alignment from canonical positions to decoder output positions using fuse_attn_dec if available; else use identity/truncate.
-                    # Strategy: use average attention over heads from fuse_attn_dec (enc-dec fusion) to map canonical mispro probs -> decoder positions.
-                    with torch.no_grad():
-                        if 'fuse_attn_dec' in locals() and fuse_attn_dec is not None:
-                            # fuse_attn_dec: list[layer] each [B, nhead, T_c, T_p]
-                            attn_for_align = fuse_attn_dec[-1].mean(1)  # [B, T_c, T_p]
-                            # Normalize to avoid numerical issues
-                            attn_for_align = attn_for_align / (attn_for_align.sum(dim=1, keepdim=True) + 1e-8)
-                            mispro_prob = torch.sigmoid(h_mispro.squeeze(-1))  # [B, T_c]
-                            # Project mispro to decoder positions
-                            mispro_on_dec = torch.bmm(mispro_prob.unsqueeze(1), attn_for_align).squeeze(1)  # [B, T_p]
-                        else:
-                            # Fallback: truncate or pad to decoder length (excluding final eos)
-                            mispro_prob = torch.sigmoid(h_mispro.squeeze(-1))  # [B, T_c]
-                            T_p = h_seq_feat.shape[1] - 1  # exclude final eos for alignment
-                            mispro_on_dec = torch.zeros(mispro_prob.size(0), T_p, device=mispro_prob.device)
-                            trunc = min(T_p, mispro_prob.size(1))
-                            mispro_on_dec[:, :trunc] = mispro_prob[:, :trunc]
-                    # Build gate values g in [0,1]
-                    g = mispro_on_dec.unsqueeze(-1)  # [B, T_p, 1]
-                    # Exclude BOS (position 0) gating lightly: shift
-                    # (h_seq_feat includes BOS at pos0 and EOS at end). We apply gating to middle tokens 1..T_p
-                    token_slice = slice(1, -1)
-                    if not hasattr(self, 'mispro_dec_adapter'):
-                        self.mispro_dec_adapter = torch.nn.Linear(h_seq_feat.size(-1), h_seq_feat.size(-1), bias=True).to(h_seq_feat.device)
-                    dec_proj = self.mispro_dec_adapter(dec_out[:, token_slice, :])  # [B, T_p-? , D]
-                    # Residual modulation: h' = h + alpha * g * dec_proj
-                    # Align sizes: g for sequence positions except BOS/EOS
-                    g_mid = g[:, :dec_proj.size(1), :]
-                    h_seq_feat[:, token_slice, :] = h_seq_feat[:, token_slice, :] + self.mispro_gate_alpha * g_mid * dec_proj
-                    # Optional: add bias for 'err' token before softmax
-                    if self.bias_err_with_mispro:
-                        err_inx = self.label_encoder.lab2ind.get('err', None)
-                        if err_inx is not None and err_inx < h_seq_feat.size(-1):
-                            # Expand mispro_on_dec to match slice length
-                            err_bias = self.mispro_err_bias * g_mid.squeeze(-1)  # [B, T_mid]
-                            h_seq_feat[:, token_slice, err_inx] = h_seq_feat[:, token_slice, err_inx] + err_bias
-                    # Recompute logits & log-softmax after modulation / bias
-                    p_seq_logits = self.hparams.log_softmax(h_seq_feat)
-                except Exception as e:
-                    if torch.rand(1).item() < 0.01:
-                        print(f'[mispro-integrate][train] Warning: {e}')
+            # pdb.set_trace()
+            if getattr(self.modules, "gate_net", None) is not None:
+                # pdb.set_trace()
+                # fuse_feat [B, T_c, D], h_seq_feat [B, T_p+1, D] as targeting with BOS
+                fuse_logits = self.modules.gate_net(h_mispro, h_seq_feat[:, 1:, :])  # [B, T_c, D]
+                fuse_logits = torch.cat((h_seq_feat[:, 0, :].unsqueeze(1), fuse_logits), dim=1)
+                p_fuse = torch.log_softmax(fuse_logits, dim=-1)
+
 
         else:
             with torch.no_grad():
@@ -822,47 +780,30 @@ class TransformerMDD_TP_encdec_gating(sb.Brain):
                     h_ctc_feat = self.modules.ctc_lin(enc_out)  # [B, T_s, C]
                 p_ctc_logits = self.hparams.log_softmax(h_ctc_feat)  # Log probabilities
 
-                # seq2seq head
-                h_seq_feat = self.modules.d_out(dec_out)  # [B, T_p+1, C]
-                p_seq_logits = self.hparams.log_softmax(h_seq_feat)  # Log probabilities
+                # Apply gating
+                abs_len_cano = torch.round(canonical_lens * Cano_emb.shape[1])
+                key_padding_mask = ~length_to_mask(abs_len_cano).bool()  # [B, T_c]
 
-                # ----- Integrate mispro probabilities into seq logits (EVAL) -----
-                if self.integrate_mispro_into_seq:
-                    try:
-                        with torch.no_grad():
-                            if 'fuse_attn_dec' in locals() and fuse_attn_dec is not None:
-                                attn_for_align = fuse_attn_dec[-1].mean(1)  # [B, T_c, T_p]
-                                attn_for_align = attn_for_align / (attn_for_align.sum(dim=1, keepdim=True) + 1e-8)
-                                mispro_prob = torch.sigmoid(h_mispro.squeeze(-1))  # [B, T_c]
-                                mispro_on_dec = torch.bmm(mispro_prob.unsqueeze(1), attn_for_align).squeeze(1)  # [B, T_p]
-                            else:
-                                mispro_prob = torch.sigmoid(h_mispro.squeeze(-1))
-                                T_p = h_seq_feat.shape[1] - 1
-                                mispro_on_dec = torch.zeros(mispro_prob.size(0), T_p, device=mispro_prob.device)
-                                trunc = min(T_p, mispro_prob.size(1))
-                                mispro_on_dec[:, :trunc] = mispro_prob[:, :trunc]
-                        token_slice = slice(1, -1)
-                        if not hasattr(self, 'mispro_dec_adapter'):
-                            self.mispro_dec_adapter = torch.nn.Linear(h_seq_feat.size(-1), h_seq_feat.size(-1), bias=True).to(h_seq_feat.device)
-                        dec_proj = self.mispro_dec_adapter(dec_out[:, token_slice, :])
-                        g_mid = mispro_on_dec.unsqueeze(-1)[:, :dec_proj.size(1), :]
-                        h_seq_feat[:, token_slice, :] = h_seq_feat[:, token_slice, :] + self.mispro_gate_alpha * g_mid * dec_proj
-                        if self.bias_err_with_mispro:
-                            err_inx = self.label_encoder.lab2ind.get('err', None)
-                            if err_inx is not None and err_inx < h_seq_feat.size(-1):
-                                err_bias = self.mispro_err_bias * g_mid.squeeze(-1)
-                                h_seq_feat[:, token_slice, err_inx] = h_seq_feat[:, token_slice, err_inx] + err_bias
-                        p_seq_logits = self.hparams.log_softmax(h_seq_feat)
-                    except Exception as e:
-                        if torch.rand(1).item() < 0.01:
-                            print(f'[mispro-integrate][eval] Warning: {e}')
                 
+                h_seq_feat = self.modules.d_out(dec_out)  # [B, T_p+1, C]
+                # seq2seq head
+                p_seq_logits = self.hparams.log_softmax(h_seq_feat)  # Log probabilities
+                
+                if getattr(self.modules, "gate_net", None) is not None:
+                    # pdb.set_trace()
+                    # fuse_feat [B, T_c, D], h_seq_feat [B, T_p+1, D] as targeting with BOS
+                    fuse_logits = self.modules.gate_net(h_mispro, h_seq_feat[:, 1:, :])  # [B, T_c, D]
+                    fuse_logits = torch.cat((h_seq_feat[:, 0, :].unsqueeze(1), fuse_logits), dim=1)
+                    p_fuse = torch.log_softmax(fuse_logits, dim=-1)
+                    
+            # pdb.set_trace()
                 hyps = None
                 attn_map = None
         
             valid_search_interval = self.hparams.valid_search_interval
             if current_epoch % valid_search_interval == 0:
                 hyps, top_lengths, top_scores, top_log_probs = self.hparams.valid_search(enc_out.detach(), wav_lens)
+                
                 attn_map = None
                 if self.hparams.plot_attention:
                     # Plot the last layer attention
@@ -890,7 +831,7 @@ class TransformerMDD_TP_encdec_gating(sb.Brain):
                             c_id = "_".join(c_id.split("/")[-3:])
                             output_dir = Path(self.hparams.valid_attention_plot_dir) / f"{current_epoch:03d}_dec"
                             plot_attention(attn.cpu(), self.hparams.nhead, c_id, output_dir)
-
+            # pdb.set_trace()
 
             if stage == sb.Stage.TEST:
                 hyps, top_lengths, top_scores, top_log_probs = self.hparams.test_search(enc_out.detach(), wav_lens)
@@ -909,11 +850,12 @@ class TransformerMDD_TP_encdec_gating(sb.Brain):
                             if len(attn.shape) == 2:
                                 attn = attn.unsqueeze(0)  # Add batch dimension [n, T_p, T_s]
                             c_id = "_".join(c_id.split("/")[-3:])
-                            plot_attention(attn.cpu(), self.hparams.nhead, c_id, self.hparams.test_attention_plot_dir+"_dec")
-            
+                            plot_attention(attn.cpu(), self.hparams.nhead, c_id, self.hparams.test_attention_plot_dir+"_dec")            
         return {
             "p_ctc_feat": p_ctc_logits,  # [B, T_s, C]
             "p_dec_out": p_seq_logits,  # [B, T_p+1, C]
+            # "p_dec_out": fuse_logits if getattr(self.modules, "gate_net", None) is not None else p_seq_logits,  # [B, T_p+1, C]
+            "p_dec_out_fuse": p_fuse if getattr(self.modules, "gate_net", None) is not None else None,
             "feats": feats,  # [B, T_s, D]
             "attn_map": attn_map,  # [B, T_p+1, T_s] or similar
             "hyps": hyps,  # [B, T_p+1] or None if not applicable
@@ -935,6 +877,7 @@ class TransformerMDD_TP_encdec_gating(sb.Brain):
         
         p_ctc_feat = predictions["p_ctc_feat"]
         p_dec_out = predictions["p_dec_out"]
+        p_dec_out_fuse = predictions["p_dec_out_fuse"]
         feats = predictions["feats"]
         attn_map = predictions["attn_map"]
         hyps = predictions.get("hyps", [])  # [B, T_p+1] or None if not applicable
@@ -980,7 +923,14 @@ class TransformerMDD_TP_encdec_gating(sb.Brain):
             loss_ctc = self.hparams.ctc_cost(p_ctc_feat, canonicals, wav_lens, canonical_lens)
             
         if self.hparams.decoder_target == "perceived":
-            loss_dec_out = self.hparams.seq_cost(p_dec_out, perceiveds_eos, perceived_lens_eos)
+            # Error: also give loss < 0
+            # pdb.set_trace()
+            if p_dec_out_fuse is not None:
+                loss_dec_out = self.hparams.seq_cost(p_dec_out_fuse, perceiveds_eos, perceived_lens_eos) 
+            else:
+                loss_dec_out = self.hparams.seq_cost(p_dec_out, perceiveds_eos, perceived_lens_eos)
+            # pdb.set_trace()
+
         else:
             loss_dec_out = self.hparams.seq_cost(p_dec_out, targets_eos, target_lens_eos)
         
@@ -1027,7 +977,18 @@ class TransformerMDD_TP_encdec_gating(sb.Brain):
                 sequence = sb.decoders.ctc_greedy_decode(
                     p_ctc_feat, wav_lens, blank_id=self.hparams.blank_index
                 )
-                sequence_decoder_out = hyps  # [B, T_p+1]
+                
+                # sequence_decoder_out = hyps  # [B, T_p+1]
+                # if hyps is None or len(hyps) == 0:
+                if p_dec_out_fuse is not None:
+                    hyps = p_dec_out_fuse.argmax(dim=-1)
+                    from speechbrain.utils.data_utils import undo_padding
+                    # List with no padding
+                    hyps = undo_padding(hyps, perceived_lens)
+                    # remove eos
+                    # pdb.set_trace()
+                    hyps = [[tok for tok in hyp if tok != self.hparams.eos_index] for hyp in hyps]
+                sequence_decoder_out = hyps
 
                 if self.hparams.eval_with_silence == False:
                     sil_inx = self.label_encoder.lab2ind["sil"]
@@ -1124,9 +1085,12 @@ class TransformerMDD_TP_encdec_gating(sb.Brain):
                     mask = mask[:, :sequence_decoder_out_confience_thre.shape[1]]
                     sequence_decoder_out_confience_thre[mask.bool()] = err_inx
                     sequence_decoder_out = sequence_decoder_out_confience_thre.cpu().numpy()
-
                 if self.hparams.decoder_target == "perceived":
+                    
                     self.seq_metrics.append(ids, log_probabilities=p_dec_out, targets=perceiveds_eos, length=perceived_lens_eos)
+                    self.seq_metrics_fuse.append(ids, log_probabilities=p_dec_out_fuse, targets=perceiveds_eos, length=perceived_lens_eos)  
+                    # 计算PER的时候使用最短的Target 作为ground truth
+                    # self.seq_metrics.append(ids, log_probabilities=p_dec_out, targets=targets_eos, length=target_lens_eos)
                 else:
                     self.seq_metrics.append(ids, log_probabilities=p_dec_out, targets=targets_eos, length=target_lens_eos)
                 self.mispro_metrics.append(ids, h_mispro, mispro_label, mispro_label_lens)
@@ -1334,6 +1298,7 @@ class TransformerMDD_TP_encdec_gating(sb.Brain):
                     "loss": stage_loss,
                     "ctc_loss": self.ctc_metrics.summarize("average"),
                     "seq_loss": self.seq_metrics.summarize("average"),
+                    "seq_loss_fuse": self.seq_metrics_fuse.summarize("average"),    
                     "mispro_loss": self.mispro_metrics.summarize("average"),
                     "PER": per,
                     "mpd_f1": mpd_f1,
@@ -1358,6 +1323,7 @@ class TransformerMDD_TP_encdec_gating(sb.Brain):
                                  "ctc_loss": self.ctc_metrics.summarize("average"),
                                  "mispro_loss": self.mispro_metrics.summarize("average"),
                                  "seq_loss": self.seq_metrics.summarize("average"), 
+                                 "seq_loss_fuse": self.seq_metrics_fuse.summarize("average"),
                                  },
                     valid_stats=valid_stats,
                 )                # Save best 3 models for each metric using simplified approach
@@ -1397,16 +1363,32 @@ class TransformerMDD_TP_encdec_gating(sb.Brain):
                 #     "mpd_f1", mpd_f1, self.best_mpd_f1, self.best_mpd_f1_list,
                 #     "best_mpdf1", "best_mpd_f1", "max_keys", True)
                 
-                self.best_per_seq, per_seq_improved = save_best_model(
-                    "per_seq", per_seq, self.best_per_seq, self.best_per_seq_list,
-                    "best_per_seq", "best_PER_seq", "min_keys", False)
+                # self.best_per_seq, per_seq_improved = save_best_model(
+                #     "per_seq", per_seq, self.best_per_seq, self.best_per_seq_list,
+                #     "best_per_seq", "best_PER_seq", "min_keys", False)
                 
-                self.best_mpd_f1_seq, mpd_seq_improved = save_best_model(
-                    "mpd_f1_seq", mpd_f1_seq, self.best_mpd_f1_seq, self.best_mpd_f1_seq_list,
-                    "best_mpd_f1_seq", "best_mpd_f1_seq", "max_keys", True)
+                # self.best_mpd_f1_seq, mpd_seq_improved = save_best_model(
+                #     "mpd_f1_seq", mpd_f1_seq, self.best_mpd_f1_seq, self.best_mpd_f1_seq_list,
+                #     "best_mpd_f1_seq", "best_mpd_f1_seq", "max_keys", True)
                 
-                # improved = per_improved or mpd_improved or per_seq_improved or mpd_seq_improved
-                improved = per_seq_improved or mpd_seq_improved
+                # # improved = per_improved or mpd_improved or per_seq_improved or mpd_seq_improved
+                # improved = per_seq_improved or mpd_seq_improved
+                improved = False
+                ckpt_name = f"{epoch:03d}_PER_{per:.4f}_PER_seq_{per_seq:.4f}_F1_{mpd_f1:.4f}_F1_seq_{mpd_f1_seq:.4f}.ckpt"
+                self.checkpointer.save_and_keep_only(
+                    meta={
+                        "epoch": epoch,"PER": per,"mpd_f1": mpd_f1,"PER_seq": per_seq,"mpd_f1_seq": mpd_f1_seq},
+                    name=ckpt_name,
+                    num_to_keep=4,
+                    importance_keys=[
+                        lambda ckpt: (
+                            -ckpt.meta.get("PER_seq", 1e6),
+                            ckpt.meta.get("mpd_f1_seq", 0),
+                            -ckpt.meta.get("PER", 1e6),
+                            ckpt.meta.get("mpd_f1", 0)
+                            ),
+                    ]
+                )
 
                 # Early stopping logic: only track best valid loss, do not save checkpoint for valid loss
                 if stage_loss < self.best_valid_loss or len(self.best_valid_loss_list) < 10:
