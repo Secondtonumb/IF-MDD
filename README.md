@@ -56,6 +56,6 @@ python train.py \
 
 ## Acknowledgements
 This implementation is built upon the following repositories:
-- [SpeechBrain]
+- [SpeechBrain](https://github.com/speechbrain/speechbrain)
 - [MPL-MDD](https://github.com/Mu-Y/mpl-mdd)
 - [CTC-Attention-Mispronunciation](https://github.com/cageyoko/CTC-Attention-Mispronunciation)
