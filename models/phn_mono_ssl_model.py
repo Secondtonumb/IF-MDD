@@ -349,6 +349,8 @@ class PhnMonoSSLModel(sb.Brain):
             # if self.hparams.perceived_ssl is not None and not self.hparams.perceived_ssl.freeze:
             self.checkpointer.add_recoverable("adam_opt", self.adam_optimizer)
             self.checkpointer.add_recoverable("pretrained_opt", self.pretrained_opt_class)
+            # import pdb; pdb.set_trace()
+            self.checkpointer.add_recoverable("tokenizer", self.label_encoder)  
     
     def on_fit_start(self):
         """Gets called at the beginning of ``fit()``, on multiple processes

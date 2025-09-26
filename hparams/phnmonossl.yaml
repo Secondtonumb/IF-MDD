@@ -193,3 +193,21 @@ valid_dataloader_opts:
 
 test_dataloader_opts:
     batch_size: 1
+
+pretrainer: !new:speechbrain.utils.parameter_transfer.Pretrainer
+    collect_in: !ref <save_folder>/
+    loadables:
+        perceived_ssl: !ref <perceived_ssl>
+        model: !ref <model>
+
+encoder: !new:speechbrain.nnet.containers.LengthsCapableSequential
+    perceived_ssl: !ref <perceived_ssl>
+    enc: !ref <enc>
+    ctc_lin: !ref <ctc_lin>
+    log_softmax: !ref <log_softmax>
+
+decoding_function: !name:speechbrain.decoders.ctc_greedy_decode
+    blank_id: !ref <blank_index>
+
+tokenizer: !new:speechbrain.dataio.encoder.TextEncoder
+    load_from_file: utils/label_encoder.txt
