@@ -12,7 +12,8 @@ python evaluate.py \
         --feature_fusion PhnMonoSSL \
         --perceived_ssl_model wavlm_large \
         --ENCODER_DIM 1024 \
-        --prefix wavlm_ctc
+        --prefix wavlm_ctc \
+        --save_folder "<parent_of_save_ckpt_path>" 
 
 # Transformer MDD with error classifiation head
 python train.py \
@@ -22,7 +23,7 @@ python train.py \
         --fuse_enc_or_dec encdec \
         --encoder_module conformer \
         --load_pretrained_components True \
-        --pretrained_model_path "<pretrained_model_path>" \
+        --pretrained_model_path "<pretrained_ctc_model_path>" \
         --components_to_load '["ssl", "enc"]' \
         --freeze_loaded_components True \
         --plot_attention True \
@@ -35,9 +36,4 @@ python evaluate.py \
         --feature_fusion TransformerMDD_TP_encdec_errclass \
         --fuse_enc_or_dec encdec \
         --encoder_module conformer \
-        --load_pretrained_components True \
-        --pretrained_model_path "<pretrained_model_path>" \
-        --components_to_load '["ssl", "enc"]' \
-        --freeze_loaded_components True \
-        --plot_attention True \
-        --plot_attention_interval 5
+        --save_folder "<parent_of_save_ckpt_path>"

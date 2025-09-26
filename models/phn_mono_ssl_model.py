@@ -105,19 +105,20 @@ class PhnMonoSSLModel(sb.Brain):
         ids = batch.id
         targets, target_lens = batch.phn_encoded_target
         
-        canonicals, canonical_lens = batch.phn_encoded_canonical
-        perceiveds, perceived_lens = batch.phn_encoded_perceived
+        if stage != sb.Stage.TRAIN:
+            canonicals, canonical_lens = batch.phn_encoded_canonical
+            perceiveds, perceived_lens = batch.phn_encoded_perceived
         
-        # Additional: BCE loss on binary mispronunciation prediction
-        if self.hparams.training_target == "target":
-            targets = targets
-            target_lens = target_lens
-        elif self.hparams.training_target == "canonical":
-            targets = canonicals
-            target_lens = canonical_lens
-        elif self.hparams.training_target == "perceived":
-            targets = perceiveds
-            target_lens = perceived_lens        
+            # Additional: BCE loss on binary mispronunciation prediction
+            if self.hparams.training_target == "target":
+                targets = targets
+                target_lens = target_lens
+            elif self.hparams.training_target == "canonical":
+                targets = canonicals
+                target_lens = canonical_lens
+            elif self.hparams.training_target == "perceived":
+                targets = perceiveds
+                target_lens = perceived_lens        
 
         loss_ctc = self.hparams.ctc_cost(p_ctc, targets, wav_lens, target_lens)
         if getattr(self.modules, "RVQ", None) is not None:

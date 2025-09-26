@@ -72,7 +72,6 @@ modules:
     perceived_ssl: !ref <perceived_ssl>
     enc: !ref <enc>
     ctc_lin: !ref <ctc_lin>
-    mispro_head: !ref <mispro_head>
 
 perceived_ssl: !apply:trainer.AutoSSLoader.AutoSSLLoader
     model_name: !ref <perceived_ssl_model>
@@ -103,10 +102,6 @@ enc: !new:torch.nn.Sequential
 ctc_lin:  !new:speechbrain.nnet.linear.Linear
     input_size: !ref <dnn_neurons>
     n_neurons: !ref <output_neurons>  # 40 phonemes + 1 blank + 1 err
-
-mispro_head: !new:speechbrain.nnet.linear.Linear
-    input_size: !ref <dnn_neurons>
-    n_neurons: 1  # Binary classification for mispronunciation detection
 
 # Model parameters
 activation: !name:torch.nn.LeakyReLU
@@ -145,7 +140,7 @@ checkpointer: !new:speechbrain.utils.checkpoints.Checkpointer
         model: !ref <model>
         perceived_ssl: !ref <perceived_ssl>
         counter: !ref <epoch_counter>
-    
+    allow_partial_load: True
 # canonical_ssl: !ref <canonical_ssl>
 
 augmentation: !new:speechbrain.augment.time_domain.SpeedPerturb

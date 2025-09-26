@@ -85,8 +85,8 @@ if __name__ == "__main__":
         run_opts=run_opts,
         checkpointer=hparams["checkpointer"],
     )
-    asr_brain.label_encoder = label_encoder
     
+    asr_brain.label_encoder = label_encoder
     # 
     from pathlib import Path
     # Wandb init group by hparams perceived_ssl_model, canonical_ssl_model, feature_fusion
@@ -103,13 +103,6 @@ if __name__ == "__main__":
     run_id = f"{run_name}_{run_id}"
     
     # wandb init group by hparams perceived_ssl_model, canonical_ssl_model, feature_fusion
-    
-    wandb.init(
-        project=hparams.get("wandb_project", model_type), 
-        name=run_name,
-        id=run_id,
-        resume="allow"
-    )
 
     # # Training/validation loop
     # try:
