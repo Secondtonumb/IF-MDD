@@ -24,11 +24,11 @@ pretrained_models_path: pretrained_models/
 
 
 # select pretrained SSL models
-perceived_ssl_model: "hubert_multilingual" # in pretrained_models
+perceived_ssl_model: "wavlm_large" # in pretrained_models
 canonical_ssl_model: Null
 
 # # models hidden size, varies by model
-ENCODER_DIM: 768
+ENCODER_DIM: 1024
 
 # # How to fuse the features
 feature_fusion: "mono"        # Options: "mono" for single ssl, "dual_ssl_enc" for dual ssl encoder, "dual_loss" for single SSL dual ssl loss
