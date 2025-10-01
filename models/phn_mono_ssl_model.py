@@ -51,7 +51,7 @@ class PhnMonoSSLModel(sb.Brain):
         self.best_valid_loss = float('inf')
         self.best_valid_loss_list = []  # List of (valid_loss, epoch, ckpt_name)
 
-    def check_gradients(self, loss):
+    
         """Check if gradients are finite"""
         if not torch.isfinite(loss):
             print("Warning: loss is not finite, skipping step")

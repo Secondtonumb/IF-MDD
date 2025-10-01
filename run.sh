@@ -37,3 +37,12 @@ python evaluate.py \
         --fuse_enc_or_dec encdec \
         --encoder_module conformer \
         --save_folder "<parent_of_save_ckpt_path>"
+
+
+# Mono_SSL_CTC model + llama
+python train.py \
+        hparams/SSL_LLM.yaml \
+        --feature_fusion SSL_LLM \
+        --perceived_ssl_model wavlm_large \
+        --ENCODER_DIM 1024 \
+        --prefix wavlm_CTC_LLM

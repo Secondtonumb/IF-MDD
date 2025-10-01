@@ -30,8 +30,9 @@ from models.phn_mono_ssl_model import PhnMonoSSLModel, PhnMonoSSLModel_DualCTCHe
 from models.Transformer import TransformerMDD
 from models.Transformer_TP import TransformerMDD_TP
 from models.Transformer_TP_fuse_errclass import TransformerMDD_TP_encdec_errclass
+from models.SSL_LLM import SSL_LLM
 
-from utils.DataPrepIO import LLMDataIOPrep, LLMDataIOPrep_ver2
+from utils.DataPrepIO import LLMDataIOPrep, LLMDataIOPrep_ver2, LLMDataIOPrep_ver3
 sys.path.append("./trainer")
 logger = logging.getLogger(__name__)
 
@@ -71,6 +72,11 @@ if __name__ == "__main__":
         asr_brain_class = TransformerMDD_TP
     elif hparams["feature_fusion"] == "TransformerMDD_TP_encdec_errclass":
         asr_brain_class = TransformerMDD_TP_encdec_errclass
+    elif hparams["feature_fusion"] == "SSL_LLM":
+        asr_brain_class = SSL_LLM
+    
+    if asr_brain_class == SSL_LLM:
+        DataPrep  = LLMDataIOPrep_ver3(hparams)
     if asr_brain_class == TransformerMDD_TP_encdec_errclass:
         DataPrep  = LLMDataIOPrep_ver2(hparams)
     else:
@@ -110,7 +116,14 @@ if __name__ == "__main__":
         id=run_id,
         resume="allow"
     )
+    # limit train_data for quick debugging
 
+    # train_record = train_data.data_ids[:512]  # Select first 1024 for debugging
+    # valid_record = valid_data.data_ids[:128]  # Select first 128 for debugging
+    # train_data = train_data.filtered_sorted(key_test={"id": lambda x: x in train_record},)
+    # valid_data = valid_data.filtered_sorted(key_test={"id": lambda x: x in valid_record},)
+    
+    
     # Training/validation loop
     try:
         asr_brain.fit(
