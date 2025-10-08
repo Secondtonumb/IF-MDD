@@ -36,6 +36,7 @@ spec.loader.exec_module(module)
 asr_model = module.MyEncoderASR.from_hparams(source="Haopeng/CTC_for_IF-MDD", hparams_file="inference.yaml")
 x = asr_model.transcribe_file("./examples/arctic_b0503.wav")
 print(x)
+# sil dh ah s eh n t sil ah v s t r ey n jh sil v ih zh ah t ey sh ah n p l uw ao f dh ah t r aa p ih k sil l ae n t sil
 ```
 
 ## Training Steps
