@@ -4,8 +4,7 @@ Official implementation of the paper:
 
 For more details, check 🎧[Demo](https://secondtonumb.github.io/publication_demo/ICASSP_2026/index.html)
 
-![Example](./fig/IF-MDD_example.png)
-
+[![Example](./fig/IF-MDD_example.png)]([./docs/more_results.md](https://secondtonumb.github.io/publication_demo/ICASSP_2026/index.html))
 **Update (2025-10-08):**  
 We released the pretrained CTC checkpoint and an inference example.  
 The model is now available on Hugging Face and can be executed in **10 lines of code**.
