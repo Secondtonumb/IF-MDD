@@ -20,3 +20,5 @@ exp*/
 
 __pycache__/
 *.o[0-9]*
+
+.vscode
