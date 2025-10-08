@@ -1,9 +1,16 @@
 # IF-MDD
-Official implementation of the paper:
-[IF-MDD: Indirect Fusion for Mispronunciation Detection and Diagnosis](https://github.com/Secondtonumb/Secondtonumb.github.io/blob/main/docs/Geng_ICASSP_2026_final.pdf)
+Official implementation of the paper:  
+[**IF-MDD: Indirect Fusion for Mispronunciation Detection and Diagnosis**](https://github.com/Secondtonumb/Secondtonumb.github.io/blob/main/docs/Geng_ICASSP_2026_final.pdf)
 
-## Installtion
-```
+**Update (2025-10-08):**  
+We released the pretrained CTC checkpoint and an inference example.  
+The model is now available on Hugging Face and can be executed in **10 lines of code**.
+
+---
+
+## Installation
+```bash
+git clone https://github.com/Secondtonumb/IF-MDD.git
 cd IF-MDD
 conda create -n ifmdd python=3.10 -y
 conda activate ifmdd
@@ -31,9 +38,17 @@ print(x)
 ```
 
 ## Training Steps
-1. **Step 0**: Prepare data (TODO)
-2. **Step 1**: Pretrain SSL model (optional):
-   - Pretrain a monolingual SSL model with CTC Head only
+### **Step 0**: Data Preparation (TODO)
+
+### **Step 1**: Initialize SSL model:
+You have two options:
+
+1. **Use the released CTC model**  
+   You can directly initialize with our [released CTC model](https://huggingface.co/Haopeng/CTC_for_IF-MDD/tree/main).
+
+2. **Pretrain your own monolingual SSL model with a CTC Head**  
+   Example command:
+
    ```bash
    python ver5_train.py \
            hparams/phnmonossl.yaml \
@@ -50,8 +65,8 @@ python ver5_train.py \
         --ENCODER_DIM 1024 \
         --prefix wavlm_ctc
 ```
-+ step 2: Train IF-MDD model:
-## Initialize from pretrained SSL model 
+### **step 2**: Train IF-MDD 
+Initialize from a pretrained SSL model:
 
 ```bash
 # Transformer MDD with error classifiation head
@@ -68,8 +83,7 @@ python train.py \
         --plot_attention True \
         --plot_attention_interval 5
 ```
-
-## Training from scratch
+or training from scratch
 
 ```bash
 # Transformer MDD
