@@ -65,6 +65,11 @@ python ver5_train.py \
         --prefix wavlm_ctc
 ```
 ### **step 2**: Train IF-MDD 
+Performance on L2-arctic Test
+| head |  FRR  |  FAR  |  ER   |   P   |   R   |  F1   |  PER  |
+|------|-------|-------|-------|-------|-------|-------|-------|
+| CTC  | 6.12  | 40.64 | 21.57 | 62.03 | 59.36 | 60.67 | 14.87 |
+| Seq  | 5.75  | 44.71 | 19.98 | 61.81 | 55.29 | 58.37 | 13.72 |
 Initialize from a pretrained SSL model:
 
 ```bash
@@ -94,12 +99,6 @@ python train.py \
         --encoder_module conformer \
 ```
 
-Performance on L2-arctic Test
-
-| head |  FRR  |  FAR  |  ER   |   P   |   R   |  F1   |  PER  |
-|------|-------|-------|-------|-------|-------|-------|-------|
-| CTC  | 6.12  | 40.64 | 21.57 | 62.03 | 59.36 | 60.67 | 14.87 |
-| Seq  | 5.75  | 44.71 | 19.98 | 61.81 | 55.29 | 58.37 | 13.72 |
 
 ## Acknowledgements
 This implementation is built upon the following repositories:
