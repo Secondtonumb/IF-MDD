@@ -1,6 +1,7 @@
 # IF-MDD
 Official implementation of the paper:  
 [**IF-MDD: Indirect Fusion for Mispronunciation Detection and Diagnosis**](https://github.com/Secondtonumb/Secondtonumb.github.io/blob/main/docs/Geng_ICASSP_2026_final.pdf)
+[Demo](https://secondtonumb.github.io/publication_demo/ICASSP_2026/index.html)
 
 **Update (2025-10-08):**  
 We released the pretrained CTC checkpoint and an inference example.  
@@ -48,14 +49,6 @@ You have two options:
 
 2. **Pretrain your own monolingual SSL model with a CTC Head**  
    Example command:
-
-   ```bash
-   python ver5_train.py \
-           hparams/phnmonossl.yaml \
-           --feature_fusion PhnMonoSSL \
-           --perceived_ssl_model wavlm_large \
-           --ENCODER_DIM 1024 \
-           --prefix wavlm_ctc
 
 ```bash
 python ver5_train.py \
