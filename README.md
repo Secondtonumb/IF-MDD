@@ -19,6 +19,11 @@ pip install -r requirements.txt
 ```
 
 ## Inference (Pretrained CTC Head)
+Performance on L2-arctic Test
+
+| FRR  | FAR  |  ER  |   P   |   R   |  F1  |  PER  |
+|------|------|------|-------|-------|------|-------|
+| 6.07 | 45.08| 21.25| 60.38 | 54.92 | 57.52| 14.30 |
 
 ```python
 from huggingface_hub import hf_hub_download
@@ -88,6 +93,13 @@ python train.py \
         --fuse_enc_or_dec encdec \
         --encoder_module conformer \
 ```
+
+Performance on L2-arctic Test
+
+| head |  FRR  |  FAR  |  ER   |   P   |   R   |  F1   |  PER  |
+|------|-------|-------|-------|-------|-------|-------|-------|
+| CTC  | 6.12  | 40.64 | 21.57 | 62.03 | 59.36 | 60.67 | 14.87 |
+| Seq  | 5.75  | 44.71 | 19.98 | 61.81 | 55.29 | 58.37 | 13.72 |
 
 ## Acknowledgements
 This implementation is built upon the following repositories:
