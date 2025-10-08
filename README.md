@@ -1,12 +1,39 @@
 # IF-MDD
 Official implementation of the paper:
-"IF-MDD: Indirect Fusion for Mispronunciation Detection and Diagnosis"
+[IF-MDD: Indirect Fusion for Mispronunciation Detection and Diagnosis](https://github.com/Secondtonumb/Secondtonumb.github.io/blob/main/docs/Geng_ICASSP_2026_final.pdf)
+
+## Installtion
+```
+cd IF-MDD
+conda create -n ifmdd python=3.10 -y
+conda activate ifmdd
+pip install -r requirements.txt
+```
+
+## Inference (Pretrained CTC Head)
+
+```python
+from huggingface_hub import hf_hub_download
+import importlib.util
+
+# Customized Encoder ASR 
+path = hf_hub_download(repo_id="Haopeng/CTC_for_IF-MDD", filename="MyEncoderASR.py")
+
+# Dyanamic import
+spec = importlib.util.spec_from_file_location("MyEncoderASR", path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+# Transcribe
+
+asr_model = module.MyEncoderASR.from_hparams(source="Haopeng/CTC_for_IF-MDD", hparams_file="inference.yaml")
+x = asr_model.transcribe_file("./examples/arctic_b0503.wav")
+print(x)
+```
 
 ## Training Steps
 1. **Step 0**: Prepare data (TODO)
 2. **Step 1**: Pretrain SSL model (optional):
    - Pretrain a monolingual SSL model with CTC Head only
-
    ```bash
    python ver5_train.py \
            hparams/phnmonossl.yaml \
@@ -24,7 +51,7 @@ python ver5_train.py \
         --prefix wavlm_ctc
 ```
 + step 2: Train IF-MDD model:
-## Initialize from pretrained SSL model
+## Initialize from pretrained SSL model 
 
 ```bash
 # Transformer MDD with error classifiation head
@@ -35,7 +62,7 @@ python train.py \
         --fuse_enc_or_dec encdec \
         --encoder_module conformer \
         --load_pretrained_components True \
-        --pretrained_model_path "<pretrained_model_path>" \
+        --pretrained_model_path "<pretrained_model_path>" \ 
         --components_to_load '["ssl", "enc"]' \
         --freeze_loaded_components True \
         --plot_attention True \
