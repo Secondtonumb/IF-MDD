@@ -1,7 +1,10 @@
 # IF-MDD
 Official implementation of the paper:  
-[**IF-MDD: Indirect Fusion for Mispronunciation Detection and Diagnosis**](https://github.com/Secondtonumb/Secondtonumb.github.io/blob/main/docs/Geng_ICASSP_2026_final.pdf) \\
-[Demo](https://secondtonumb.github.io/publication_demo/ICASSP_2026/index.html)
+[**IF-MDD: Indirect Fusion for Mispronunciation Detection and Diagnosis**](https://github.com/Secondtonumb/Secondtonumb.github.io/blob/main/docs/Geng_ICASSP_2026_final.pdf) 
+
+For more details, check 🎧[Demo](https://secondtonumb.github.io/publication_demo/ICASSP_2026/index.html)
+
+![Example](./fig/IF-MDD_example.png)
 
 **Update (2025-10-08):**  
 We released the pretrained CTC checkpoint and an inference example.  
@@ -70,6 +73,7 @@ Performance on L2-arctic Test
 |------|-------|-------|-------|-------|-------|-------|-------|
 | CTC  | 6.12  | 40.64 | 21.57 | 62.03 | 59.36 | 60.67 | 14.87 |
 | Seq  | 5.75  | 44.71 | 19.98 | 61.81 | 55.29 | 58.37 | 13.72 |
+
 Initialize from a pretrained SSL model:
 
 ```bash
