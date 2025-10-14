@@ -37,3 +37,10 @@ python evaluate.py \
         --fuse_enc_or_dec encdec \
         --encoder_module conformer \
         --save_folder "<parent_of_save_ckpt_path>"
+
+python inference.py \
+        hparams/phnmonossl.yaml \
+        --feature_fusion PhnMonoSSL \
+        --perceived_ssl_model wavlm_large \
+        --ENCODER_DIM 1024 \
+        --prefix wavlm_ctc
