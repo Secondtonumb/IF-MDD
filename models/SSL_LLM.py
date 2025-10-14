@@ -8,8 +8,19 @@ import numpy as np
 from tqdm import tqdm
 import wandb
 from types import SimpleNamespace
-import pdb
 
+def phn_list_to_seq(batch):
+    """
+    Args:
+        batch:[["sil", "aa", "x"], ["sil", "xa", "th"]]
+    return
+        batch ["sil aa x", "sil xa th"]
+    """
+    result = []
+    for phn_list in batch:
+        result.append(" ".join(x for x in phn_list))
+    return result
+    
 class SSL_LLM(sb.Brain):
     def __init__(self, *args, patience=20, **kwargs):
         super().__init__(*args, **kwargs)
@@ -37,10 +48,14 @@ class SSL_LLM(sb.Brain):
         self.valid_stats = {"ctc_loss": [], "ce_loss": [], "total_loss": [], "per": []}
         
         # 创建phoneme token掩码
-        # self.setup_phoneme_mask()
+        self.phoneme_bias = None
+        self.setup_phoneme_mask()
 
     def setup_phoneme_mask(self):
         """创建一个掩码，只允许生成音素相关的token"""
+        if getattr(self, "phoneme_bias", None) is not None:
+            return
+
         vocab_size = self.modules.LLM.get_input_embeddings().weight.shape[0]
         # 创建一个全为 -inf 的掩码
         self.phoneme_bias = torch.full(
@@ -118,11 +133,39 @@ class SSL_LLM(sb.Brain):
             if Lb <= L_max:
                 ce_targets[b, Lb] = eos_idx
         
-        # 文本嵌入
-        txt_emb = self.modules.phn_embed(inp_ids)  # [B, L_max+1, H]
+        # 方案B 用 通用的 Language Tokenizer embed Phn
+        phn_list = batch.phn_list_target
+        perceived_list = batch.phn_list_perceived
+        canonical_list = batch.phn_list_canonical
+        phn_seq = phn_list_to_seq(phn_list)
+        per_seq = phn_list_to_seq(perceived_list)
+        can_seq = phn_list_to_seq(canonical_list)
         
-        # 拼接音频前缀与文本输入
-        inputs_embeds = torch.cat([Z, txt_emb], dim=1)  # [B, T + L_max+1, H]
+        
+        target_tokens = self.hparams.LLM_tokenizer(phn_seq, return_tensors="pt", padding=True, add_special_tokens=False, ).to(self.device)
+        per_tokens  = self.hparams.LLM_tokenizer(per_seq, return_tensors="pt", padding=True, add_special_tokens=False, ).to(self.device)
+        can_tokens  = self.hparams.LLM_tokenizer(can_seq, return_tensors="pt", padding=True, add_special_tokens=False).to(self.device)
+        target_embed = self.modules.LLM.get_input_embeddings()(target_tokens["input_ids"])
+        per_embed = self.modules.LLM.get_input_embeddings()(per_tokens["input_ids"])
+        can_embed = self.modules.LLM.get_input_embeddings()(can_tokens["input_ids"])
+        
+        ce_targets = target_tokens
+        # 文本嵌入
+        if getattr(self.hparams, "use_seperate_phn_head", None) != None:
+            txt_emb = self.modules.phn_embed(inp_ids)  # [B, L_max+1, H]
+        else:
+            txt_emb = target_embed
+        
+        # Prompt
+        use_prompt = getattr(self.hparams, "use_prompt", False)
+        prompt_tokens = None
+        if use_prompt:
+            prompt_tokens = self.hparams.LLM_tokenizer.encode(prompt, add_special_tokens=False, return_tensors="pt").to(self.device)
+            prompt_embed = self.modules.LLM.get_input_embeddings()(prompt_tokens)  # [1, P, H]
+            inputs_embeds = torch.cat([Z, prompt_embed.expand(B, -1, -1), txt_emb], dim=1)
+        else:
+            inputs_embeds = torch.cat([Z, txt_emb], dim=1)  # [B, T + L_max+1, H]
+
         norm_layer = torch.nn.LayerNorm(H).to(self.device)
         inputs_embeds = norm_layer(inputs_embeds)
         # 将dtype对齐到LLM权重dtype，避免float/half不一致
@@ -132,33 +175,94 @@ class SSL_LLM(sb.Brain):
         
         # 构造attention_mask：前缀全1；文本部分仅保留有效(BOS到L_b位置)为1，其余0
         prefix_mask = torch.ones(B, Z.size(1), dtype=torch.long, device=self.device)
-        text_mask = torch.zeros(B, L_max + 1, dtype=torch.long, device=self.device)
+        # text_mask = torch.zeros(B, L_max + 1, dtype=torch.long, device=self.device)
         
         for b in range(B):
             Lb = int(abs_lens[b].item())
-            text_mask[b, : Lb + 1] = 1
-        attention_mask = torch.cat([prefix_mask, text_mask], dim=1)  # [B, T+L_max+1]
+            # text_mask[b, : Lb + 1] = 1
+            text_mask = target_tokens['attention_mask']
+
+        if use_prompt and prompt_tokens is not None:
+            prompt_len = prompt_tokens.size(1)
+            prompt_mask = torch.ones(B, prompt_len, dtype=torch.long, device=self.device)
+            attention_mask = torch.cat([prefix_mask, prompt_mask, text_mask], dim=1)
+            text_mask_inference = torch.zeros(text_mask.shape, device=self.device)
+            # attention_mask_inference, mask the padded speech embeddings and the reference sequence.
+            attention_mask_inference = torch.cat([prefix_mask, prompt_mask, text_mask_inference], dim=1)
+        else:
+            text_mask_inference = torch.zeros(text_mask.shape, device=self.device)
+            attention_mask = torch.cat([prefix_mask, text_mask], dim=1)
+            attention_mask_inference = torch.cat([prefix_mask, text_mask_inference], dim=1)
         
         # 运行LLM获得hidden states
-        llm_out = self.modules.LLM(
-            inputs_embeds=inputs_embeds,
-            attention_mask=attention_mask,
-            output_hidden_states=True,
-            return_dict=True,
-        )
-        
-        hidden = llm_out.hidden_states[-1]  # [B, T + L_max+1, H]   
-        
-        # 取用于预测的隐状态：用位置 [T .. T+L_max] 来预测 [y0..y_{L-1}, EOS]
-        T = Z.size(1)
-        pred_h = hidden[:, T : T + (L_max + 1), :]  # [B, L_max+1, H]
+        if stage == sb.Stage.TRAIN:
+            llm_out = self.modules.LLM(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                output_hidden_states=True,
+                return_dict=True,
+            )
+            hidden = llm_out.hidden_states[-1]  # [B, T + L_max+1, H]   
+        else:
+            # for 
+            inputs_embeds_inference = torch.cat([Z, prompt_embed.expand(B, -1, -1)], dim=1)
+            inputs_embeds_inference = norm_layer(inputs_embeds_inference).to(llm_dtype)
+            if stage == sb.Stage.VALID:                
+                llm_out = self.modules.LLM(
+                    inputs_embeds=inputs_embeds,
+                    attention_mask=attention_mask_inference,
+                    output_hidden_states=True,
+                    return_dict=True,
+                )
+                hidden = llm_out.hidden_states[-1]  # [B, T + L_max+1, H]   
+            elif stage == sb.Stage.TEST:
+                
+                llm_out = self.modules.LLM.generate(inputs_embeds=inputs_embeds_inference, 
+                                                    attention_mask=attention_mask_inference,
+                                                    max_new_tokens=text_mask.size(1),
+                                                    min_new_tokens=text_mask.size(1),
+                                                    num_return_sequences=1,
+                                                    return_dict_in_generate= True,
+                                                    output_hidden_states=True,
+                                                    output_attentions=True,
+                                                    pad_token_id=0,
+                )
+                
+                steps = []
+                for t in llm_out.hidden_states:
+                    steps.append(t[-1][:, -1, :])
+                hidden = torch.stack(steps, dim=1)
+            # duration teacher forcing
         
         # 小词表分类头
-        # pdb.set_trace()
-        # ce_logits = self.modules.phn_head(pred_h)  # [B, L_max+1, 44]
-        ce_logits = self.modules.phn_head(pred_h.to(torch.float32))  # [B, L_max+1, 44]
+        # hidden = llm_out.hidden_states[-1]  # [B, T + L_max+1, H]   
+        # import pdb; pdb.set_trace()
+        # 取用于预测的隐状态：用位置 [T .. T+L_max] 来预测 [y0..y_{L-1}, EOS]
         
-        return p_ctc, ce_logits, ce_targets, wav_lens
+        T = Z.size(1)
+        start_idx = T
+        
+        if use_prompt and prompt_tokens is not None:
+            prompt_len = prompt_tokens.size(1)
+            start_idx += prompt_len
+        
+        # ce_logits = self.modules.phn_head(pred_h.to(torch.float32))  # [B, L_max+1, 44]
+        
+        # 大词表分类头
+        # import pdb; pdb.set_trace()
+        L_mask = text_mask.size(1)
+        if stage == sb.Stage.TRAIN or stage == sb.Stage.VALID:
+            pred_h = hidden[:, start_idx : start_idx + (L_max + 1), :]  # [B, L_max+1, H]
+            ce_logits = llm_out.logits[:, start_idx: start_idx + L_mask, :] # [B, <bos><text><eos>, LLM_Vocab]
+            return p_ctc, ce_logits, ce_targets, wav_lens
+        else:
+            
+            ce_logits = self.modules.LLM.lm_head(hidden)
+            # hidden
+            # Test
+            hyps, _, _,_ = llm_out
+            # ce_logits = llm_out
+            return p_ctc, ce_logits, ce_targets, wav_lens     
 
     def compute_objectives(self, predictions, batch, stage):
         """计算训练目标：CTC损失和CE损失（小词表头）"""
@@ -184,10 +288,17 @@ class SSL_LLM(sb.Brain):
         loss_ce = torch.tensor(0.0, device=self.device)
         
         if ce_logits is not None and ce_targets is not None:
+            
             B, Lp1, Csm = ce_logits.size()
             ignore_index = getattr(self.hparams, "ce_label_ignore_index", -100)
             ce_loss_fn = nn.CrossEntropyLoss(ignore_index=ignore_index)
-            loss_ce = ce_loss_fn(ce_logits.reshape(-1, Csm), ce_targets.reshape(-1))
+            try:
+                loss_ce = ce_loss_fn(ce_logits.reshape(-1, Csm), ce_targets.reshape(-1))
+            except:
+                # pdb.set_trace()
+                mask_flat = ce_targets["attention_mask"].reshape(-1).bool()
+                loss_ce = ce_loss_fn(ce_logits.reshape(-1, Csm)[mask_flat], ce_targets["input_ids"].reshape(-1)[mask_flat])
+
         # 总损失
         ctc_weight = getattr(self.hparams, "ctc_weight", 0.0)
         loss = ctc_weight * loss_ctc + (1.0 - ctc_weight) * loss_ce
@@ -221,22 +332,26 @@ class SSL_LLM(sb.Brain):
                 ind2lab=self.label_encoder.decode_ndim,
             )
             
-            p_llm = F.log_softmax(ce_logits, dim=-1)
-            llm_sequence = p_llm.argmax(dim=-1) if ce_logits is not None else None
-            # 观察是不是每次都一样？
-            self.llm_metrics.append( 
-                                    ids,
-                                    log_probabilities=p_llm,
-                                    targets=targets_eos,
-                                    length=target_eos_lens)
-            self.llm_per_metrics.append(
-                ids=ids,
-                predict=llm_sequence,
-                target=targets_eos,
-                predict_len=None,
-                target_len=target_eos_lens,
-                ind2lab=self.label_encoder.decode_ndim,
-            )
+            if ce_logits is not None:
+                p_llm = F.log_softmax(ce_logits, dim=-1)
+                llm_sequence = p_llm.argmax(dim=-1)
+                # ce_target 有一位是错位的
+                self.llm_metrics.append(
+                    ids,
+                    log_probabilities=p_llm,
+                    targets=ce_targets["input_ids"],
+                    length=target_lens,
+                )
+                
+                self.llm_per_metrics.append(
+                    ids=ids,
+                    predict=llm_sequence,
+                    target=ce_targets["input_ids"],
+                    predict_len=None,
+                    target_len=target_lens,
+                    ind2lab=lambda ids: [s.split() for s in self.hparams.LLM_tokenizer.batch_decode(ids, skip_special_tokens=True)]
+                )
+                
         
         return loss
     
@@ -265,15 +380,14 @@ class SSL_LLM(sb.Brain):
         stage_stats = {"loss": stage_loss}
         if stage == sb.Stage.TRAIN:
             self.train_loss = stage_loss
-        else:
+        elif stage == sb.Stage.VALID:
             stage_stats["epoch"] = epoch
             per_ctc = self.per_metrics.summarize("error_rate")
             per_llm = self.llm_per_metrics.summarize("error_rate")  # 添加LLM PER计算
             stage_stats["ctc_per"] = per_ctc
-            
             stage_stats["llm_per"] = per_llm  # 添加LLM PER到统计
-            # Summarize and log metrics
             llm_loss = self.llm_metrics.summarize("average")
+            # Summarize and log metrics
             stage_stats["llm_loss"] = llm_loss
         
             if hasattr(self.modules, "ctc_lin"):
@@ -295,8 +409,8 @@ class SSL_LLM(sb.Brain):
                                                     num_to_keep=2,
                                                     importance_keys=[
                                                         lambda ckpt: (
-                                                            -ckpt.meta["CTC_PER"],  
                                                             -ckpt.meta["LLM_PER"],  
+                                                            -ckpt.meta["CTC_PER"],  
                                                         )
                                                     ]
                                                 )
@@ -327,17 +441,20 @@ class SSL_LLM(sb.Brain):
         
         if stage == sb.Stage.TEST:
             self.hparams.train_logger.log_stats(
-                stats_meta=stage_stats, message="Test results"
+                stats_meta=stage_stats,
             )
+            # import pdb; pdb.set_trace()
             per_ctc = self.per_metrics.summarize("error_rate")
             per_llm = self.llm_per_metrics.summarize("error_rate")  # 添加LLM PER计算
+            llm_loss = self.llm_metrics.summarize("average")
+            ctc_loss = self.ctc_metrics.summarize("average")
+            
             self.hparams.train_logger.log_stats(
                 stats_meta={"Epoch loaded": self.hparams.epoch_counter.current},
                 test_stats={"loss": stage_loss, "PER": per_ctc, 
                             "PER_seq": per_llm, 
                             "llm_loss": llm_loss,
                             "ctc_loss": ctc_loss if hasattr(self.modules, "ctc_lin") else None},
-                message="Final test results",
             )
             with open(self.hparams.per_file, "w") as w:
                 w.write("CTC loss stats:\n")
@@ -351,8 +468,7 @@ class SSL_LLM(sb.Brain):
                 self.llm_metrics.write_stats(w)
                 w.write("\nLLM PER stats:\n")
                 self.llm_per_metrics.write_stats(w)
-            
-            
+             
     def check_gradients(self, loss):
         """Check if gradients are finite"""
         if not torch.isfinite(loss):
@@ -463,32 +579,46 @@ class SSL_LLM(sb.Brain):
         with torch.no_grad():
             # SSL编码并投影到LLaMA维度
             wav_feats = self.modules.perceived_ssl(wavs)
-            Z = self.modules.enc(wav_feats)
+            enc_in = wav_feats.transpose(-2, -1)
+            Z = self.modules.enc(enc_in)
+            Z = Z.transpose(-2, -1)
+            B = Z.size(0)
+            H = Z.size(-1)
+            # # 添加BOS作为分隔符
+            # bos_embed = self.modules.LLM.get_input_embeddings()(
+            #     torch.tensor([42], device=self.device)  # BOS token
+            # ).expand(Z.size(0), 1, -1)
             
-            # 添加BOS作为分隔符
-            bos_embed = self.modules.LLM.get_input_embeddings()(
-                torch.tensor([42], device=self.device)  # BOS token
-            ).expand(Z.size(0), 1, -1)
+            # Append Text Prompt
+                    # Prompt
+            use_prompt = getattr(self.hparams, "use_prompt", False)
+            prompt_tokens = None
+            if use_prompt:
+                prompt_tokens = self.hparams.LLM_tokenizer.encode(prompt, add_special_tokens=False, return_tensors="pt").to(self.device)
+                prompt_embed = self.modules.LLM.get_input_embeddings()(prompt_tokens)  # [1, P, H]
+                inputs_embeds = torch.cat([Z, prompt_embed.expand(B, -1, -1)], dim=1)
+            else:
+                inputs_embeds = torch.cat([Z, ], dim=1)  # [B, T + L_max+1, H]
+
+            norm_layer = torch.nn.LayerNorm(H).to(self.device)
+            inputs_embeds = norm_layer(inputs_embeds)
             
-            # 构建输入序列：[Speech] [BOS]
-            inputs_embeds = torch.cat([Z, bos_embed], dim=1)
             # 对齐dtype到LLM
             llm_dtype = self.modules.LLM.get_input_embeddings().weight.dtype
             if inputs_embeds.dtype != llm_dtype:
                 inputs_embeds = inputs_embeds.to(llm_dtype)
             
             # 设置生成参数
+            max_length = 100
             gen_kwargs = {
                 "max_length": max_length,
                 "min_length": 1,
                 "num_return_sequences": 1,
                 "output_attentions": False,
                 "output_hidden_states": False,
-                "logits_processor": [self._phoneme_logits_processor],
-                "bos_token_id": 42,
-                "eos_token_id": 43,
                 "pad_token_id": 0,
             }
+                # "logits_processor": [self._phoneme_logits_processor],
             
             if method == "beam":
                 gen_kwargs.update({
@@ -507,9 +637,9 @@ class SSL_LLM(sb.Brain):
                 inputs_embeds=inputs_embeds,
                 **gen_kwargs
             )
-            
+
             return self.process_generated_phonemes(outputs)
-            
+
     def process_generated_phonemes(self, phoneme_ids, return_type="text"):
         """处理生成的音素ID序列。
         
@@ -558,54 +688,13 @@ class SSL_LLM(sb.Brain):
         else:  # "both"
             return text_outputs, phoneme_lists
             
-    def _phoneme_logits_processor(self, input_ids, scores):
-        """处理生成的logits，只保留音素相关的token"""
-        scores += self.phoneme_bias
-        return scores
+    # def _phoneme_logits_processor(self, input_ids, scores):
+    #     """处理生成的logits，只保留音素相关的token"""
+    #     if getattr(self, "phoneme_bias", None) is None:
+    #         self.setup_phoneme_mask()
+    #     scores += self.phoneme_bias
+    #     return scores
         
-    # def on_stage_end(self, stage, stage_loss, epoch):
-    #     """处理每个训练阶段结束时的操作"""
-    #     if stage == sb.Stage.TRAIN:
-    #         # 计算并记录训练统计数据
-    #         self.train_stats = {
-    #             "ctc_loss": np.mean(self.train_stats["ctc_loss"]),
-    #             "ce_loss": np.mean(self.train_stats["ce_loss"]),
-    #             "total_loss": np.mean(self.train_stats["total_loss"])
-    #         }
-            
-    #         # 记录到wandb
-    #         wandb.log({
-    #             "train/ctc_loss": self.train_stats["ctc_loss"],
-    #             "train/ce_loss": self.train_stats["ce_loss"],
-    #             "train/total_loss": self.train_stats["total_loss"],
-    #             "epoch": epoch
-    #         })
-            
-    #     else:
-    #         # 计算验证/测试指标
-    #         ctc_metric = self.ctc_metrics.summarize()
-    #         per_ctc = self.per_metrics.summarize("error_rate")
-    #         per_llm = self.llm_per_metrics.summarize("error_rate")
-            
-    #         # 更新验证统计
-    #         self.valid_stats = {
-    #             "ctc_loss": np.mean(self.valid_stats["ctc_loss"]),
-    #             "ce_loss": np.mean(self.valid_stats["ce_loss"]),
-    #             "total_loss": np.mean(self.valid_stats["total_loss"]),
-    #             "per": per_ctc
-    #         }
-            
-    #         # 记录到wandb
-    #         wandb.log({
-    #             "valid/ctc_loss": self.valid_stats["ctc_loss"],
-    #             "valid/ce_loss": self.valid_stats["ce_loss"],
-    #             "valid/total_loss": self.valid_stats["total_loss"],
-    #             "valid/per_ctc": per_ctc,
-    #             "valid/per_llm": per_llm,
-    #             "epoch": epoch
-    #         })
-            
-
     def on_fit_start(self):
         """Gets called at the beginning of ``fit()``, on multiple processes
         if ``distributed_count > 0`` and backend is ddp.
@@ -622,6 +711,11 @@ class SSL_LLM(sb.Brain):
 
         # Initialize optimizers after parameters are configured
         self.init_optimizers()
+        
+        if self.checkpointer is not None:
+            self.checkpointer.recover_if_possible(
+                min_key="LLM_PER",
+            )
     
     def init_optimizers(self):
         self.adam_optimizer = self.hparams.adam_opt_class(
@@ -637,3 +731,66 @@ class SSL_LLM(sb.Brain):
             # import pdb; pdb.set_trace()
             self.checkpointer.add_recoverable("tokenizer", self.label_encoder)  
     
+    
+    
+prompt = """
+You are a phoneme-ID transcriber.
+You will be given an input speech segment. Please transcribe it into a sequence of phonemes. Output only the phoneme embedding only.
+phoneme can only be generated from these given phoneme symbols:
+sh 
+ae 
+l 
+ay 
+k 
+r 
+iy 
+y
+uw
+sil 
+aa 
+eh 
+d
+w
+ah
+z
+ch
+ey
+n
+jh
+aw
+dh
+s
+hh
+f
+th
+ih
+m
+ao
+ow
+v
+er
+g
+t
+uh
+zh
+ng
+err
+p
+b
+oy
+
+"""
+
+prompt_2 = """
+You are a phoneme-ID transcriber.
+Given the preceding speech, produce a single line of integers that encodes the phoneme sequence.
+
+Constraints:
+- ID set = {0..43}; BOS=42; EOS=43; BLANK=0.
+- Start with 42 and end with 43.
+- Use BLANK only as an internal filler when necessary.
+- Output must be digits and spaces only (no letters, no punctuation, no extra text).
+- Exactly one space between integers.
+
+Return the line now:
+"""
