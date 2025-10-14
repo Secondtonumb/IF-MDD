@@ -24,7 +24,7 @@ class SSL_LLM(sb.Brain):
         # 初始化设备（必须先于依赖device的模块创建）
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         # 创建LayerNorm层用于特征归一化
-        self.embed_layer_norm = nn.LayerNorm(self.modules.LLM.config.hidden_size).to(self.device)
+        # self.embed_layer_norm = nn.LayerNorm(self.modules.LLM.config.hidden_size).to(self.device)
         
         # 将SSL模型移至正确设备
         if getattr(self.modules, "perceived_ssl", None) is not None:
