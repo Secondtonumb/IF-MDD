@@ -123,6 +123,9 @@ if __name__ == "__main__":
     # train_data = train_data.filtered_sorted(key_test={"id": lambda x: x in train_record},)
     # valid_data = valid_data.filtered_sorted(key_test={"id": lambda x: x in valid_record},)
     
+    # test_record = test_data.data_ids[:128]
+    # test_data = test_data.filtered_sorted(key_test={"id": lambda x: x in test_record},)
+    
     
     # Training/validation loop
     try:
@@ -145,7 +148,7 @@ if __name__ == "__main__":
                 test_loader_kwargs=hparams["test_dataloader_opts"],
                 max_key=key
             )
-        elif key == "PER" or key == "PER_seq":
+        elif key == "PER" or key == "PER_seq" or key == "CTC_PER":
             asr_brain.evaluate(
                 test_data,
                 test_loader_kwargs=hparams["test_dataloader_opts"],
