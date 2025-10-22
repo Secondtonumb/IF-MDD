@@ -6,6 +6,9 @@ For more details, check 🎧[Demo](https://secondtonumb.github.io/publication_de
 
 [![Example](./fig/IF-MDD_example.png)](https://secondtonumb.github.io/publication_demo/ICASSP_2026/index.html)
 
+**Update (2025-10-22):**  
+We added a verbose CTC decoder that now outputs phonemes with corresponding timestamps.
+
 **Update (2025-10-08):**  
 We released the pretrained CTC checkpoint and an inference example.  
 The model is now available on Hugging Face and can be executed in **10 lines of code**.
