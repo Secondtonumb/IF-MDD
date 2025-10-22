@@ -7,7 +7,8 @@ For more details, check 🎧[Demo](https://secondtonumb.github.io/publication_de
 [![Example](./fig/IF-MDD_example.png)](https://secondtonumb.github.io/publication_demo/ICASSP_2026/index.html)
 
 **Update (2025-10-22):**  
-We added a verbose CTC decoder that now outputs phonemes with corresponding timestamps.
+We added a new CTC decoder that now outputs phonemes with corresponding timestamps. 
+For inference with timestamps, please refer [inference.py](./inference.py)
 
 **Update (2025-10-08):**  
 We released the pretrained CTC checkpoint and an inference example.  
@@ -49,7 +50,7 @@ x = asr_model.transcribe_file("./examples/arctic_b0503.wav")
 print(x)
 # sil dh ah s eh n t sil ah v s t r ey n jh sil v ih zh ah t ey sh ah n p l uw ao f dh ah t r aa p ih k sil l ae n t sil
 ```
-<mark>For Verbose Inference, please refer [inference.py](./inference.py)</mark>
+<mark>For inference with timestamps, please refer [inference.py](./inference.py)</mark>
 
 <details>
 <summary> Check the CTC decode result with timestamps</summary>
