@@ -35,7 +35,7 @@ import importlib.util
 # Customized Encoder ASR 
 path = hf_hub_download(repo_id="Haopeng/CTC_for_IF-MDD", filename="MyEncoderASR.py")
 
-# Dyanamic import
+# Dynamic import
 spec = importlib.util.spec_from_file_location("MyEncoderASR", path)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
@@ -46,6 +46,14 @@ x = asr_model.transcribe_file("./examples/arctic_b0503.wav")
 print(x)
 # sil dh ah s eh n t sil ah v s t r ey n jh sil v ih zh ah t ey sh ah n p l uw ao f dh ah t r aa p ih k sil l ae n t sil
 ```
+<mark>For Verbose Inference, please refer [inference.py](./inference.py)</mark>
+
+<details>
+<summary> Check the CTC decode result with timestamps</summary>
+
+![CTC Verbose Decoder Example](./fig/phoneme_wav.png)
+
+</details>
 
 ## Training Steps
 ### **Step 0**: Data Preparation (TODO)
