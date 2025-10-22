@@ -1,8 +1,8 @@
 from huggingface_hub import hf_hub_download
 import importlib.util
-from pretrained_models.CTC_pretrained_IF_MDD.MyEncoderASR import MyEncoderASR
-from pretrained_models.CTC_pretrained_IF_MDD.MyEncoderASR import MyCTCPrefixBeamSearcher
-from pretrained_models.CTC_pretrained_IF_MDD.MyEncoderASR import plot_alignments
+from trainer.MyEncoderASR import MyEncoderASR
+from trainer.MyEncoderASR import MyCTCPrefixBeamSearcher
+from trainer.MyEncoderASR import plot_alignments
 import torch
 import numpy as np
 
@@ -27,10 +27,11 @@ batch = waveform.unsqueeze(0)
 rel_length = torch.tensor([1.0])
 
 ctc_p = asr_model.encode_batch(batch, rel_length)
-ctc_id = ctc_p.argmax(-1)
-
 # print(ctc_p.shape)
 # torch.Size([1, 221, 44])
+
+# CTC Tokens
+ctc_id = ctc_p.argmax(-1)
 
 # Get verbose CTC output
 searcher = MyCTCPrefixBeamSearcher(
@@ -64,4 +65,4 @@ fig = plot_alignments(waveform=waveform,
                       timesteps = torch.tensor(hyps[0][0].text_frames, dtype=torch.int32),
                       sample_rate=16000)
 
-fig.savefig("phoneme_wav_1.png")
+# fig.savefig("phoneme_wav_1.png")
