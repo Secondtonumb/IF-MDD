@@ -13,7 +13,7 @@ LLM_DIM: 4096
 
 # # How to fuse the features
 feature_fusion: "mono"        # Options: "mono" for single ssl, "dual_ssl_enc" for dual ssl encoder, "dual_loss" for single SSL dual ssl loss
-ctc_weight: 0.5               # If using "dual_loss" fusion, weight for CTC loss, (1-ctc_weight) for CE loss    
+ctc_weight: 0.3               # 从 0.5 降低，增加 LLM 分支权重 (1-ctc_weight=0.7 for CE loss)    
 # Input files
 # Data files
 data_folder_save: "./data"
@@ -270,10 +270,11 @@ __set_seed: !apply:torch.manual_seed [!ref <seed>]
 number_of_epochs: 100
 valid_search_interval: 5
 batch_size: 4
-lr: 0.0003
+lr: 0.0001  # 从 0.0003 降低，防止 LLM loss 上升
 sorting: ascending
 sample_rate: 16000
 gradient_accumulation: 2
+grad_clip: 1.0  # 新增：梯度裁剪，防止梯度爆炸
 lr_pretrained: 0.00001
 
 # Mix-Precision Training

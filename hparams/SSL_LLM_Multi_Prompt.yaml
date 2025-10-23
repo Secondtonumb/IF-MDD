@@ -13,7 +13,7 @@ LLM_DIM: 4096
 
 # # How to fuse the features
 feature_fusion: "mono"        # Options: "mono" for single ssl, "dual_ssl_enc" for dual ssl encoder, "dual_loss" for single SSL dual ssl loss
-ctc_weight: 0.5               # 降低 CTC 权重，增加 LLM 分支权重 (CE loss 权重 = 0.7)    
+ctc_weight: 0.5               # If using "dual_loss" fusion, weight for CTC loss, (1-ctc_weight) for CE loss    
 # Input files
 # Data files
 data_folder_save: "./data"
@@ -22,11 +22,13 @@ valid_annotation: !ref <data_folder_save>/train-dev.json
 test_annotation: !ref <data_folder_save>/test.json
 
 use_prompt: true
-prompt_type: "soft"        # "soft" 可学习的向量 | "discrete" 离散 token
-prompt_len: 16             # 增加到 16，提供更多上下文（原 8）
-prompt_init: "normal"      # "normal" 更适合 LLM，标准差为 0.02
-prompt_dropout: 0.1        # 添加 dropout 防止过拟合
-prompt_ids: null           # soft prompt 不需要 ids
+use_word: true
+use_cano: false
+prompt_type: "soft"        # "soft" | "discrete"
+prompt_len: 8              # prompt token 数
+prompt_init: "xavier"      # "xavier" | "zeros" | "normal"
+prompt_dropout: 0.0
+prompt_ids: null           # 若用 "discrete"，这里放 int 列表；否则为 null
 
 # Extra data
 train_annotation_extra: !ref <data_folder_save>/train-train_with_extra.json
@@ -290,14 +292,12 @@ __set_seed: !apply:torch.manual_seed [!ref <seed>]
 # training parameters
 number_of_epochs: 100
 valid_search_interval: 5
-batch_size: 8
-lr: 0.0002  # 从 0.0003 降低，防止 LLM loss 上升
+batch_size: 4
+lr: 0.0003
 sorting: ascending
 sample_rate: 16000
 gradient_accumulation: 2
-grad_clip: 1.0  # 新增：梯度裁剪，防止梯度爆炸
 lr_pretrained: 0.00001
-lr_prompt: 0.001  # 新增：prompt 专用学习率（可以比主模型高一些）
 
 # Mix-Precision Training
 auto_mix_prec: true

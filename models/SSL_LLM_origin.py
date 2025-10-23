@@ -333,7 +333,6 @@ class SSL_LLM_origin(sb.Brain):
         # ===== CTC Loss =====
         T = p_ctc.size(1)
         clipped_target_lens = torch.minimum(target_lens, torch.full_like(target_lens, T))
-        import pdb; pdb.set_trace()
         loss_ctc = self.hparams.ctc_cost(p_ctc.float(), targets, lens_for_ctc, clipped_target_lens)
         
         # ===== LLM Loss (big-vocab CrossEntropyLoss) =====
