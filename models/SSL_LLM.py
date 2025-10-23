@@ -23,8 +23,16 @@ class SSL_LLM(sb.Brain):
         
         # 初始化设备（必须先于依赖device的模块创建）
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        # 创建LayerNorm层用于特征归一化
-        # self.embed_layer_norm = nn.LayerNorm(self.modules.LLM.config.hidden_size).to(self.device)
+        
+        # 创建 LayerNorm 作为模型的一部分（而不是在 forward 中每次创建）
+        # 将在 on_fit_start 后初始化（因为此时 modules.LLM 还未创建）
+        self.inputs_embeds_norm = None
+        
+        # Prompt 相关初始化
+        self.prompt_embeddings = None
+        self.use_prompt = getattr(self.hparams, "use_prompt", False)
+        if self.use_prompt:
+            print(f"[Model] 启用 Prompt Tuning 模式")
         
         # 将SSL模型移至正确设备
         if getattr(self.modules, "perceived_ssl", None) is not None:
@@ -38,6 +46,44 @@ class SSL_LLM(sb.Brain):
         
         # 创建phoneme token掩码
         # self.setup_phoneme_mask()
+
+    def setup_prompt_embeddings(self):
+        """初始化 soft prompt embeddings"""
+        if not self.use_prompt or self.prompt_embeddings is not None:
+            return
+        
+        prompt_len = getattr(self.hparams, "prompt_len", 8)
+        prompt_init = getattr(self.hparams, "prompt_init", "normal")
+        prompt_dropout = getattr(self.hparams, "prompt_dropout", 0.0)
+        
+        # 获取 LLM 的 embedding 维度
+        H = self.modules.LLM.get_input_embeddings().weight.shape[1]
+        
+        # 创建 prompt embeddings
+        self.prompt_embeddings = nn.Parameter(torch.zeros(prompt_len, H))
+        
+        # 初始化
+        if prompt_init == "normal":
+            nn.init.normal_(self.prompt_embeddings, mean=0.0, std=0.02)
+        elif prompt_init == "xavier":
+            nn.init.xavier_uniform_(self.prompt_embeddings)
+        elif prompt_init == "zeros":
+            pass  # 已经是 zeros
+        else:
+            raise ValueError(f"Unknown prompt_init: {prompt_init}")
+        
+        # 添加 dropout（如果需要）
+        if prompt_dropout > 0:
+            self.prompt_dropout = nn.Dropout(prompt_dropout)
+        else:
+            self.prompt_dropout = None
+        
+        # 移到正确的设备
+        self.prompt_embeddings = self.prompt_embeddings.to(self.device)
+        
+        print(f"[Model] 创建 Prompt Embeddings: {prompt_len} × {H}")
+        print(f"[Model] Prompt 初始化方式: {prompt_init}")
+        print(f"[Model] Prompt dropout: {prompt_dropout}")
 
     def setup_phoneme_mask(self):
         """创建一个掩码，只允许生成音素相关的token"""
@@ -121,23 +167,59 @@ class SSL_LLM(sb.Brain):
         # 文本嵌入
         txt_emb = self.modules.phn_embed(inp_ids)  # [B, L_max+1, H]
         
-        # 拼接音频前缀与文本输入
-        inputs_embeds = torch.cat([Z, txt_emb], dim=1)  # [B, T + L_max+1, H]
-        norm_layer = torch.nn.LayerNorm(H).to(self.device)
-        inputs_embeds = norm_layer(inputs_embeds)
+        # ============ Prompt Tuning 逻辑 ============
+        # 如果启用 prompt，在音频和文本之间插入 prompt embeddings
+        if self.use_prompt:
+            # 初始化 prompt（延迟初始化）
+            if self.prompt_embeddings is None:
+                self.setup_prompt_embeddings()
+            
+            # 获取 prompt embeddings 并扩展到 batch
+            prompt_emb = self.prompt_embeddings.unsqueeze(0).expand(B, -1, -1)  # [B, P, H]
+            
+            # 应用 dropout（训练时）
+            if stage == sb.Stage.TRAIN and self.prompt_dropout is not None:
+                prompt_emb = self.prompt_dropout(prompt_emb)
+            
+            # 拼接顺序: [Audio] [Prompt] [Text]
+            inputs_embeds = torch.cat([Z, prompt_emb, txt_emb], dim=1)  # [B, T+P+L_max+1, H]
+            
+            # 更新 attention_mask（prompt 部分全为 1）
+            P = self.prompt_embeddings.size(0)
+            prefix_mask = torch.ones(B, Z.size(1), dtype=torch.long, device=self.device)
+            prompt_mask = torch.ones(B, P, dtype=torch.long, device=self.device)
+            text_mask = torch.zeros(B, L_max + 1, dtype=torch.long, device=self.device)
+            
+            for b in range(B):
+                Lb = int(abs_lens[b].item())
+                text_mask[b, : Lb + 1] = 1
+            attention_mask = torch.cat([prefix_mask, prompt_mask, text_mask], dim=1)  # [B, T+P+L_max+1]
+        else:
+            # 原始逻辑：直接拼接音频和文本
+            inputs_embeds = torch.cat([Z, txt_emb], dim=1)  # [B, T + L_max+1, H]
+            
+            # 构造attention_mask：前缀全1；文本部分仅保留有效(BOS到L_b位置)为1，其余0
+            prefix_mask = torch.ones(B, Z.size(1), dtype=torch.long, device=self.device)
+            text_mask = torch.zeros(B, L_max + 1, dtype=torch.long, device=self.device)
+            
+            for b in range(B):
+                Lb = int(abs_lens[b].item())
+                text_mask[b, : Lb + 1] = 1
+            attention_mask = torch.cat([prefix_mask, text_mask], dim=1)  # [B, T+L_max+1]
+        # ============================================
+        
+        # 使用持久化的 LayerNorm（会被优化）
+        if self.inputs_embeds_norm is None:
+            # 延迟初始化（第一次forward时创建）
+            self.inputs_embeds_norm = nn.LayerNorm(H).to(self.device)
+            print(f"[Model] 创建 inputs_embeds_norm: {H} 维")
+        
+        inputs_embeds = self.inputs_embeds_norm(inputs_embeds)
+        
         # 将dtype对齐到LLM权重dtype，避免float/half不一致
         llm_dtype = self.modules.LLM.get_input_embeddings().weight.dtype
         if inputs_embeds.dtype != llm_dtype:
             inputs_embeds = inputs_embeds.to(llm_dtype)
-        
-        # 构造attention_mask：前缀全1；文本部分仅保留有效(BOS到L_b位置)为1，其余0
-        prefix_mask = torch.ones(B, Z.size(1), dtype=torch.long, device=self.device)
-        text_mask = torch.zeros(B, L_max + 1, dtype=torch.long, device=self.device)
-        
-        for b in range(B):
-            Lb = int(abs_lens[b].item())
-            text_mask[b, : Lb + 1] = 1
-        attention_mask = torch.cat([prefix_mask, text_mask], dim=1)  # [B, T+L_max+1]
         
         # 运行LLM获得hidden states
         llm_out = self.modules.LLM(
@@ -147,11 +229,15 @@ class SSL_LLM(sb.Brain):
             return_dict=True,
         )
         
-        hidden = llm_out.hidden_states[-1]  # [B, T + L_max+1, H]   
+        hidden = llm_out.hidden_states[-1]  # [B, T + (P) + L_max+1, H]
         
-        # 取用于预测的隐状态：用位置 [T .. T+L_max] 来预测 [y0..y_{L-1}, EOS]
+        # 取用于预测的隐状态：跳过音频(T)和prompt(P)，用剩余部分预测 [y0..y_{L-1}, EOS]
         T = Z.size(1)
-        pred_h = hidden[:, T : T + (L_max + 1), :]  # [B, L_max+1, H]
+        if self.use_prompt and self.prompt_embeddings is not None:
+            P = self.prompt_embeddings.size(0)
+            pred_h = hidden[:, T + P : T + P + (L_max + 1), :]  # [B, L_max+1, H]
+        else:
+            pred_h = hidden[:, T : T + (L_max + 1), :]  # [B, L_max+1, H]
         
         # 小词表分类头
         # pdb.set_trace()
@@ -396,6 +482,17 @@ class SSL_LLM(sb.Brain):
             self.scaler.unscale_(self.adam_optimizer)
 
             if self.check_gradients(loss):
+                # 梯度裁剪
+                if hasattr(self.hparams, 'grad_clip') and self.hparams.grad_clip > 0:
+                    torch.nn.utils.clip_grad_norm_(
+                        [p for p in self.pretrained_opt_class.param_groups[0]['params'] if p.requires_grad],
+                        self.hparams.grad_clip
+                    )
+                    torch.nn.utils.clip_grad_norm_(
+                        [p for p in self.adam_optimizer.param_groups[0]['params'] if p.requires_grad],
+                        self.hparams.grad_clip
+                    )
+                
                 if any(p.requires_grad for p in self.pretrained_opt_class.param_groups[0]['params']):
                     self.scaler.step(self.pretrained_opt_class)
                 if any(p.requires_grad for p in self.adam_optimizer.param_groups[0]['params']):
@@ -412,9 +509,19 @@ class SSL_LLM(sb.Brain):
             (loss / self.hparams.gradient_accumulation).backward()
 
             if self.step % self.hparams.gradient_accumulation == 0:
-                # gradient clipping & early stop if loss is not fini
-                
+                # gradient clipping & early stop if loss is not finite
                 if self.check_gradients(loss):
+                    # 梯度裁剪
+                    if hasattr(self.hparams, 'grad_clip') and self.hparams.grad_clip > 0:
+                        torch.nn.utils.clip_grad_norm_(
+                            [p for p in self.pretrained_opt_class.param_groups[0]['params'] if p.requires_grad],
+                            self.hparams.grad_clip
+                        )
+                        torch.nn.utils.clip_grad_norm_(
+                            [p for p in self.adam_optimizer.param_groups[0]['params'] if p.requires_grad],
+                            self.hparams.grad_clip
+                        )
+                    
                     self.pretrained_opt_class.step()
                     self.adam_optimizer.step()
 
@@ -463,15 +570,25 @@ class SSL_LLM(sb.Brain):
         with torch.no_grad():
             # SSL编码并投影到LLaMA维度
             wav_feats = self.modules.perceived_ssl(wavs)
-            Z = self.modules.enc(wav_feats)
+            Z = self.modules.enc(wav_feats.transpose(-2, -1))  # [B, T, H]
+            Z = Z.transpose(-2, -1)
             
             # 添加BOS作为分隔符
             bos_embed = self.modules.LLM.get_input_embeddings()(
                 torch.tensor([42], device=self.device)  # BOS token
             ).expand(Z.size(0), 1, -1)
             
-            # 构建输入序列：[Speech] [BOS]
-            inputs_embeds = torch.cat([Z, bos_embed], dim=1)
+            # ============ Prompt 支持 ============
+            # 如果启用 prompt，在 Audio 和 BOS 之间插入 prompt
+            if self.use_prompt and self.prompt_embeddings is not None:
+                prompt_emb = self.prompt_embeddings.unsqueeze(0).expand(Z.size(0), -1, -1)
+                # 构建输入序列：[Speech] [Prompt] [BOS]
+                inputs_embeds = torch.cat([Z, prompt_emb, bos_embed], dim=1)
+            else:
+                # 原始逻辑：[Speech] [BOS]
+                inputs_embeds = torch.cat([Z, bos_embed], dim=1)
+            # ====================================
+            
             # 对齐dtype到LLM
             llm_dtype = self.modules.LLM.get_input_embeddings().weight.dtype
             if inputs_embeds.dtype != llm_dtype:
@@ -624,16 +741,67 @@ class SSL_LLM(sb.Brain):
         self.init_optimizers()
     
     def init_optimizers(self):
-        self.adam_optimizer = self.hparams.adam_opt_class(
-            self.hparams.model.parameters(), 
-        )
+        # 收集需要用 adam 优化的参数（排除 SSL）
+        adam_params = []
+        prompt_params = []
+        
+        # 添加 enc, enc_ctc, ctc_lin, phn_embed, phn_head 的参数
+        for module in [self.modules.enc, self.modules.enc_ctc, self.modules.ctc_lin,
+                       self.modules.phn_embed, self.modules.phn_head]:
+            for param in module.parameters():
+                if param.requires_grad:
+                    adam_params.append(param)
+        
+        # 添加 inputs_embeds_norm 的参数
+        if self.inputs_embeds_norm is not None:
+            for param in self.inputs_embeds_norm.parameters():
+                if param.requires_grad:
+                    adam_params.append(param)
+        
+        # 添加 prompt embeddings（如果启用）
+        if self.use_prompt and self.prompt_embeddings is not None:
+            prompt_params.append(self.prompt_embeddings)
+            print(f"[Optimizer] Prompt embeddings: {self.prompt_embeddings.numel():,} 参数")
+        
+        # 添加 LLM 中可训练的参数（仅 LoRA）
+        llm_trainable_params = []
+        for name, param in self.modules.LLM.named_parameters():
+            if param.requires_grad:
+                llm_trainable_params.append(param)
+        
+        print(f"[Optimizer] Adam 基础模块: {len(adam_params)} 个参数组")
+        print(f"[Optimizer] Adam 基础参数量: {sum(p.numel() for p in adam_params):,}")
+        print(f"[Optimizer] LLM LoRA 参数量: {sum(p.numel() for p in llm_trainable_params):,}")
+        
+        # 根据是否有 prompt 使用不同的学习率
+        if self.use_prompt and len(prompt_params) > 0:
+            # Prompt 使用单独的学习率
+            lr_prompt = getattr(self.hparams, "lr_prompt", self.hparams.lr * 10)
+            self.adam_optimizer = self.hparams.adam_opt_class([
+                {'params': adam_params, 'lr': self.hparams.lr},
+                {'params': llm_trainable_params, 'lr': self.hparams.lr},
+                {'params': prompt_params, 'lr': lr_prompt}
+            ])
+            print(f"[Optimizer] 使用分组学习率:")
+            print(f"  - 基础模块 lr: {self.hparams.lr}")
+            print(f"  - LLM LoRA lr: {self.hparams.lr}")
+            print(f"  - Prompt lr: {lr_prompt}")
+        else:
+            # 原始逻辑
+            all_params = adam_params + llm_trainable_params
+            self.adam_optimizer = self.hparams.adam_opt_class(all_params)
+            print(f"[Optimizer] 总参数量: {sum(p.numel() for p in all_params):,}")
+        
+        # SSL 模型使用单独的优化器
         self.pretrained_opt_class = self.hparams.pretrained_opt_class(
             self.modules.perceived_ssl.parameters(), 
         )
+        
         if self.checkpointer is not None:
-            # if self.hparams.perceived_ssl is not None and not self.hparams.perceived_ssl.freeze:
             self.checkpointer.add_recoverable("adam_opt", self.adam_optimizer)
             self.checkpointer.add_recoverable("pretrained_opt", self.pretrained_opt_class)
-            # import pdb; pdb.set_trace()
-            self.checkpointer.add_recoverable("tokenizer", self.label_encoder)  
+            self.checkpointer.add_recoverable("tokenizer", self.label_encoder)
+            # 保存 prompt embeddings
+            if self.use_prompt and self.prompt_embeddings is not None:
+                self.checkpointer.add_recoverable("prompt_embeddings", self.prompt_embeddings)  
     
