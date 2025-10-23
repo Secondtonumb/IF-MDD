@@ -32,6 +32,7 @@ from models.Transformer_TP import TransformerMDD_TP
 from models.Transformer_TP_fuse_errclass import TransformerMDD_TP_encdec_errclass
 from models.SSL_LLM import SSL_LLM
 
+from models.SSL_LLM_origin import SSL_LLM_origin
 from utils.DataPrepIO import LLMDataIOPrep, LLMDataIOPrep_ver2, LLMDataIOPrep_ver3
 sys.path.append("./trainer")
 logger = logging.getLogger(__name__)
@@ -74,6 +75,8 @@ if __name__ == "__main__":
         asr_brain_class = TransformerMDD_TP_encdec_errclass
     elif hparams["feature_fusion"] == "SSL_LLM":
         asr_brain_class = SSL_LLM
+    elif hparams["feature_fusion"] == "SSL_LLM_origin":
+        asr_brain_class = SSL_LLM_origin
     
     if asr_brain_class == SSL_LLM:
         DataPrep  = LLMDataIOPrep_ver3(hparams)
