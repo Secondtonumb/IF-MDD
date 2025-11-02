@@ -71,6 +71,7 @@ if __name__ == "__main__":
         asr_brain_class = TransformerMDD_TP
     elif hparams["feature_fusion"] == "TransformerMDD_TP_encdec_errclass":
         asr_brain_class = TransformerMDD_TP_encdec_errclass
+    
     if asr_brain_class == TransformerMDD_TP_encdec_errclass:
         DataPrep  = LLMDataIOPrep_ver2(hparams)
     else:
@@ -112,16 +113,22 @@ if __name__ == "__main__":
     )
 
     # Training/validation loop
-    try:
-        asr_brain.fit(
-            asr_brain.hparams.epoch_counter,
-            train_data,
-            valid_data,
-            train_loader_kwargs=hparams["train_dataloader_opts"],
-            valid_loader_kwargs=hparams["valid_dataloader_opts"],
-        )
-    except StopIteration:
-        print("Training stopped early due to no improvement.")
+    # train_record = test_data.data_ids[:1024]  # Select first 128 for debugging
+    # valid_record = valid_data.data_ids[:128]  # Select first 32 for debugging
+    # test_record = test_data.data_ids[:128]  # Select first 32 for debugging
+    # train_data_ = train_data.filtered_sorted(key_test={"id": lambda x: x in train_record},)
+    # valid_data_ = valid_data.filtered_sorted(key_test={"id": lambda x: x in valid_record},)
+    # test_data = test_data.filtered_sorted(key_test={"id": lambda x: x in test_record},)
+    # try:
+    #     asr_brain.fit(
+    #         asr_brain.hparams.epoch_counter,
+    #         train_data,
+    #         valid_data,
+    #         train_loader_kwargs=hparams["train_dataloader_opts"],
+    #         valid_loader_kwargs=hparams["valid_dataloader_opts"],
+    #     )
+    # except StopIteration:
+    #     print("Training stopped early due to no improvement.")
     
     # Test
     if hparams.get("evaluate_key", True):
