@@ -26,14 +26,16 @@ import wandb
 import time
 import torchaudio
 
-from models.phn_mono_ssl_model import PhnMonoSSLModel, PhnMonoSSLModel_DualCTCHead, PhnMonoSSLModel_RVQforBoth
+# from models.phn_mono_ssl_model import PhnMonoSSLModel, PhnMonoSSLModel_DualCTCHead, PhnMonoSSLModel_RVQforBoth
+from models.APA.phn_mono_ssl_model import PhnMonoSSLModel
 from models.Transformer import TransformerMDD
 from models.Transformer_TP import TransformerMDD_TP
 from models.Transformer_TP_fuse_errclass import TransformerMDD_TP_encdec_errclass
 
 from utils.DataPrepIO import LLMDataIOPrep, LLMDataIOPrep_ver2
 from utils.DataPrepIO import TimestampDataIOPrep, PhonemeFrameTimestampDataIOPrep
-from utils.DataPrepIO import LLMDataIOPrep_WordLevel
+from utils.DataPrepIO import LLMDataIOPrep_WordLevel, MFATimestampDataIOPrep
+from utils.DataPrepIO import ComprehensiveDataIOPrep
 sys.path.append("./trainer")
 logger = logging.getLogger(__name__)
 
@@ -77,14 +79,20 @@ if __name__ == "__main__":
     if asr_brain_class == TransformerMDD_TP_encdec_errclass:
         DataPrep  = LLMDataIOPrep_ver2(hparams)
     else:
-        DataPrep  = LLMDataIOPrep(hparams)
+        # Use comprehensive DataPrep that combines all features
+        # - MFA word & phone timestamps
+        # - Word-level pronunciation scores  
+        # - Canonical phone timestamps
+        DataPrep = ComprehensiveDataIOPrep(hparams)
         
+            # Legacy options (commented out):
+        # DataPrep = LLMDataIOPrep(hparams)
         # DataPrep = TimestampDataIOPrep(hparams)
         # DataPrep = PhonemeFrameTimestampDataIOPrep(hparams)
-        # DataPrep = LLMDataIOPrep_WordLevel(hparams)
+        # DataPrep = MFATimestampDataIOPrep(hparams)
+        # DataPrep_GT = LLMDataIOPrep_WordLevel(hparams)
     
     train_data, valid_data, test_data, label_encoder = DataPrep.prepare()
-
     logger.info(f"Using ASR brain class: {asr_brain_class.__name__}")
     
     asr_brain = asr_brain_class(

@@ -234,10 +234,13 @@ def build_json_for_split(
         perceived_sources: List[str] = []  # 'canonical' or 'del' for <del> mapping
         acc_scores: Optional[List[float]] = None
         mispro_events: List[dict] = []
+        word_scores: List[dict] = []  # Word-level scores
 
         if s_obj is not None:
             acc_scores = []
             words_list = s_obj.get("words", []) or []
+            phone_offset = 0  # Track phoneme position for word boundaries
+            
             for w_idx, w in enumerate(words_list):
                 w_phones_raw: List[str] = w.get("phones", []) or []
                 w_acc = w.get("phones-accuracy", []) or []
@@ -261,6 +264,19 @@ def build_json_for_split(
                 if len(w_acc) < len(w_canon_norm):
                     w_acc = list(w_acc) + [2.0] * (len(w_canon_norm) - len(w_acc))
                 acc_scores.extend([float(x) for x in w_acc[: len(w_canon_norm)]])
+                
+                # Store word-level information
+                word_scores.append({
+                    "text": w.get("text", ""),
+                    "phones": " ".join(w_canon_norm),
+                    "accuracy": w.get("accuracy", 10),
+                    "stress": w.get("stress", 10),
+                    "total": w.get("total", 10),
+                    "phones_accuracy": [float(x) for x in w_acc[: len(w_canon_norm)]],
+                    "phone_start": phone_offset,
+                    "phone_end": phone_offset + len(w_canon_norm)
+                })
+                phone_offset += len(w_canon_norm)
 
                 # build perceived using mispron when index present (apply always if provided)
                 for p_idx, (c_ph_raw, c_ph, acc) in enumerate(
@@ -350,6 +366,8 @@ def build_json_for_split(
             entry["accuracy_scores"] = acc_scores
         if mispro_events:
             entry["mispronunciations"] = mispro_events
+        if word_scores:
+            entry["word_scores"] = word_scores
 
         data[str(wav_path)] = entry
 

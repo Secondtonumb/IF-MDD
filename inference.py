@@ -10,7 +10,9 @@ from huggingface_hub import hf_hub_download
 import importlib.util
 from trainer.MyEncoderASR import MyEncoderASR
 from trainer.MyEncoderASR import MyCTCPrefixBeamSearcher
-from speechbrain.decoders.ctc import TorchAudioCTCPrefixBeamSearcher, CTCPrefixBeamSearcher
+from trainer.MyEncoderASR import MyCTCBeamSearcher
+
+from speechbrain.decoders.ctc import TorchAudioCTCPrefixBeamSearcher, CTCPrefixBeamSearcher, CTCBeamSearcher
 
 from trainer.MyEncoderASR import plot_alignments
 import torch
@@ -32,6 +34,7 @@ spec.loader.exec_module(module)
 
 # Simple Transcribe
 asr_model = MyEncoderASR.from_hparams(source="/home/kevingenghaopeng/MDD/IF-MDD/pretrained_models/CTC_for_IF-MDD", hparams_file="inference.yaml")
+# asr_model = MyEncoderASR.from_hparams(source="/home/kevingenghaopeng/MDD/IF-MDD/pretrained_models/CTCwithLP", hparams_file="inference.yaml")
 x = asr_model.transcribe_file(f"examples/{file_id}.wav")
 
 # print(x)
@@ -68,11 +71,25 @@ s = TorchAudioCTCPrefixBeamSearcher(
 hyps_ = s(ctc_p, rel_length)
 import pdb; pdb.set_trace()
 
-s1 = CTCPrefixBeamSearcher(
-     blank_index=asr_model.tokenizer.lab2ind["<blank>"],
-     vocab_list= list(dict(sorted(asr_model.tokenizer.ind2lab.items())).values())
+# s1 = CTCPrefixBeamSearcher(
+#      blank_index=asr_model.tokenizer.lab2ind["<blank>"],
+#      vocab_list= list(dict(sorted(asr_model.tokenizer.ind2lab.items())).values())
+# )
+# hyps__ = s1(ctc_p, rel_length)
+
+# searcher = CTCBeamSearcher(
+#     blank_index=asr_model.tokenizer.lab2ind["<blank>"],
+#     vocab_list=list(dict(sorted(asr_model.tokenizer.ind2lab.items())).values())
+# )
+
+# new_hyps = searcher(ctc_p, rel_length)
+
+searcher = MyCTCBeamSearcher(
+    blank_index=asr_model.tokenizer.lab2ind["<blank>"],
+    vocab_list=list(dict(sorted(asr_model.tokenizer.ind2lab.items())).values()),
 )
-hyps__ = s1(ctc_p, rel_length)
+new_hyps_ = searcher(ctc_p, rel_length)
+
 import pdb; pdb.set_trace()
 
 
@@ -357,6 +374,7 @@ intervals_method2 = [
 ]
 
 output_html = f"examples/{file_id}_comparison.html"
+
 generate_comparison_html(
     audio_path=f"examples/{file_id}.wav",
     intervals_data1=intervals_method1,
