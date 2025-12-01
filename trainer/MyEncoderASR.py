@@ -1,10 +1,21 @@
+import sys
+from pathlib import Path
+
+# Add .speechbrain to Python path
+speechbrain_path = "/home/kevingenghaopeng/MDD/IF-MDD/speechbrain"
+if Path(speechbrain_path).exists():
+    sys.path.insert(0, str(speechbrain_path))
+
 from speechbrain.inference.ASR import EncoderASR
 from speechbrain.decoders.ctc import TorchAudioCTCPrefixBeamSearcher
 from speechbrain.decoders.ctc import CTCHypothesis
+from speechbrain.decoders.ctc import CTCBeam
 import torch
 import speechbrain
 import functools
 import matplotlib.pyplot as plt
+from speechbrain.decoders.ctc import CTCBeamSearcher
+
 
 class MyEncoderASR(EncoderASR):
     def transcribe_batch(self, wavs, wav_lens):
@@ -147,7 +158,6 @@ class MyCTCPrefixBeamSearcher(TorchAudioCTCPrefixBeamSearcher):
 
             scores = [results[i][j].score for j in range(len(results[i]))]
             scores_preds.append(scores)
-
         hyps = []
         for (
             batch_index,
@@ -168,6 +178,95 @@ class MyCTCPrefixBeamSearcher(TorchAudioCTCPrefixBeamSearcher):
                 )
         return hyps
 
+import warnings
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+class MyCTCBeamSearcher(CTCBeamSearcher):
+   def decode_log_probs(
+        self,
+        log_probs: torch.Tensor,
+        wav_len: int,
+        lm_start_state: Optional[Any] = None,
+    ) -> List[CTCHypothesis]:
+        """Decodes the log probabilities of the CTC output.
+
+        Arguments
+        ---------
+        log_probs : torch.Tensor
+            The log probabilities of the CTC output.
+            The expected shape is [seq_length, vocab_size].
+        wav_len : int
+            The length of the wav input.
+        lm_start_state : Any, optional (default: None)
+            The start state of the language model.
+
+        Returns
+        -------
+        list
+            The topk list of CTCHypothesis.
+        """
+        # prepare caching/state for language model
+        language_model = self.lm
+        if language_model is None:
+            cached_lm_scores = {}
+        else:
+            if lm_start_state is None:
+                start_state = language_model.get_start_state()
+            else:
+                start_state = lm_start_state
+            cached_lm_scores = {("", False): (0.0, start_state)}
+        cached_p_lm_scores: Dict[str, float] = {}
+
+        beams = [
+            CTCBeam(
+                text="",
+                full_text="",
+                next_word="",
+                partial_word="",
+                last_token=None,
+                last_token_index=None,
+                text_frames=[],
+                partial_frames=(-1, -1),
+                score=0.0,
+                score_ctc=0.0,
+                p_b=0.0,
+            )
+        ]
+
+        # loop over the frames and perform the decoding
+        beams = self.partial_decoding(
+            log_probs, wav_len, beams, cached_lm_scores, cached_p_lm_scores
+        )
+
+        # finalize decoding by adding and scoring the last partial word
+        trimmed_beams = self.finalize_decoding(
+            beams,
+            cached_lm_scores,
+            cached_p_lm_scores,
+            force_next_word=True,
+            is_end=True,
+        )
+
+        # transform the beams into hypotheses and select the topk
+        import pdb; pdb.set_trace()
+        output_beams = [
+            CTCHypothesis(
+                text=self.normalize_whitespace(lm_beam.text),
+                last_lm_state=(
+                    cached_lm_scores[(lm_beam.text, True)][-1]
+                    if (lm_beam.text, True) in cached_lm_scores
+                    else None
+                ),
+                text_frames=list(
+                    zip(lm_beam.text.split(), lm_beam.text_frames)
+                ),
+                score=lm_beam.score,
+                lm_score=lm_beam.lm_score,
+            )
+            for lm_beam in trimmed_beams
+        ][: self.topk]
+        return output_beams
+    
 def plot_alignments(waveform, emission, tokens, timesteps, sample_rate):
     t = torch.arange(waveform.size(0)) / sample_rate
     ratio = waveform.size(0) / emission.size(1) / sample_rate

@@ -44,3 +44,40 @@ python inference.py \
         --perceived_ssl_model wavlm_large \
         --ENCODER_DIM 1024 \
         --prefix wavlm_ctc
+
+
+ python train.py \
+        /home/kevingenghaopeng/MDD/IF-MDD/hparams/speechocean762_original_spk_open.yaml \
+        --feature_fusion PhnMonoSSL \
+        --perceived_ssl_model wavlm_large \
+        --ENCODER_DIM 1024 \
+        --prefix wavlm_ctc
+
+ python train.py \
+        hparams/phnmonossl_ctclp.yaml  \
+        --feature_fusion PhnMonoSSL \
+        --perceived_ssl_model wavlm_large \
+        --ENCODER_DIM 1024 \
+        --prefix wavlm_ctclp
+
+python train.py \
+        hparams/phnmonossl_ctclp_ver2.yaml  \
+        --feature_fusion PhnMonoSSL \
+        --perceived_ssl_model wavlm_large \
+        --ENCODER_DIM 1024 \
+        --prefix wavlm_ctclp_ver2
+
+python train.py \
+        hparams/phnmonossl_ctclp_ver3.yaml  \
+        --feature_fusion PhnMonoSSL \
+        --perceived_ssl_model wavlm_large \
+        --ENCODER_DIM 1024 \
+        --prefix wavlm_ctclp_ver3
+
+
+python train.py \
+        hparams_APA/phnmonossl.yaml  \
+        --feature_fusion PhnMonoSSL \
+        --perceived_ssl_model wavlm_large \
+        --ENCODER_DIM 1024 \
+        --prefix wavlm_ctclp_ver3

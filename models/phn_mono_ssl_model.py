@@ -267,7 +267,9 @@ class PhnMonoSSLModel(sb.Brain):
                                 p_scores if p_scores is not None else None,
                                 title=comparison_title
                             )
-                            compare_path = os.path.join(output_dir, f"alignment_compare_{sample_stem}.png")
+                            # Use format: {SPEAKER}_{FILE_ID}.png
+                            compare_filename = f"alignment_compare_{speaker_id}_{sample_stem}.png"
+                            compare_path = os.path.join(output_dir, compare_filename)
                             fig_compare.savefig(compare_path, dpi=150, bbox_inches='tight')
                             plt.close(fig_compare)
                             print(f"💾 Saved comparison plot: {compare_path}")
@@ -294,7 +296,16 @@ class PhnMonoSSLModel(sb.Brain):
                         canonical_decoded = ""
                         perceived_decoded = ""
                     
-                    # Save as JSON
+                    # Extract speaker ID for filename (e.g., "/path/L2-ARCTIC/TLV/..." -> "TLV")
+                    speaker_id = "unknown"
+                    if "/" in sample_id:
+                        parts = sample_id.split("/")
+                        for i, part in enumerate(parts):
+                            if part in ["L2-ARCTIC", "L2ARCTIC"] and i+1 < len(parts):
+                                speaker_id = parts[i+1]
+                                break
+                    
+                    # Save as JSON with format: decode_{SPEAKER}_{FILE_ID}.json
                     test_record = {
                         "sample_id": sample_id,
                         "predicted": decoded_seq,
@@ -303,7 +314,8 @@ class PhnMonoSSLModel(sb.Brain):
                         "num_predicted": len(predict_target_sample),
                     }
                     
-                    json_path = os.path.join(output_dir, f"decode_{sample_stem}.json")
+                    json_filename = f"decode_{speaker_id}_{sample_stem}.json"
+                    json_path = os.path.join(output_dir, json_filename)
                     with open(json_path, 'w', encoding='utf-8') as f:
                         json.dump(test_record, f, ensure_ascii=False, indent=2)
                     

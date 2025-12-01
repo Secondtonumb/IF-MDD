@@ -8,6 +8,7 @@ from torch.utils.data import Dataset, DataLoader
 import speechbrain as sb
 import json
 
+# add ../trainer to sys.path
 from trainer.AutoSSLoader import AutoSSLLoader
 
 class GoPDataset(Dataset):
@@ -459,67 +460,301 @@ class GoPDataset(Dataset):
         return self.feat[idx, :], self.feat_energy[idx, :], self.feat_dur[idx, :], self.phn_label[idx, :, 1], self.phn_label[idx, :, 0], self.utt_label[idx, :], self.word_label[idx, :], self.word_id[idx,:]
 
 class GoPDataset_ver2(GoPDataset):
-    def __init__(self, set, am='librispeech'):
+    '''
+    Extended GoPDataset with on-the-fly SSL feature extraction.
+    This dataset integrates AutoSSLLoader to extract SSL features dynamically.
+    '''
+    def __init__(self, set, am='librispeech', model_name="wavlm_large", sample_rate=16000, 
+                 freeze=True, freeze_feature_extractor=True, save_path=None, 
+                 output_all_hiddens=False, encoder_type=None):
+        """
+        Initialize the dataset with SSL feature extractor.
+        
+        Args:
+            set: 'train' or 'test'
+            am: acoustic model type ('librispeech', 'paiia', 'paiib')
+            model_name: SSL model name (e.g., 'wavlm_large', 'hubert_large')
+            sample_rate: target sample rate for audio processing
+            freeze: whether to freeze the SSL model
+            freeze_feature_extractor: whether to freeze the feature extractor
+            save_path: path to save the model
+            output_all_hiddens: whether to output all hidden states
+            encoder_type: custom encoder type if needed
+        """
         super().__init__(set, am)
-        self.feature_extractor = AutoSSLLoader.FeatureExtractor(self,
-                         model_name="wavlm_large",
-                         freeze=True, freeze_feature_extractor=True,
-                         save_path=None, output_all_hiddens=False, encoder_type=None)
         
-    # initialize the feature extractor
-    def FeatureExtractor(self,
-                         model_name="wavlm_large",
-                         freeze=True, freeze_feature_extractor=True,
-                         save_path=None, output_all_hiddens=False, encoder_type=None):
+        # Initialize SSL feature extractor
+        self.model_name = model_name
+        self.sample_rate = sample_rate
+        self.ssl_model = AutoSSLLoader(
+            model_name=model_name,
+            freeze=freeze,
+            freeze_feature_extractor=freeze_feature_extractor,
+            save_path=save_path if save_path else "/home/kevingenghaopeng/MDD/IF-MDD/pretrained_models",
+            output_all_hiddens=output_all_hiddens,
+            encoder_type=encoder_type
+        )
         
-        wav_paths = self.wav_dict
+        # Move model to GPU if available
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        if self.ssl_model is not None:
+            self.ssl_model = self.ssl_model.to(self.device)
+            if freeze:
+                self.ssl_model.eval()
         
-    def audio_pipeline(self, wav):
+        # Cache for SSL features (optional, can be memory intensive)
+        self.ssl_feature_cache = {}
+        
+    def audio_pipeline(self, wav_path):
+        """
+        Load and process audio file to extract waveform.
+        
+        Args:
+            wav_path: path to the audio file (can be a command string for Kaldi)
+        
+        Returns:
+            sig: processed waveform tensor
+        """
         import torchaudio
-        # Load waveform and resample if needed
-        waveform, sr = torchaudio.load(wav)  # waveform: [1, T]
+        
+        # Handle Kaldi pipe format (e.g., "sox ... |" or "ffmpeg ... |")
+        if '|' in wav_path:
+            # For Kaldi pipe commands, use kaldi_io or execute the command
+            import subprocess
+            import io
+            # Execute the command and read from stdout
+            try:
+                process = subprocess.Popen(
+                    wav_path.rstrip('|').strip(),
+                    shell=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE
+                )
+                stdout, stderr = process.communicate()
+                
+                # Load from bytes
+                audio_bytes = io.BytesIO(stdout)
+                waveform, sr = torchaudio.load(audio_bytes)
+            except Exception as e:
+                raise RuntimeError(f"Failed to load audio from pipe command: {wav_path}\nError: {e}")
+        else:
+            # Load waveform directly from file
+            waveform, sr = torchaudio.load(wav_path)
 
-        # Optional: resample to match model sample rate
-        target_sr = self.hparams["sample_rate"]
-        if sr != target_sr:
-            resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=target_sr)
+        # Resample if needed
+        if sr != self.sample_rate:
+            resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=self.sample_rate)
             waveform = resampler(waveform)
 
-        #utils/layers Convert to mono if stereo
+        # Convert to mono if stereo
         if waveform.shape[0] > 1:
             waveform = waveform.mean(dim=0, keepdim=True)
 
-        # Apply feature extractor (expecting 1D numpy array)
-        sig = self.hparams["perceived_ssl"].feature_extractor(
-            waveform.squeeze(0).numpy(),  # convert to 1D numpy
-            sampling_rate=target_sr
-        ).input_values[0]
-
-        sig = torch.Tensor(sig)
+        # Return as 1D tensor
+        sig = waveform.squeeze(0)
         return sig
     
+    def extract_ssl_features(self, waveform):
+        """
+        Extract SSL features from waveform.
+        
+        Args:
+            waveform: 1D tensor of audio samples
+        
+        Returns:
+            ssl_features: SSL features tensor
+        """
+        if self.ssl_model is None:
+            return None
+        
+        # Ensure waveform is on the correct device and has batch dimension
+        if waveform.dim() == 1:
+            waveform = waveform.unsqueeze(0)  # [1, T]
+        
+        waveform = waveform.to(self.device)
+        
+        # Extract features
+        with torch.no_grad():
+            ssl_features = self.ssl_model(waveform)
+            # ssl_features shape: [batch, time, feature_dim]
+        
+        return ssl_features.squeeze(0)  # Remove batch dimension [time, feature_dim]
+    
     def __getitem__(self, idx):
-        # self.dict_all
+        """
+        Get item with SSL features extracted on-the-fly.
+        
+        Returns:
+            utt_id: utterance ID
+            utt_info: utterance information dict (phone alignments, labels, etc.)
+            feat: GOP features
+            feat_energy: energy features
+            feat_dur: duration features
+            wav_path: path to audio file
+            ssl_features: SSL features extracted from audio
+        """
         utt_id = list(self.dict_all.keys())[idx]
         wav_path = self.wav_dict[utt_id]
-        return utt_id, self.dict_all[utt_id], self.feat[idx, :], self.feat_energy[idx, :], self.feat_dur[idx, :], wav_path
+        
+        # Check cache first
+        if utt_id in self.ssl_feature_cache:
+            ssl_features = self.ssl_feature_cache[utt_id]
+        else:
+            # Extract SSL features on-the-fly
+            waveform = self.audio_pipeline(wav_path)
+            ssl_features = self.extract_ssl_features(waveform)
+            
+            # Optionally cache (comment out if memory is limited)
+            # self.ssl_feature_cache[utt_id] = ssl_features
+        
+        return (
+            utt_id, 
+            self.dict_all[utt_id], 
+            self.feat[idx, :], 
+            self.feat_energy[idx, :], 
+            self.feat_dur[idx, :], 
+            wav_path,
+            ssl_features
+        )
+    
+    def dump_ssl_features(self, output_file, format='npz'):
+        """
+        Extract and save SSL features for all utterances.
+        
+        Args:
+            output_file: path to save the features
+            format: 'npz' (numpy archive) or 'pt' (pytorch) or 'h5' (hdf5)
+        """
+        import os
+        from tqdm import tqdm
+        
+        print(f"Extracting SSL features for {len(self)} utterances using {self.model_name}...")
+        
+        ssl_features_dict = {}
+        
+        for idx in tqdm(range(len(self))):
+            utt_id = list(self.dict_all.keys())[idx]
+            wav_path = self.wav_dict[utt_id]
+            
+            # Extract features
+            waveform = self.audio_pipeline(wav_path)
+            ssl_features = self.extract_ssl_features(waveform)
+            
+            # Convert to numpy for storage
+            ssl_features_dict[utt_id] = ssl_features.cpu().numpy()
+        
+        # Save based on format
+        if format == 'npz':
+            np.savez_compressed(output_file, **ssl_features_dict)
+            print(f"SSL features saved to {output_file} (compressed npz format)")
+        elif format == 'pt':
+            # Convert back to tensors for pytorch format
+            ssl_features_tensor_dict = {k: torch.from_numpy(v) for k, v in ssl_features_dict.items()}
+            torch.save(ssl_features_tensor_dict, output_file)
+            print(f"SSL features saved to {output_file} (pytorch format)")
+        elif format == 'h5':
+            import h5py
+            with h5py.File(output_file, 'w') as hf:
+                for utt_id, features in ssl_features_dict.items():
+                    hf.create_dataset(utt_id, data=features, compression='gzip')
+            print(f"SSL features saved to {output_file} (hdf5 format)")
+        else:
+            raise ValueError(f"Unsupported format: {format}. Use 'npz', 'pt', or 'h5'")
+        
+        return ssl_features_dict
+    
+    def load_ssl_features(self, input_file, format='npz'):
+        """
+        Load pre-extracted SSL features into cache.
+        
+        Args:
+            input_file: path to the saved features
+            format: 'npz' (numpy archive) or 'pt' (pytorch) or 'h5' (hdf5)
+        """
+        print(f"Loading SSL features from {input_file}...")
+        
+        if format == 'npz':
+            data = np.load(input_file)
+            for utt_id in data.files:
+                self.ssl_feature_cache[utt_id] = torch.from_numpy(data[utt_id])
+        elif format == 'pt':
+            data = torch.load(input_file)
+            self.ssl_feature_cache = data
+        elif format == 'h5':
+            import h5py
+            with h5py.File(input_file, 'r') as hf:
+                for utt_id in hf.keys():
+                    self.ssl_feature_cache[utt_id] = torch.from_numpy(hf[utt_id][:])
+        else:
+            raise ValueError(f"Unsupported format: {format}. Use 'npz', 'pt', or 'h5'")
+        
+        print(f"Loaded SSL features for {len(self.ssl_feature_cache)} utterances")
+        
+    def clear_cache(self):
+        """Clear SSL feature cache to free memory."""
+        self.ssl_feature_cache.clear()
+
 
 # Example usage:
 if __name__ == "__main__":
     am = 'librispeech'
-    tr_dataset = GoPDataset('train', am=am)
-    # save as json file
-    tr_dataset.dump_dataset('/home/kevingenghaopeng/MDD/IF-MDD/data_so762/gop_librispeech_train.json', format='json')
-    tr_dataset_with_align = GoPDataset_ver2('train', am=am)
-    tr_dataloader_with_align = DataLoader(tr_dataset_with_align, batch_size=1, shuffle=True)
     
-    import pdb; pdb.set_trace()
-    tr_dataloader = DataLoader(tr_dataset, batch_size=1, shuffle=True)
+    # ===== Example 1: Basic GoPDataset (no SSL features) =====
+    print("Creating basic GoPDataset...")
+    tr_dataset = GoPDataset('train', am=am)
+    tr_dataset.dump_dataset('/home/kevingenghaopeng/MDD/IF-MDD/data_so762/gop_librispeech_train.json', format='json')
+    
     te_dataset = GoPDataset('test', am=am)
     te_dataset.dump_dataset('/home/kevingenghaopeng/MDD/IF-MDD/data_so762/gop_librispeech_test.json', format='json')
-    te_dataloader = DataLoader(te_dataset, batch_size=2500, shuffle=False)
     
-    te_dataset_with_align = GoPDataset_ver2('test', am=am)
-    te_dataloader_with_align = DataLoader(te_dataset_with_align, batch_size=1, shuffle=True)
+    tr_dataloader = DataLoader(tr_dataset, batch_size=32, shuffle=True)
+    te_dataloader = DataLoader(te_dataset, batch_size=32, shuffle=False)
+    
+    # ===== Example 2: GoPDataset_ver2 with SSL features (on-the-fly extraction) =====
+    print("\nCreating GoPDataset_ver2 with SSL feature extraction...")
+    tr_dataset_ssl = GoPDataset_ver2('train', am=am, model_name='wavlm_large', sample_rate=16000)
+    
+    # Test single item
+    print("\nTesting single item from SSL dataset...")
+    utt_id, utt_info, feat, feat_energy, feat_dur, wav_path, ssl_features = tr_dataset_ssl[0]
+    print(f"Utterance ID: {utt_id}")
+    print(f"SSL features shape: {ssl_features.shape}")
+    print(f"GOP features shape: {feat.shape}")
+    
+    # Create dataloader for SSL dataset
+    tr_dataloader_ssl = DataLoader(tr_dataset_ssl, batch_size=1, shuffle=True, num_workers=0)
+    
+    # ===== Example 3: Extract and save SSL features to disk =====
+    print("\nExtracting and saving SSL features...")
+    # Save as compressed numpy archive (recommended for large datasets)
+    tr_dataset_ssl.dump_ssl_features(
+        '/home/kevingenghaopeng/MDD/IF-MDD/data_so762/ssl_features_train_wavlm_large.npz',
+        format='npz'
+    )
+    
+    # Or save as PyTorch tensors
+    # tr_dataset_ssl.dump_ssl_features(
+    #     '/home/kevingenghaopeng/MDD/IF-MDD/data_so762/ssl_features_train_wavlm_large.pt',
+    #     format='pt'
+    # )
+    
+    # ===== Example 4: Load pre-extracted SSL features =====
+    print("\nLoading pre-extracted SSL features...")
+    te_dataset_ssl = GoPDataset_ver2('test', am=am, model_name='wavlm_large', sample_rate=16000)
+    
+    # If you have pre-extracted features, load them to speed up training
+    # te_dataset_ssl.load_ssl_features(
+    #     '/home/kevingenghaopeng/MDD/IF-MDD/data_so762/ssl_features_test_wavlm_large.npz',
+    #     format='npz'
+    # )
+    
+    # ===== Example 5: Use different SSL models =====
+    # Available models: wavlm_large, wavlm_base, hubert_large, wav2vec2_large, etc.
+    # dataset_hubert = GoPDataset_ver2('train', am=am, model_name='hubert_large')
+    # dataset_wav2vec = GoPDataset_ver2('train', am=am, model_name='wav2vec2_large')
+    
+    print("\nDataset setup complete!")
+    print(f"Train dataset size: {len(tr_dataset_ssl)}")
+    print(f"Test dataset size: {len(te_dataset_ssl)}")
     
     import pdb; pdb.set_trace()
