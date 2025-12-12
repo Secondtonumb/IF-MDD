@@ -29,7 +29,8 @@ class PhonemeSSLExtractorWithEncoder:
                  pooling_method: str = "mean",
                  target_phn_frames: int = 50,
                  pretrained_model_path: str = "/home/kevingenghaopeng/MDD/IF-MDD/pretrained_models",
-                 device: str = "cuda" if torch.cuda.is_available() else "cpu"):
+                 device: str = "cuda" if torch.cuda.is_available() else "cpu",
+                 GOPT_mode_pooling: bool = False):
         """
         初始化特征提取器
         
@@ -41,6 +42,7 @@ class PhonemeSSLExtractorWithEncoder:
             pooling_method: 池化方法 ("mean" 或 "max")
             target_phn_frames: 目标音素帧数（用于 padding）
             device: 运行设备 ("cuda" 或 "cpu")
+            GOPT_mode_pooling: 是否使用 GOPT 的音素池化实现（t_e - t_s + 1）
         """
         self.json_file = Path(json_file)
         self.ctm_file = Path(ctm_file)
@@ -50,6 +52,7 @@ class PhonemeSSLExtractorWithEncoder:
         self.target_phn_frames = target_phn_frames
         self.pretrained_model_path = pretrained_model_path
         self.device = device
+        self.GOPT_mode_pooling = GOPT_mode_pooling
         
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
@@ -167,7 +170,14 @@ class PhonemeSSLExtractorWithEncoder:
                 
                 # SSL encoder 的调用方式：model(wavs, wav_lens)
                 # 返回值通常是 (batch_size, num_frames, feature_dim)
-                features = self.ssl_encoder(waveform, wav_lens)
+                # import pdb; pdb.set_trace()
+                import speechbrain
+                if type(self.ssl_encoder) == speechbrain.lobes.models.huggingface_transformers.mimi.Mimi:
+                    token, features, _ = self.ssl_encoder(waveform, )
+                    # import pdb; pdb.set_trace()
+                else:
+                    
+                    features = self.ssl_encoder(waveform, wav_lens)
             
             # 如果返回的是多层的，取最后一层
             if isinstance(features, (list, tuple)):
@@ -211,6 +221,7 @@ class PhonemeSSLExtractorWithEncoder:
         if frames.shape[0] == 0:
             # 如果没有帧，返回零向量
             return np.zeros(self.feature_dim, dtype=np.float32)
+        # import pdb; pdb.set_trace()
         
         if self.pooling_method == "mean":
             return frames.mean(axis=0).astype(np.float32)
@@ -272,15 +283,23 @@ class PhonemeSSLExtractorWithEncoder:
             start_frame = max(0, start_frame)
             end_frame = min(end_frame, frame_features.shape[0])
             
+            # import pdb; pdb.set_trace()
+            # try GOPT's implementation [t_e - t_s + 1]
             if start_frame < end_frame:
-                phn_frames = frame_features[start_frame:end_frame]
+                if self.GOPT_mode_pooling == True:
+                    phn_frames = frame_features[start_frame:end_frame + 1]
+                else:
+                    phn_frames = frame_features[start_frame:end_frame]
+            
             else:
-                phn_frames = np.array([], dtype=np.float32).reshape(0, self.feature_dim)
+                # phn_frames = np.array([], dtype=np.float32).reshape(0, self.feature_dim)
+                # guarantee at least one frame is used
+                phn_frames = frame_features[start_frame:start_frame+1]
             
             # 池化
             pooled = self._pool_frames(phn_frames)
             phn_features_list.append(pooled)
-        
+        # import pdb; pdb.set_trace()
         # 堆叠所有音素特征
         if phn_features_list:
             phn_features = np.stack(phn_features_list, axis=0)  # (num_phonemes, feature_dim)
@@ -316,11 +335,14 @@ class PhonemeSSLExtractorWithEncoder:
             utt_id = Path(wav_path).stem
             utt_id_to_wav[utt_id] = wav_path
         
-        # 获取 CTM 中的所有 utterance IDs
-        utt_ids = sorted(set(self.ctm_data.keys()) & set(utt_id_to_wav.keys()))
+        # 使用 CTM 文件的顺序，而不是排序后的顺序
+        # 获取 CTM 中存在且 JSON 中也存在的 utterance IDs，按 CTM 的顺序
+        utt_ids = [utt_id for utt_id in self.ctm_data.keys() 
+                   if utt_id in utt_id_to_wav]
         
         print(f"Found {len(utt_ids)} utterances to process")
         print(f"(CTM: {len(self.ctm_data)}, JSON: {len(self.json_data)})")
+        print(f"Using CTM file order for processing...")
         
         for utt_id in tqdm(utt_ids, desc="Extracting features"):
             try:
@@ -375,13 +397,29 @@ class PhonemeSSLExtractorWithEncoder:
             return None, stats, None, None
         
         # 按 utterance ID 排序确保一致性
-        sorted_utt_ids = sorted(output_data.keys())
+        # import pdb; pdb.set_trace()
+        # 使用 CTM 文件的顺序，而不是排序后的顺序
+        sorted_utt_ids = [utt_id for utt_id in self.ctm_data.keys() 
+                          if utt_id in output_data]
+        
+        # 输出 utt_ids + phoneme numbers to a file for analysis
+        # of course, here is none padded numbers
+        utt_phn_count_file = self.output_dir / f"utt_phoneme_counts_{self.json_file.stem}_{self.ssl_model_name}_{self.pooling_method}.txt"
+        with open(utt_phn_count_file, 'w') as f:
+            for utt_id in sorted_utt_ids:
+                # get non-padded phoneme number
+                num_phns = (output_data[utt_id].sum(axis=1) != 0).sum()
+                f.write(f"{utt_id}\t{num_phns}\n")
+        print(f"Wrote utterance phoneme counts to: {utt_phn_count_file}")
+        
         
         # 直接堆叠，因为每个特征已经是 (50, 1024)
         final_features = np.stack([output_data[utt_id] for utt_id in sorted_utt_ids], axis=0)
-        
-        # 保存为 NPY 文件
-        output_file = self.output_dir / f"phoneme_ssl_features_{self.ssl_model_name}_{self.pooling_method}.npy"
+        # import pdb; pdb.set_trace()
+        # 构建输出文件名：包含 JSON 文件名和 SSL 模型 ID
+        json_stem = self.json_file.stem  # 例如 "test" 或 "tr"
+        output_filename = f"phoneme_ssl_features_{json_stem}_{self.ssl_model_name}_{self.pooling_method}.npy"
+        output_file = self.output_dir / output_filename
         np.save(output_file, final_features)
         print(f"\nSaved to: {output_file}")
         print(f"Output shape: {final_features.shape}")
@@ -427,7 +465,7 @@ def main():
                         help='输出目录')
     
     parser.add_argument('--ssl-model', type=str, default='wavlm_large',
-                        choices=['wavlm_base', 'wavlm_large', 'hubert_base', 'wav2vec2_base'],
+                        # choices=['wavlm_base', 'wavlm_large', 'hubert_base', 'wav2vec2_base'],
                         help='SSL 模型名称')
     
     parser.add_argument('--pooling', type=str, default='mean',
@@ -445,6 +483,9 @@ def main():
                         choices=['cuda', 'cpu'],
                         help='运行设备')
     
+    parser.add_argument('--GOPT_mode_pooling', type=bool, default=False,
+                        help='是否使用 GOPT 的音素池化实现（t_e - t_s + 1）')
+    
     args = parser.parse_args()
     
     # 创建配置字典
@@ -457,6 +498,7 @@ def main():
         'target_phn_frames': args.target_phn_frames,
         'pretrained_model_path': args.pretrained_model_path,
         'device': args.device,
+        "GOPT_mode_pooling": args.GOPT_mode_pooling
     }
     
     # 打印配置
@@ -476,7 +518,8 @@ def main():
         pooling_method=config['pooling_method'],
         target_phn_frames=config['target_phn_frames'],
         pretrained_model_path=config['pretrained_model_path'],
-        device=config['device']
+        device=config['device'],
+        GOPT_mode_pooling=config['GOPT_mode_pooling']
     )
     
     # 执行提取
@@ -508,7 +551,7 @@ def main():
         print(f"  Shape: {output_data[first_utt].shape}")
         print(f"  Non-zero phonemes: {(output_data[first_utt].sum(axis=1) != 0).sum()}")
         print(f"  Feature range: [{output_data[first_utt].min():.3f}, {output_data[first_utt].max():.3f}]")
-    
+    # import pdb; pdb.set_trace()
     return output_data, stats, sorted_utt_ids, final_features, sorted_utt_ids, final_features
 
 

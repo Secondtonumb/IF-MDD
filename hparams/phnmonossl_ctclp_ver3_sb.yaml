@@ -3,23 +3,44 @@ prefix: ""
 
 ## SSL features Selection
 pretrained_models_path: pretrained_models/
+# pretrained_models:
+# {
+#     "wav2vec2_base": "facebook/wav2vec2-base", # 768
+#     "hubert_base": "facebook/hubert-base-ls960", # 768
+#     "wavlm_base": "microsoft/wavlm-base", # 768
+#     "wavlm_base_plus": "microsoft/wavlm-base-plus", # 768
+#     "hubert_multilingual": "utter-project/mHuBERT-147", # 768
+#     "clap" : "laion/clap-htsat-fused", # 768
+#     "data2vec_base": "facebook/data2vec-audio-base", # 768
+    
+#     "wav2vec2_large": "facebook/wav2vec2-large", # 1024
+#     "hubert_large": "facebook/hubert-large-ls960", # 1024
+#     "wavlm_large": "microsoft/wavlm-large-plus", # 1024
+#     "data2vec_large": "facebook/data2vec-audio-large", #1024
+#     "whisper_medium": "openai/whisper-medium", # 1024
+    
+#     "whisper_large_v3_turbo": "openai/whisper-large-v3-turbo", # 1280
+# }
+
+
 # select pretrained SSL models
 perceived_ssl_model: "wavlm_large" # in pretrained_models
 canonical_ssl_model: Null
 
 # # models hidden size, varies by model
 ENCODER_DIM: 1024
-LLM_DIM: 4096
 
 # # How to fuse the features
 feature_fusion: "mono"        # Options: "mono" for single ssl, "dual_ssl_enc" for dual ssl encoder, "dual_loss" for single SSL dual ssl loss
-ctc_weight: 0.3               # 从 0.5 降低，增加 LLM 分支权重 (1-ctc_weight=0.7 for CE loss)    
+blend_alpha: 0.5              # If using "blend" fusion
+
 # Input files
-# Data files
-data_folder_save: "./data"
+# Data files - SpeechOcean762 (Original)
+data_folder_save: "/home/kevingenghaopeng/MDD/IF-MDD/data/speechocean762_orig_spk_open"
 train_annotation: !ref <data_folder_save>/train-train.json
 valid_annotation: !ref <data_folder_save>/train-dev.json
 test_annotation: !ref <data_folder_save>/test.json
+
 # Extra data
 train_annotation_extra: !ref <data_folder_save>/train-train_with_extra.json
 use_extra_train_data: False
@@ -33,7 +54,7 @@ max_save_models: 3 # Maximum number of saved models for each metrics
 # generate_training_id: !apply:trainer.generate_training_id.generate_training_id [!ref <perceived_ssl_model_id>, !ref <canonical_ssl_model_id>, !ref <feature_fusion>, !ref <prefix>]
 
 # output files
-output_folder: !ref exp_l2arctic/<perceived_ssl_model>_<canonical_ssl_model>_<feature_fusion>_<prefix>
+output_folder: !ref exp_speechocean762/<perceived_ssl_model>_<canonical_ssl_model>_<feature_fusion>_<prefix>
 per_file: !ref <output_folder>/per.txt
 mpd_file: !ref <output_folder>/mpd.txt
 save_folder: !ref <output_folder>/save
@@ -51,12 +72,7 @@ modules:
     canonical_ssl: !ref <canonical_ssl>
     perceived_ssl: !ref <perceived_ssl>
     enc: !ref <enc>
-    LLM: !ref <LLM>
-    enc_ctc: !ref <enc_ctc>
     ctc_lin: !ref <ctc_lin>
-    # 方案A：小词表嵌入与分类头
-    phn_embed: !ref <phn_embed>
-    phn_head: !ref <phn_head>
 
 perceived_ssl: !apply:trainer.AutoSSLoader.AutoSSLLoader
     model_name: !ref <perceived_ssl_model>
@@ -74,134 +90,19 @@ canonical_ssl: !apply:trainer.AutoSSLoader.AutoSSLLoader
     output_all_hiddens: False
 
 canonical_ssl_emb_layer: -1
-## SSL features Selection
 
-enc_linear1: !new:torch.nn.Linear
-    in_features: !ref <ENCODER_DIM>
-    out_features: 2048
-
-enc_linear2: !new:torch.nn.Linear
-    in_features: 2048
-    out_features: 3072
-
-enc_linear3: !new:torch.nn.Linear
-    in_features: 3072
-    out_features: !ref <LLM_DIM>
-
-enc_ffn1: !new:torch.nn.Linear
-    in_features: !ref <LLM_DIM>
-    out_features: !ref <LLM_DIM>
-
-enc_ffn2: !new:torch.nn.Linear
-    in_features: !ref <LLM_DIM>
-    out_features: !ref <LLM_DIM>
-
-encoder_dropout: 0.1
-
-# # 组装编码器
-# enc: !new:torch.nn.Sequential
-#     - !new:torch.nn.LayerNorm
-#         normalized_shape: !ref <ENCODER_DIM>
-#     # 第一阶段：1024 -> 2048
-#     - !ref <enc_linear1>
-#     - !new:torch.nn.LayerNorm
-#         normalized_shape: 2048
-#     - !new:torch.nn.ReLU
-#     - !new:torch.nn.Dropout
-#         p: !ref <encoder_dropout>
-#     # 第二阶段：2048 -> 3072
-#     - !ref <enc_linear2>
-#     - !new:torch.nn.LayerNorm
-#         normalized_shape: 3072
-#     - !new:torch.nn.ReLU
-#     - !new:torch.nn.Dropout
-#         p: !ref <encoder_dropout>
-#     # 第三阶段：3072 -> LLM_DIM
-#     - !ref <enc_linear3>
-#     - !new:torch.nn.LayerNorm
-#         normalized_shape: !ref <LLM_DIM>
-#     - !new:torch.nn.ReLU
-#     - !new:torch.nn.Dropout
-#         p: !ref <encoder_dropout>
-#     # 可选FFN层
-#     - !ref <enc_ffn1>
-#     - !new:torch.nn.LayerNorm
-#         normalized_shape: !ref <LLM_DIM>
-#     - !new:torch.nn.ReLU
-#     - !new:torch.nn.Dropout
-#         p: !ref <encoder_dropout>
-#     - !ref <enc_ffn2>
-#     - !new:torch.nn.LayerNorm
-#         normalized_shape: !ref <LLM_DIM>
-#     - !new:torch.nn.ReLU
-#     - !new:torch.nn.Dropout
-#         p: !ref <encoder_dropout>
-
-post_encoder_reduction_factor: 4
-mem_proj_cnn: !new:torch.nn.Conv1d
-    in_channels: !ref <ENCODER_DIM>
-    out_channels: !ref <LLM_DIM>
-    kernel_size: !ref <post_encoder_reduction_factor>
-    stride: !ref <post_encoder_reduction_factor>
-    padding: 0
-    
-enc:  !new:torch.nn.Sequential
-    - !ref <mem_proj_cnn>
-    - !new:torch.nn.BatchNorm1d
-        num_features: !ref <LLM_DIM>
-
-ctc_head_input: "enc_ctc"  # Options: "ssl" for SSL features; "enc_ctc" for encoder output; "enc_llm" for LLM encoder input
-#  enc_ctc, keep duration but reduce dimension
-
-enc_ctc: !new:torch.nn.Sequential
+enc: !new:torch.nn.Sequential
   - !new:speechbrain.lobes.models.VanillaNN.VanillaNN
      input_shape: [null, null, !ref <ENCODER_DIM>]
      activation: !ref <activation>
      dnn_blocks: !ref <dnn_layers>
-     dnn_neurons: !ref <LLM_DIM>
+     dnn_neurons: !ref <dnn_neurons>
   - !new:torch.nn.LayerNorm
-     normalized_shape: !ref <LLM_DIM>
+     normalized_shape: !ref <dnn_neurons>
 
 ctc_lin:  !new:speechbrain.nnet.linear.Linear
-    input_size: !ref <LLM_DIM>
+    input_size: !ref <dnn_neurons>
     n_neurons: !ref <output_neurons>  # 40 phonemes + 1 blank + 1 err
-
-phn_embed: !new:torch.nn.Embedding
-    num_embeddings: !ref <output_neurons>  # l2arctic: 40phns(sil)+err+blank + eos + bos =44
-    embedding_dim: !ref <LLM_DIM>
-
-phn_head: !new:torch.nn.Sequential
-    - !new:speechbrain.nnet.linear.Linear
-        input_size: !ref <LLM_DIM>
-        n_neurons: !ref <output_neurons>  # 40 phonemes + 1 blank + 1 err
-    - !new:torch.nn.LayerNorm
-        normalized_shape: !ref <output_neurons>
-    - !new:torch.nn.ReLU
-
-# LLM_model: "meta-llama/Llama-3.1-8B"
-# LLM_model: "Qwen/Qwen2-Audio-7B"
-LLM_model: "Qwen/Qwen2-Audio-7B-Instruct"
-
-# 统计跟踪器
-llm_stats: !name:speechbrain.utils.metric_stats.MetricStats
-    metric: !name:speechbrain.nnet.losses.kldiv_loss
-        reduction: batch
-
-# LLaMA model with LoRA config
-use_lora: True
-lora_config:
-    r: 16
-    alpha: 16
-    dropout: 0.05
-    target_modules: ["q_proj", "v_proj"]
-
-LLM: !apply:trainer.AutoLLMLoader.AutoLLMLoader
-    model_name: !ref <LLM_model>
-    use_lora: !ref <use_lora>
-    lora_config: !ref <lora_config>
-
-LLM_tokenizer: !apply:trainer.AutoLLMLoader.AutoLLMTokenizer
-    model_name: !ref <LLM_model>
 
 # Model parameters
 activation: !name:torch.nn.LeakyReLU
@@ -215,8 +116,14 @@ freeze_canonical_feature_extractor: True         # Freeze Whisper encoder?
 log_softmax: !new:speechbrain.nnet.activations.Softmax
     apply_log: True
 
-ctc_cost: !name:speechbrain.nnet.losses.ctc_loss
-    blank_index: !ref <blank_index>
+# ctc_cost: !name:speechbrain.nnet.losses.ctc_loss
+#     blank_index: !ref <blank_index>
+
+ctc_cost: !new:utils.CTCLossWithLabelPriors.CTCLossWithLabelPriors
+    prior_scaling_factor: 0.3
+    ctc_implementation: 'k2'
+    blank: !ref <blank_index>
+    reduction: 'sum'
 
 ctc_cost_mispro: !name:speechbrain.nnet.losses.ctc_loss
     blank_index: !ref <blank_index>
@@ -226,7 +133,7 @@ output_neurons: 44 # l2arctic: 40phns(sil)+err+blank + eos + bos =44
 blank_index: 0
 
 model: !new:torch.nn.ModuleList
-    - [!ref <enc>, !ref <ctc_lin>, !ref <LLM>, !ref <enc_ctc>, !ref <phn_embed>, !ref <phn_head>]
+    - [!ref <enc>, !ref <ctc_lin>]
 
 adam_opt_class: !name:torch.optim.Adam
     lr: !ref <lr>
@@ -253,13 +160,18 @@ epoch_counter: !new:speechbrain.utils.epoch_loop.EpochCounter
 train_logger: !new:speechbrain.utils.train_logger.FileTrainLogger
     save_file: !ref <train_log>
 
+# ctc_stats: !name:speechbrain.utils.metric_stats.MetricStats
+#     metric: !new:utils.CTCLossWithLabelPriors.CTCLossWithLabelPriors
+#         prior_scaling_factor: 0.3
+#         ctc_implementation: 'k2'
+#         blank: !ref <blank_index>
+#         reduction: 'none'
 ctc_stats: !name:speechbrain.utils.metric_stats.MetricStats
     metric: !name:speechbrain.nnet.losses.ctc_loss
         blank_index: !ref <blank_index>
         reduction: batch
 
 per_stats: !name:speechbrain.utils.metric_stats.ErrorRateStats
-
 
 # # TIMIT
 # timit_local_data_folder: "/common/db/TIMIT"  # Path to TIMIT datase
@@ -269,13 +181,11 @@ __set_seed: !apply:torch.manual_seed [!ref <seed>]
 
 # training parameters
 number_of_epochs: 100
-valid_search_interval: 5
-batch_size: 4
-lr: 0.0001  # 从 0.0003 降低，防止 LLM loss 上升
+batch_size: 16
+lr: 0.0003
 sorting: ascending
 sample_rate: 16000
 gradient_accumulation: 2
-grad_clip: 1.0  # 新增：梯度裁剪，防止梯度爆炸
 lr_pretrained: 0.00001
 
 # Mix-Precision Training
