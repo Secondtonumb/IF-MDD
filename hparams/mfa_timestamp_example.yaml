@@ -1,0 +1,74 @@
+# Example hyperparameters file for MFA timestamp-based training
+# This configuration uses MFATimestampDataIOPrep for word-level and phone-level timestamps
+
+# Data preparation
+data_folder_save: /home/kevingenghaopeng/MDD/speechocean762
+train_annotation: data/speechocean762_with_word_scores/train-dev_with_mfa.json
+valid_annotation: data/speechocean762_with_word_scores/train-dev_with_mfa.json  # Replace with actual valid set
+test_annotation: data/speechocean762_with_word_scores/train-dev_with_mfa.json   # Replace with actual test set
+
+# Experiment directory
+output_folder: !ref exp_mfa/<feature_fusion>_<perceived_ssl_model>
+save_folder: !ref <output_folder>/save
+train_log: !ref <output_folder>/train_log.txt
+
+# Frame settings
+frame_ms: 20.0  # 20ms frame shift for timestamp calculation
+
+# Model settings
+feature_fusion: PhnMonoSSL  # or TransformerMDD, TransformerMDD_TP, etc.
+perceived_ssl_model: wavlm_large
+canonical_ssl_model: null
+prefix: mfa_timestamp_test
+
+# Training parameters
+number_of_epochs: 50
+batch_size: 8
+lr: 0.0001
+sorting: ascending
+
+# CTC settings
+blank_index: 0
+
+# Dataloader options
+train_dataloader_opts:
+    batch_size: !ref <batch_size>
+    shuffle: True
+    num_workers: 4
+
+valid_dataloader_opts:
+    batch_size: !ref <batch_size>
+    shuffle: False
+    num_workers: 4
+
+test_dataloader_opts:
+    batch_size: !ref <batch_size>
+    shuffle: False
+    num_workers: 4
+
+# Evaluation settings
+evaluate_key: PER
+
+# Wandb settings
+wandb_project: MFA_MDD_Experiments
+
+# NOTE: When using MFATimestampDataIOPrep in train_APA.py, the following 
+# fields will be available in your batch:
+#
+# Phone-level MFA timestamps:
+#   - mfa_phone_list: list of phone strings
+#   - mfa_phone_start_frames: LongTensor of start frames
+#   - mfa_phone_end_frames: LongTensor of end frames
+#   - mfa_phone_frame_ranges: list of (start, end) tuples
+#
+# Word-level MFA timestamps:
+#   - mfa_word_list: list of word strings
+#   - mfa_word_start_frames: LongTensor of start frames
+#   - mfa_word_end_frames: LongTensor of end frames
+#   - mfa_word_phone_ranges: list of (phone_start_idx, phone_end_idx) tuples
+#
+# Standard phoneme sequences (with BOS/EOS variants):
+#   - phn_list_target, phn_encoded_target (target for training)
+#   - phn_list_canonical, phn_encoded_canonical (canonical pronunciation)
+#   - phn_list_perceived, phn_encoded_perceived (perceived pronunciation)
+#   - mispro_label: binary mispronunciation labels

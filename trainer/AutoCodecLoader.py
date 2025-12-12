@@ -14,8 +14,6 @@ from speechbrain.lobes.models.huggingface_transformers.hubert import HuBERT
 from speechbrain.lobes.models.huggingface_transformers.wavlm import WavLM
 from speechbrain.lobes.models.huggingface_transformers.whisper import Whisper
 
-from speechbrain.lobes.models.huggingface_transformers.mimi import Mimi
-
 pretrained_models={
     "wav2vec2_base": "facebook/wav2vec2-base", # 768
     "wav2vec2_base_jp": "rinna/japanese-wav2vec2-base", # 768
@@ -37,8 +35,6 @@ pretrained_models={
     
     "whisper_medium": "openai/whisper-medium", # 1024
     "whisper_large_v3_turbo": "openai/whisper-large-v3-turbo", # 1280
-    
-    "mimi": "kyutai/mimi" # codec, 1
 }
 
 def AutoSSLLoader(model_name, freeze, freeze_feature_extractor, save_path, output_all_hiddens,encoder_type=None):
@@ -85,20 +81,13 @@ def AutoSSLLoader(model_name, freeze, freeze_feature_extractor, save_path, outpu
                 save_path=save_path,
                 output_all_hiddens=output_all_hiddens
             )
-        # TODO
         elif "whisper" in model_id:
             return Whisper(
                 source=model_id,
                 freeze=freeze,
                 save_path=save_path,
             )
-        elif "mimi" in model_id:
-            return Mimi(
-                source=model_id,
-                freeze=freeze,
-                save_path=save_path,
-            )
-
+        
         elif encoder_type:
             # use the give encoder 
             try:
