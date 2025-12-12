@@ -19,6 +19,8 @@ import argparse
 sys.path.insert(0, '/home/kevingenghaopeng/MDD/IF-MDD/trainer')
 from AutoSSLoader import AutoSSLLoader
 
+import sparc
+
 
 class PhonemeSSLExtractorWithEncoder:
     def __init__(self,
@@ -446,7 +448,63 @@ class PhonemeSSLExtractorWithEncoder:
         
         return output_data, stats, sorted_utt_ids, final_features, sorted_utt_ids, final_features
 
-
+class PhonemeEMAExtractorWithEncoder(PhonemeSSLExtractorWithEncoder):
+    # Placeholder for potential future EMA feature extraction integration
+    def __init__(self,
+                 json_file: str,
+                 ctm_file: str,
+                 output_dir: str,
+                 ssl_model_name: str = "wavlm_large",
+                 pooling_method: str = "mean",
+                 target_phn_frames: int = 50,
+                 pretrained_model_path: str = "/home/kevingenghaopeng/MDD/IF-MDD/pretrained_models",
+                 device: str = "cuda" if torch.cuda.is_available() else "cpu",
+                 GOPT_mode_pooling: bool = False):
+        """
+        初始化特征提取器
+        
+        Args:
+            json_file: JSON 格式的音频文件和元数据
+            ctm_file: CTM 格式的音素时间戳文件
+            output_dir: 输出目录
+            ssl_model_name: SSL 编码器名称（默认 wavlm_large）
+            pooling_method: 池化方法 ("mean" 或 "max")
+            target_phn_frames: 目标音素帧数（用于 padding）
+            device: 运行设备 ("cuda" 或 "cpu")
+            GOPT_mode_pooling: 是否使用 GOPT 的音素池化实现（t_e - t_s + 1）
+        """
+        self.json_file = Path(json_file)
+        self.ctm_file = Path(ctm_file)
+        self.output_dir = Path(output_dir)
+        self.ssl_model_name = ssl_model_name
+        self.pooling_method = pooling_method
+        self.target_phn_frames = target_phn_frames
+        self.pretrained_model_path = pretrained_model_path
+        self.device = device
+        self.GOPT_mode_pooling = GOPT_mode_pooling
+        
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # 加载 JSON 数据
+        with open(self.json_file, 'r') as f:
+            self.json_data = json.load(f)
+        
+        # 加载 CTM 数据
+        self.ctm_data = self._load_ctm_file()
+        
+        # 加载 EMA 编码器
+        from sparc import SpeechWave, 
+        self.ema_encoder = sparc.load_model(device=self.device)
+        # TODO
+        
+        
+        print(f"SSL encoder loaded successfully")
+        
+        # 获取特征维度
+        self.feature_dim = self._get_feature_dim()
+        print(f"Feature dimension: {self.feature_dim}")
+        
+    
 def main():
     """主函数"""
     # 设置命令行参数
