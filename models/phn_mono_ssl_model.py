@@ -52,12 +52,6 @@ class PhnMonoSSLModel(sb.Brain):
         self.best_valid_loss_list = []  # List of (valid_loss, epoch, ckpt_name)
 
     
-        """Check if gradients are finite"""
-        if not torch.isfinite(loss):
-            print("Warning: loss is not finite, skipping step")
-            return False
-        return True
-    
     def compute_forward(self, batch, stage):
         "Given an input batch it computes the phoneme probabilities."
         batch = batch.to(self.device)
@@ -187,8 +181,8 @@ class PhnMonoSSLModel(sb.Brain):
                 stats_meta={
                     "epoch": epoch,
                     "lr_adam": self.adam_optimizer.param_groups[0]["lr"],
-                    "lr_pretrained": self.pretrained_opt_class.param_groups[0]["lr"],
                 },
+                # "lr_pretrained": self.pretrained_opt_class.param_groups[0]["lr"] if self.pretrained_opt_class else None,
                 train_stats={"loss": self.train_loss},
                 valid_stats={
                     "loss": stage_loss,
@@ -274,7 +268,13 @@ class PhnMonoSSLModel(sb.Brain):
                     "MPD results and stats written to file",
                     self.hparams.mpd_file,
                 )
-
+    def check_gradients(self, loss):
+        """Check if gradients are finite"""
+        if not torch.isfinite(loss):
+            print("Warning: loss is not finite, skipping step")
+            return False
+        return True
+    
     def fit_batch(self, batch):
         """Fit one batch, override to do multiple updates.
 
@@ -2118,3 +2118,200 @@ class PhnMonoSSLModel_RVQforBoth(PhnMonoSSLModel_DualCTCHead):
             )
 
         return loss
+    
+class PhnMonoSSLModel_EMA(PhnMonoSSLModel):
+    def __init__(self, *args, patience=20, **kwargs):
+        super().__init__(*args, **kwargs)
+        import sparc
+        from sparc import load_model
+        coder = load_model("en", device= "cuda:0")  # For using GPU
+        # coder_from_config = load_model(config="/home/kevingenghaopeng/work/Speech-Articulatory-Coding/configs/feature_extraction.yaml")
+        self.EMA_coder = coder
+        
+    def compute_forward(self, batch, stage):
+        "Given an input batch it computes the phoneme probabilities."
+        batch = batch.to(self.device)
+        wavs, wav_lens = batch.sig
+        # phns_bos, _ = batch.phn_encoded_bos
+
+        if stage == sb.Stage.TRAIN:
+            if hasattr(self.hparams, "augmentation"):
+                wavs = self.hparams.augmentation(wavs)
+
+        # some wav2vec models (e.g. large-lv60) needs attention_mask
+        # if self.modules.perceived_ssl.feature_extractor.return_attention_mask:
+        #     attn_mask = make_attn_mask(wavs, wav_lens)
+        # else:
+        #     attn_mask = None
+
+        feats = self.modules.perceived_ssl(wavs)
+        
+        x = self.modules.enc(feats)
+        # 
+        # EMA_feats = self.EMA_coder.encode(batch.id, split_batch=False)
+        # Duration might be different
+        # ema_feats = EMA_feats["ema"]
+        # import pdb; pdb.set_trace()
+        from sparc import SpeechWave
+        EMA_wavs = SpeechWave(wavs, (wav_lens*wavs.shape[-1]).int())
+        # import pdb; pdb.set_trace()
+        ema = self.EMA_coder.inverter(EMA_wavs, {})['ema']
+        ema = torch.Tensor(ema).to(self.device)
+        h_ema = self.modules.EMA_enc(ema)
+        
+        # Method 1 ADD and norm
+        # x += h_ema
+        # x = torch.nn.LayerNorm(x.shape[-1])(x)
+        
+        # Method 2 concat
+        x = torch.concat([x, h_ema], dim=-1)
+        # pdb.set_trace()
+
+        if getattr(self.modules, "ConformerEncoder", None) is not None:
+            from speechbrain.nnet.attention import RelPosEncXL, RelPosMHAXL, RoPEMHA 
+            pos_emb = RelPosEncXL(emb_dim=self.hparams.dnn_neurons)(x).to(self.device)
+            # import pdb; pdb.set_trace()
+            x, _ = self.modules.ConformerEncoder(x, pos_embs=pos_emb)
+        # Get RVQ if exists
+        if getattr(self.modules, "RVQ", None) is not None:
+            # Expect [B, C, T]
+            x = x.transpose(1, 2)  # [B, T, C] -> [B, C, T]
+            discrete_embeddings, codes, latents, commitment_loss, codebook_loss = self.modules.RVQ(x)
+            x = discrete_embeddings.transpose(1, 2)  # [B, C, T] -> [B, T, C]
+        # output layer for ctc log-probabilities
+        logits = self.modules.ctc_lin(x)
+        p_ctc = self.hparams.log_softmax(logits) # (B, T, C)
+        if getattr(self.modules, "RVQ", None) is not None:
+            return p_ctc, wav_lens, commitment_loss, codebook_loss
+        return p_ctc, wav_lens
+
+class PhnMonoEMAModel(PhnMonoSSLModel):
+    def __init__(self, *args, patience=20, **kwargs):
+        super().__init__(*args, **kwargs)
+        import sparc
+        from sparc import load_model
+        coder = load_model("en", device= "cuda:0")  # For using GPU
+        # coder_from_config = load_model(config="/home/kevingenghaopeng/work/Speech-Articulatory-Coding/configs/feature_extraction.yaml")
+        self.EMA_coder = coder
+        
+    def compute_forward(self, batch, stage):
+        "Given an input batch it computes the phoneme probabilities."
+        batch = batch.to(self.device)
+        wavs, wav_lens = batch.sig
+        # phns_bos, _ = batch.phn_encoded_bos
+
+        if stage == sb.Stage.TRAIN:
+            if hasattr(self.hparams, "augmentation"):
+                wavs = self.hparams.augmentation(wavs)
+
+        from sparc import SpeechWave
+        EMA_wavs = SpeechWave(wavs, (wav_lens*wavs.shape[-1]).int())
+        # import pdb; pdb.set_trace()
+        ema = self.EMA_coder.inverter(EMA_wavs, {})['ema']
+        ema = torch.Tensor(ema).to(self.device)
+        x = self.modules.EMA_enc(ema)
+        
+        # Method 1 ADD and norm
+        # x += h_ema
+        # x = torch.nn.LayerNorm(x.shape[-1])(x)
+        
+        # Method 2 concat
+        # x = torch.concat([x, h_ema], dim=-1)
+
+        if getattr(self.modules, "ConformerEncoder", None) is not None:
+            from speechbrain.nnet.attention import RelPosEncXL, RelPosMHAXL, RoPEMHA 
+            pos_emb = RelPosEncXL(emb_dim=self.hparams.dnn_neurons)(x).to(self.device)
+            # import pdb; pdb.set_trace()
+            x, _ = self.modules.ConformerEncoder(x, pos_embs=pos_emb)
+        # Get RVQ if exists
+        if getattr(self.modules, "RVQ", None) is not None:
+            # Expect [B, C, T]
+            x = x.transpose(1, 2)  # [B, T, C] -> [B, C, T]
+            discrete_embeddings, codes, latents, commitment_loss, codebook_loss = self.modules.RVQ(x)
+            x = discrete_embeddings.transpose(1, 2)  # [B, C, T] -> [B, T, C]
+        # output layer for ctc log-probabilities
+        logits = self.modules.ctc_lin(x)
+        p_ctc = self.hparams.log_softmax(logits) # (B, T, C)
+        if getattr(self.modules, "RVQ", None) is not None:
+            return p_ctc, wav_lens, commitment_loss, codebook_loss
+        return p_ctc, wav_lens
+    
+    def fit_batch(self, batch):
+        """Fit one batch, override to do multiple updates.
+
+        The default implementation depends on a few methods being defined
+        with a particular behavior:
+
+        * ``compute_forward()``
+        * ``compute_objectives()``
+
+        Also depends on having optimizers passed at initialization.
+
+        Arguments
+        ---------
+        batch : list of torch.Tensors
+            Batch of data to use for training. Default implementation assumes
+            this batch has two elements: inputs and targets.
+
+        Returns
+        -------
+        detached loss
+        """
+
+        if self.hparams.auto_mix_prec:
+            self.adam_optimizer.zero_grad()
+
+            with torch.amp.autocast("cuda"):
+                outputs = self.compute_forward(batch, sb.Stage.TRAIN)
+                loss = self.compute_objectives(outputs, batch, sb.Stage.TRAIN)
+
+            # normalize the loss by gradient_accumulation and scale for mixed precision
+            self.scaler.scale(loss / self.hparams.gradient_accumulation).backward()
+            
+            self.scaler.unscale_(self.adam_optimizer)
+
+            if self.check_gradients(loss):
+                if any(p.requires_grad for p in self.adam_optimizer.param_groups[0]['params']):
+                    self.scaler.step(self.adam_optimizer)
+
+
+            self.scaler.update()
+
+        else:
+            outputs = self.compute_forward(batch, sb.Stage.TRAIN)
+            
+            loss = self.compute_objectives(outputs, batch, sb.Stage.TRAIN)
+            # normalize the loss by gradient_accumulation step
+            (loss / self.hparams.gradient_accumulation).backward()
+
+            if self.step % self.hparams.gradient_accumulation == 0:
+                # gradient clipping & early stop if loss is not fini
+                
+                if self.check_gradients(loss):
+                    self.adam_optimizer.step()
+
+                
+                self.adam_optimizer.zero_grad()    
+
+        return loss.detach().cpu()
+
+    def init_optimizers(self):
+        self.adam_optimizer = self.hparams.adam_opt_class(
+            self.hparams.model.parameters(), 
+        )
+
+        if self.checkpointer is not None:
+            # if self.hparams.perceived_ssl is not None and not self.hparams.perceived_ssl.freeze:
+            self.checkpointer.add_recoverable("adam_opt", self.adam_optimizer)
+            # self.checkpointer.add_recoverable("pretrained_opt", self.pretrained_opt_class)
+            # import pdb; pdb.set_trace()
+            self.checkpointer.add_recoverable("tokenizer", self.label_encoder)  
+    def on_stage_start(self, stage, epoch):
+        "Gets called when a stage (either training, validation, test) starts."
+        self.ctc_metrics = self.hparams.ctc_stats()
+
+        if stage != sb.Stage.TRAIN:
+  
+            self.per_metrics = self.hparams.per_stats()
+            self.mpd_metrics = MpdStats()
+    
