@@ -85,7 +85,13 @@ class BaseDataIOPrep:
     
     def _setup_label_encoder(self, datasets):
         """Setup label encoder."""
-        lab_enc_file = os.path.join(self.hparams["save_folder"], "label_encoder.txt")
+        # Ensure save_folder exists
+        save_folder = self.hparams["save_folder"]
+        os.makedirs(save_folder, exist_ok=True)
+        
+        lab_enc_file = os.path.join(save_folder, "label_encoder.txt")
+        # touch lab_enc_file if not exist
+        
         self.label_encoder.insert_bos_eos(
             bos_label="<bos>",
             eos_label="<eos>",
@@ -95,9 +101,12 @@ class BaseDataIOPrep:
         special_labels = {
             "blank_label": self.hparams["blank_index"],
         }
+        
+        # Load or create label encoder
+        import pdb; pdb.set_trace()
         self.label_encoder.load_or_create(
             path=lab_enc_file,
-            from_didatasets=[datasets[0]],  # train_data
+            from_didatasets=[datasets[0]], 
             output_key="phn_list_target",
             special_labels=special_labels,
             sequence_input=True,
@@ -778,7 +787,11 @@ class PhonemeFrameTimestampDataIOPrep(BaseDataIOPrep):
         
     def _setup_label_encoder(self, datasets):
         """Setup label encoder with BOS/EOS tokens."""
-        lab_enc_file = os.path.join(self.hparams["save_folder"], "label_encoder.txt")
+        # Ensure save_folder exists
+        save_folder = self.hparams["save_folder"]
+        os.makedirs(save_folder, exist_ok=True)
+        
+        lab_enc_file = os.path.join(save_folder, "label_encoder.txt")
         self.label_encoder.insert_bos_eos(
             bos_label="<bos>",
             eos_label="<eos>",
