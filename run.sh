@@ -12,66 +12,26 @@
 # conda activate sb
 # nvidia-smi
 
-# # Mono_SSL_CTC model
-# python train.py \
-#         hparams/phnmonossl.yaml \
-#         --feature_fusion PhnMonoSSL \
-#         --perceived_ssl_model wavlm_large \
-#         --ENCODER_DIM 1024 \
-#         --prefix wavlm_ctc
+# IS26 extra (real data, split into train/dev/test)
+# speechbrain.utils.train_logger - Epoch loaded: 61 - test loss: 3.13e-01, test PER: 7.77, test mpd_f1: 4.24e-01
+# CTC and PER stats written to file exp_iqra/wavlm_large_None_PhnMonoSSL_is26_extra_split/per.txt
+# MPD results and stats written to file exp_iqra/wavlm_large_None_PhnMonoSSL_is26_extra_split/mpd.txt
 
-# # Evaluation
-# python evaluate.py \
-#         hparams/phnmonossl.yaml \
-#         --feature_fusion PhnMonoSSL \
-#         --perceived_ssl_model wavlm_large \
-#         --ENCODER_DIM 1024 \
-#         --prefix wavlm_ctc \
-#         --save_folder "<parent_of_save_ckpt_path>" 
-
-# # Transformer MDD with error classifiation head
-# python train.py \
-#         hparams/transformer_mispro_cls.yaml \
-#         --prefix fuse_2_encdec_conf_RoPE_fromprectc_frz_errcls\
-#         --feature_fusion TransformerMDD_TP_encdec_errclass \
-#         --fuse_enc_or_dec encdec \
-#         --encoder_module conformer \
-#         --load_pretrained_components True \
-#         --pretrained_model_path "<pretrained_ctc_model_path>" \
-#         --components_to_load '["ssl", "enc"]' \
-#         --freeze_loaded_components True \
-#         --plot_attention True \
-#         --plot_attention_interval 5
-
-# # Evaluation
-# python evaluate.py \
-#         hparams/transformer_mispro_cls.yaml \
-#         --prefix fuse_2_encdec_conf_RoPE_fromprectc_frz_errcls\
-#         --feature_fusion TransformerMDD_TP_encdec_errclass \
-#         --fuse_enc_or_dec encdec \
-#         --encoder_module conformer \
-#         --save_folder "<parent_of_save_ckpt_path>"
-
-
-# # Mono_SSL_CTC model + llama
-# python train.py \
-#         hparams/SSL_LLM.yaml \
-#         --feature_fusion SSL_LLM \
-#         --perceived_ssl_model wavlm_large \
-#         --ENCODER_DIM 1024 \
-#         --prefix wavlm_CTC_LLM
-
-
-# python train.py hparams/SSL_LLM_Prompt.yaml \
-#         --feature_fusion SSL_LLM \
-#         --perceived_ssl_model wavlm_large \
-#         --ENCODER_DIM 1024 \
-#         --prefix wavlm_CTC_LLM_Prompt
-
-
-python train.py hparams/SSL_LLM_Prompt.yaml \
-        --feature_fusion SSL_LLM_origin \
+# TTS test: 
+python train.py \
+        hparams_iqra/phnmonossl_is26_extra.yaml \
+        --feature_fusion PhnMonoSSL \
         --perceived_ssl_model wavlm_large \
         --ENCODER_DIM 1024 \
-        --prefix wavlm_CTC_LLM_No_Prompt \
-        --use_prompt False
+        --prefix is26_extra_split
+
+# TTS data (split into train/dev/test)
+# TTS set:
+# extra test: %WER 29.58 
+# New Precision: 0.08405545927209705, New Recall: 0.8220338983050848, New F1: 0.15251572327044027
+python train.py \
+        hparams_iqra/phnmonossl_is26_extra.yaml \
+        --feature_fusion PhnMonoSSL \
+        --perceived_ssl_model wavlm_large \
+        --ENCODER_DIM 1024 \
+        --prefix wavlm_ctc_iqra_all # used for canonical coleection

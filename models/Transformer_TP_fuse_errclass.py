@@ -601,7 +601,7 @@ class TransformerMDD_TP_encdec_errclass(sb.Brain):
         perceiveds_eos, perceived_lens_eos = batch.phn_encoded_perceived_eos
         
         mispro_label, mispro_label_lens = batch.mispro_label
-
+        # pdb.set_trace()
         feats = self.modules.perceived_ssl(wavs)  # [B, T_s, ENC_DIM]
         if len(feats.shape) == 4: 
             feats = feats[self.hparams.preceived_ssl_emb_layer]
