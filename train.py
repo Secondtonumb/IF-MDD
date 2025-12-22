@@ -30,6 +30,7 @@ from models.phn_mono_ssl_model import PhnMonoSSLModel, PhnMonoSSLModel_DualCTCHe
 from models.Transformer import TransformerMDD
 from models.Transformer_TP import TransformerMDD_TP
 from models.Transformer_TP_fuse_errclass import TransformerMDD_TP_encdec_errclass
+from models.Transformer_TP_fuse_errclass_ConPCO import TransformerMDD_TP_encdec_errclass_ConPCO
 from models.SSL_LLM import SSL_LLM
 
 from models.SSL_LLM_origin import SSL_LLM_origin
@@ -73,6 +74,8 @@ if __name__ == "__main__":
         asr_brain_class = TransformerMDD_TP
     elif hparams["feature_fusion"] == "TransformerMDD_TP_encdec_errclass":
         asr_brain_class = TransformerMDD_TP_encdec_errclass
+    elif hparams["feature_fusion"] == "TransformerMDD_TP_encdec_errclass_ConPCO":
+        asr_brain_class = TransformerMDD_TP_encdec_errclass_ConPCO
     elif hparams["feature_fusion"] == "SSL_LLM":
         asr_brain_class = SSL_LLM
     elif hparams["feature_fusion"] == "SSL_LLM_origin":
