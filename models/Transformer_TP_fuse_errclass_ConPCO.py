@@ -570,6 +570,8 @@ class TransformerMDD_TP_encdec_errclass_ConPCO(sb.Brain):
                 enc_out, dec_out = outs
             # Option 2, fuse Canononical Emb and mispro after Encoder.
             
+            audio_feat_conPCO = self.modules.conpco_proj_audio_feat(dec_out)  # [B, T_s, D]
+            
             if "enc" in self.hparams.fuse_enc_or_dec:
                 memory = enc_out
                 memory = self.modules.mem_proj(memory)  # [B, T_s, D]
@@ -687,7 +689,7 @@ class TransformerMDD_TP_encdec_errclass_ConPCO(sb.Brain):
                         memory_key_padding_mask=make_pad_mask(memory.shape[1] * mispro_label_lens, maxlen=memory.shape[1]).to(self.device),
                         pos_embs_tgt=RelPosEncXL(emb_dim=self.hparams.dnn_neurons)(Cano_emb).to(self.device),
                         pos_embs_src=RelPosEncXL(emb_dim=self.hparams.dnn_neurons)(memory).to(self.device)
-                    )# [B, T_p, D]
+                    ) # [B, T_p, D]
                 
                 if "enc" in self.hparams.fuse_enc_or_dec and "dec" in self.hparams.fuse_enc_or_dec:
                     # concat fuse_feat from enc and dec
@@ -911,6 +913,9 @@ class TransformerMDD_TP_encdec_errclass_ConPCO(sb.Brain):
         # audio = dec_out, text = Cano_emb, phn_label = mispro_label, phns = canonicals
         
         tgt_emb = self.modules.TransASR.custom_tgt_module(targets_eos)
+        tgt_emb_for_pco = self.modules.conpco_proj_perceived_phn_feat(tgt_emb)
+        
+        audio_feats_for_pco = self.modules.conpco_proj_audio_feat(dec_out)
         
         # TODO: use real gt
         # current solution, as we are using target_eos as decoder input, assume they are all high score.
@@ -918,10 +923,10 @@ class TransformerMDD_TP_encdec_errclass_ConPCO(sb.Brain):
         dummy_gt = torch.ones_like(targets_eos).float().to(self.device) * 2 # high score 2.0, mid score 1.0, low score 0.0
         dummy_gt = dummy_gt.masked_fill(targets_eos == 0, 0.0)
         # pdb.set_trace()
-        
+        # pdb.set_trace()
         loss_phn_pco, loss_center_clap = self.hparams.conpco_cost(
-            features=dec_out, 
-            features_text=tgt_emb, 
+            features=audio_feats_for_pco.float(), 
+            features_text=tgt_emb_for_pco.float(), 
             gt=dummy_gt, 
             phn_id=targets_eos,
         ).values()
@@ -937,69 +942,49 @@ class TransformerMDD_TP_encdec_errclass_ConPCO(sb.Brain):
         
         if current_epoch % self.hparams.plot_conpco_interval == 0 and self.hparams.plot_conpco:
             from pathlib import Path
-            if stage == sb.Stage.TRAIN:
-                output_dir = Path(self.hparams.conpco_plot_dir) / "train" / f"{current_epoch:03d}"
-            elif stage == sb.Stage.VALID:
-                output_dir = Path(self.hparams.conpco_plot_dir) / "valid" / f"{current_epoch:03d}"
-            elif stage == sb.Stage.TEST:
-                output_dir = Path(self.hparams.conpco_plot_dir) / "test" / f"{current_epoch:03d}"
+            # if stage == sb.Stage.TRAIN:
+            #     output_dir = Path(self.hparams.conpco_plot_dir) / "train" / f"{current_epoch:03d}"
+            # elif stage == sb.Stage.VALID:
+            #     output_dir = Path(self.hparams.conpco_plot_dir) / "valid" / f"{current_epoch:03d}"
+            # elif stage == sb.Stage.TEST:
+            #     output_dir = Path(self.hparams.conpco_plot_dir) / "test" / f"{current_epoch:03d}"
                 
-            fig, ax, fig_zoom, ax_zoom = plot_phoneme_centroids_with_instances(
-                audio_feats=dec_out.detach().cpu(), 
-                phoneme_feats=tgt_emb.detach().cpu(), 
-                phoneme_labels=targets_eos.detach().cpu(), 
-                phone_scores=dummy_gt.detach().cpu(),
-                ignore_index=[self.hparams.blank_index, self.label_encoder.lab2ind["sil"]],
-                max_phones=6,
-                show_audio_centroid=True,
-                show_audio_scatter=True,
-                show_phoneme_centroid=True,
-                show_phoneme_scatter=True,
-            )
-                
-            output_dir.mkdir(parents=True, exist_ok=True)
-            # get current batch id
-            # get batch_ids = [os.path.splitext(os.path.basename(id))[0] for id in ids]
-            batch_ids = [os.path.splitext(os.path.basename(id))[0] for id in ids]
-            representative_id = batch_ids[0]
-            
-            fig.savefig(output_dir / f"epoch{current_epoch}_{representative_id}_phoneme_centroids.png")
-            fig_zoom.savefig(output_dir / f"epoch{current_epoch}_{representative_id}_phoneme_centroids_zoom.png")
-            
-            # fig, ax = plot_clap_clusters(
+            # fig, ax, fig_zoom, ax_zoom = plot_phoneme_centroids_with_instances(
             #     audio_feats=dec_out.detach().cpu(), 
             #     phoneme_feats=tgt_emb.detach().cpu(), 
             #     phoneme_labels=targets_eos.detach().cpu(), 
             #     phone_scores=dummy_gt.detach().cpu(),
-            #     ignore_index=0,
-            #     max_phones=5,
+            #     ignore_index=[self.hparams.blank_index, self.label_encoder.lab2ind["sil"]],
+            #     max_phones=6,
+            #     show_audio_centroid=True,
+            #     show_audio_scatter=True,
+            #     show_phoneme_centroid=True,
+            #     show_phoneme_scatter=True,
             # )
-            # id_stem = os.path.splitext(os.path.basename(ids[0]))[0]
-            # # mkdir to <exp_output_dir>/<epoch>
-            # fig.savefig(f"epoch{current_epoch}_id{id_stem}_phnaudiocluster.png")
-
-            # fig, ax = plot_phone_cluster(
-            #     phoneme_feats=tgt_emb.detach().cpu(), 
-            #     phoneme_labels=targets_eos.detach().cpu(), 
-            #     ignore_index=0,
-            #     max_phones=41,
-            #     label_encoder=self.label_encoder
-            # )
-            # # get id stem if is is path-like
+            if stage == sb.Stage.VALID:
+                output_dir = Path(self.hparams.conpco_plot_dir) / "valid" / f"{current_epoch:03d}"
+                fig, ax, fig_zoom, ax_zoom = plot_phoneme_centroids_with_instances(
+                    audio_feats=audio_feats_for_pco.detach().float().cpu(), 
+                    phoneme_feats=tgt_emb_for_pco.detach().float().cpu(), 
+                    phoneme_labels=targets_eos.detach().cpu(), 
+                    phone_scores=dummy_gt.detach().cpu(),
+                    ignore_index=[self.hparams.blank_index, self.label_encoder.lab2ind["sil"]],
+                    max_phones=self.hparams.max_phones,
+                    show_audio_centroid=self.hparams.conPCO_plot_show_audio_centroid,
+                    show_audio_scatter=self.hparams.conPCO_plot_show_audio_scatter,
+                    show_phoneme_centroid=self.hparams.conPCO_plot_show_phoneme_centroid,
+                    show_phoneme_scatter=self.hparams.conPCO_plot_show_phoneme_scatter,
+                )
+                
+                output_dir.mkdir(parents=True, exist_ok=True)
+                # get current batch id
+                # get batch_ids = [os.path.splitext(os.path.basename(id))[0] for id in ids]
+                batch_ids = [os.path.splitext(os.path.basename(id))[0] for id in ids]
+                representative_id = batch_ids[0]
+                
+                fig.savefig(output_dir / f"epoch{current_epoch}_{representative_id}_phoneme_centroids.png")
+                fig_zoom.savefig(output_dir / f"epoch{current_epoch}_{representative_id}_phoneme_centroids_zoom.png")
             
-            # fig.savefig(f"epoch{current_epoch}_id{id_stem}_phncluster.png")
-            # import matplotlib.pyplot as plt
-            # pdb.set_trace()
-
-        
-        # pdb.set_trace()
-        
-        # loss = (
-        #     self.hparams.ctc_weight * loss_ctc
-        #     + (1 - self.hparams.ctc_weight) * loss_dec_out
-        #     + loss_mispro_all 
-        #     + loss_ga * 10
-        # )
         # no mispro loss nor guided attention loss, or ordinal, only PCO
         loss = (
             self.hparams.ctc_weight * loss_ctc
@@ -1007,7 +992,7 @@ class TransformerMDD_TP_encdec_errclass_ConPCO(sb.Brain):
             + loss_mispro_all 
             + loss_ga * 10
             + loss_phn_pco
-            + loss_center_clap 
+            + loss_center_clap * 10
         )
             # + loss_phn_pco 
 

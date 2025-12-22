@@ -92,18 +92,16 @@ class BaseDataIOPrep:
         lab_enc_file = os.path.join(save_folder, "label_encoder.txt")
         # touch lab_enc_file if not exist
         
-        self.label_encoder.insert_bos_eos(
-            bos_label="<bos>",
-            eos_label="<eos>",
-            bos_index=42,
-            eos_index=43,
-        )
         special_labels = {
             "blank_label": self.hparams["blank_index"],
         }
         
+        self.label_encoder.insert_bos_eos(
+            bos_label="<bos>",
+            eos_label="<eos>",
+        )
+            
         # Load or create label encoder
-        import pdb; pdb.set_trace()
         self.label_encoder.load_or_create(
             path=lab_enc_file,
             from_didatasets=[datasets[0]], 
