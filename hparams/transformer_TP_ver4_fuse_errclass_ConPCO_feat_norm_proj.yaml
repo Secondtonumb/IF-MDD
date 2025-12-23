@@ -41,7 +41,7 @@ evaluate_key: "mpd_f1_seq" # use "mpd_f1_seq" for Transformer decoder path best 
 max_save_models: 3 # Maximum number of saved models for each metrics 
 
 # output files
-output_folder: !ref exp_l2arctic/<perceived_ssl_model>_<feature_fusion>_<prefix>
+output_folder: !ref exp_iqra/<perceived_ssl_model>_<feature_fusion>_<prefix>
 per_file: !ref <output_folder>/per_<evaluate_key>.txt
 mpd_file: !ref <output_folder>/mpd_<evaluate_key>.txt
 save_folder: !ref <output_folder>/save
@@ -138,7 +138,8 @@ attention_type: RelPosMHAXL # regularMHA， RoPEMHA (with conformer)
 causal: true
 # activation: gelu
 
-TransASR: !new:speechbrain.lobes.models.transformer.TransformerASR.TransformerASR
+# TransASR: !new:speechbrain.lobes.models.transformer.TransformerASR.TransformerASR
+TransASR: !new:trainer.ConPCO_TransASR.ConPCO_TransformerASR
     tgt_vocab: !ref <output_neurons>
     input_size: !ref <dnn_neurons>
     d_model: !ref <dnn_neurons>
@@ -377,29 +378,30 @@ ga_cost: !name:speechbrain.nnet.loss.guidedattn_loss.GuidedAttentionLoss
 # ConPCO Loss
 
 ConPCO_dim: 32
+dummy_linear: !new:torch.nn.Linear
+    in_features: !ref <dnn_neurons>
+    out_features: !ref <ConPCO_dim>
+dummy_LayerNorm: !new:torch.nn.LayerNorm
+    normalized_shape: !ref <ConPCO_dim>
 
 conpco_proj_audio_feat: !new:torch.nn.Sequential
-  - !new:torch.nn.Linear
-      in_features: !ref <dnn_neurons>
-      out_features: !ref <ConPCO_dim>
+  - !ref <dummy_linear>
   - !new:torch.nn.GELU
   - !new:torch.nn.Dropout
   - !new:torch.nn.Linear
       in_features: !ref <ConPCO_dim>
       out_features: !ref <ConPCO_dim>
   - !new:torch.nn.Dropout
-  # - !new:torch.nn.LayerNorm
+  - !ref <dummy_LayerNorm>
     
 conpco_proj_perceived_phn_feat: !new:torch.nn.Sequential
-  - !new:torch.nn.Linear
-      in_features: !ref <dnn_neurons>
-      out_features: !ref <ConPCO_dim>
+  - !ref <dummy_linear>
   - !new:torch.nn.GELU
   - !new:torch.nn.Dropout
   - !new:torch.nn.Linear
       in_features: !ref <ConPCO_dim>
       out_features: !ref <ConPCO_dim>
-  - !new:torch.nn.Dropout
+  - !ref <dummy_LayerNorm>
 
 conpco_lambda_d_phn: 0.5
 conpco_lambda_t_phn: 0.1
@@ -419,10 +421,10 @@ conpco_stats: !name:speechbrain.utils.metric_stats.MultiMetricStats
     batch_eval: True
 
 # Outputs
-output_neurons: 44 # l2arctic: 40phns(sil)+err+blank=42
+output_neurons: 71 # l2arctic: 40phns(sil)+err+blank=42
 blank_index: 0
-bos_index: 42
-eos_index: 43
+bos_index: 69
+eos_index: 1
 
 model: !new:torch.nn.ModuleList
     - [!ref <enc>,
@@ -503,8 +505,6 @@ ga_stats: !name:speechbrain.utils.metric_stats.MetricStats
 
 per_stats: !name:speechbrain.utils.metric_stats.ErrorRateStats
 
-# # TIMIT
-# timit_local_data_folder: "/common/db/TIMIT"  # Path to TIMIT datase
 
 seed: 3047
 __set_seed: !apply:torch.manual_seed [!ref <seed>]
@@ -523,7 +523,6 @@ lr_pretrained: 0.00001
 auto_mix_prec: true
 # or
 precision: fp16         # 支持 "fp32"、"fp16" 或 "bf16"
-
 
 # CTC-based Encoder/SSL Freezing
 enable_ctc_freezing: false    # Enable automatic freezing when CTC converges
@@ -564,7 +563,7 @@ test_attention_plot_dir: !ref <output_folder>/test_attention_plots
 plot_conpco_interval: 5
 plot_conpco: true
 conpco_plot_dir: !ref <output_folder>/conpco_plots
-max_phones: 5
+max_phones: 20
 conPCO_plot_show_audio_centroid: False
 conPCO_plot_show_audio_scatter: True
 conPCO_plot_show_phoneme_centroid: True
