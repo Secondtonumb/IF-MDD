@@ -968,7 +968,7 @@ class TransformerMDD_TP_encdec_errclass_ConPCO(sb.Brain):
                     phoneme_feats=tgt_emb_for_pco.detach().float().cpu(), 
                     phoneme_labels=targets_eos.detach().cpu(), 
                     phone_scores=dummy_gt.detach().cpu(),
-                    ignore_index=[self.hparams.blank_index, self.label_encoder.lab2ind["sil"]],
+                    ignore_index=[self.hparams.blank_index, self.label_encoder.lab2ind.get("sil", -9999)],
                     max_phones=self.hparams.max_phones,
                     show_audio_centroid=self.hparams.conPCO_plot_show_audio_centroid,
                     show_audio_scatter=self.hparams.conPCO_plot_show_audio_scatter,
