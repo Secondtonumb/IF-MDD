@@ -115,7 +115,7 @@ python train.py \
 # CLAP focus on conpco_lambda_clap_t2a focus on audio to phoneme representation (0.5 -> 0.2)
 python train.py \
         /home/kevingenghaopeng/MDD/IF-MDD/hparams/transformer_TP_ver4_fuse_errclass_ConPCO_feat_proj.yaml \
-        --prefix ConPCO_work \
+        --prefix ConPCO_work_t2a_0.2 \
         --feature_fusion TransformerMDD_TP_encdec_errclass_ConPCO \
         --encoder_module conformer \
         --load_pretrained_components True \
@@ -123,3 +123,26 @@ python train.py \
         --components_to_load '["ssl", "enc"]' \
         --freeze_loaded_components True \
         --conpco_lambda_clap_t2a 0.2
+
+# Real Working ConPCO,
+# Add Pos_Emb to tgt_feat_proj and normalize all feature
+python train.py \
+        /home/kevingenghaopeng/MDD/IF-MDD/hparams/transformer_TP_ver4_fuse_errclass_ConPCO_feat_norm_proj.yaml\
+        --prefix ConPCO_norm \
+        --feature_fusion TransformerMDD_TP_encdec_errclass_ConPCO \
+        --encoder_module conformer \
+        --load_pretrained_components True \
+        --pretrained_model_path /home/kevingenghaopeng/MDD/IF-MDD/pretrained_models/CTC_for_IF-MDD \
+        --components_to_load '["ssl", "enc"]' \
+        --freeze_loaded_components True
+
+
+python train.py \
+        /home/kevingenghaopeng/MDD/IF-MDD/hparams_iqra/transformer_TP_ver4_fuse_errclass_ConPCO_feat_norm_proj.yaml \
+        --prefix ConPCO_norm \
+        --feature_fusion TransformerMDD_TP_encdec_errclass_ConPCO \
+        --encoder_module conformer \
+        --load_pretrained_components True \
+        --pretrained_model_path /home/kevingenghaopeng/MDD/IF-MDD/pretrained_models/CTC_for_IF-MDD \
+        --components_to_load '["ssl", "enc"]' \
+        --freeze_loaded_components True
