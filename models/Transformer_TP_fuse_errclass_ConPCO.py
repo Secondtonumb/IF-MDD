@@ -927,7 +927,24 @@ class TransformerMDD_TP_encdec_errclass_ConPCO(sb.Brain):
 
         tgt_emb_for_pco = self.modules.conpco_proj_perceived_phn_feat(tgt_emb)
         
-        audio_feats_for_pco = self.modules.conpco_proj_audio_feat(dec_out)
+        # if also apply decode positional embedding  proj on dec_out
+        # pdb.set_trace()
+        if getattr(self.hparams, "conpco_use_dec_pos_emb_on_audio_feat", False):
+            # add dec_out pos emb
+            if (
+                self.modules.TransASR.attention_type == "RelPosMHAXL"
+                or self.modules.TransASR.attention_type == "RoPEMHA"
+            ):
+                dec_out_proj = dec_out + self.modules.TransASR.positional_encoding_decoder(dec_out)
+            elif (
+                self.modules.TransASR.positional_encoding_type == "fixed_abs_sine"
+                or self.modules.TransASR.attention_type == "hypermixing"
+            ):
+                dec_out_proj = dec_out + self.modules.TransASR.positional_encoding(dec_out)
+        else:
+            dec_out_proj = dec_out
+
+        audio_feats_for_pco = self.modules.conpco_proj_audio_feat(dec_out_proj)
         
         # TODO: use real gt
         # current solution, as we are using target_eos as decoder input, assume they are all high score.
@@ -1013,7 +1030,7 @@ class TransformerMDD_TP_encdec_errclass_ConPCO(sb.Brain):
             + loss_mispro_all 
             + loss_ga * 10
             + loss_phn_pco
-            + loss_center_clap * 10
+            + loss_center_clap
         )
             # + loss_phn_pco 
 
