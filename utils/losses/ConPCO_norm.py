@@ -152,6 +152,9 @@ class ContrastivePhonemicOrdinalRegularizer(torch.nn.Module):
 
 		loss_oe = (self.lambda_t_phn* _tightness_phn) - (self.lambda_d_phn * _entropy_phn)
 
-		return {"loss_oe":loss_oe,
-          		"loss_center_clap":loss_center_clap
-            }
+        
+		return {
+            "loss_oe": loss_oe,
+            "loss_center_clap": loss_center_clap,
+        }
+

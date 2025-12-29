@@ -913,9 +913,38 @@ class TransformerMDD_TP_encdec_errclass_ConPCO(sb.Brain):
         # audio = dec_out, text = Cano_emb, phn_label = mispro_label, phns = canonicals
         
         tgt_emb = self.modules.TransASR.custom_tgt_module(targets_eos)
+        # add tgt_pos_emb
+        if (
+            self.modules.TransASR.attention_type == "RelPosMHAXL"
+            or self.modules.TransASR.attention_type == "RoPEMHA"
+        ):
+            tgt_emb = tgt_emb + self.modules.TransASR.positional_encoding_decoder(tgt_emb)
+        elif (
+            self.modules.TransASR.positional_encoding_type == "fixed_abs_sine"
+            or self.modules.TransASR.attention_type == "hypermixing"
+        ):
+            tgt_emb = tgt_emb + self.modules.TransASR.positional_encoding(tgt_emb)
+
         tgt_emb_for_pco = self.modules.conpco_proj_perceived_phn_feat(tgt_emb)
         
-        audio_feats_for_pco = self.modules.conpco_proj_audio_feat(dec_out)
+        # if also apply decode positional embedding  proj on dec_out
+        # pdb.set_trace()
+        if getattr(self.hparams, "conpco_use_dec_pos_emb_on_audio_feat", False):
+            # add dec_out pos emb
+            if (
+                self.modules.TransASR.attention_type == "RelPosMHAXL"
+                or self.modules.TransASR.attention_type == "RoPEMHA"
+            ):
+                dec_out_proj = dec_out + self.modules.TransASR.positional_encoding_decoder(dec_out)
+            elif (
+                self.modules.TransASR.positional_encoding_type == "fixed_abs_sine"
+                or self.modules.TransASR.attention_type == "hypermixing"
+            ):
+                dec_out_proj = dec_out + self.modules.TransASR.positional_encoding(dec_out)
+        else:
+            dec_out_proj = dec_out
+
+        audio_feats_for_pco = self.modules.conpco_proj_audio_feat(dec_out_proj)
         
         # TODO: use real gt
         # current solution, as we are using target_eos as decoder input, assume they are all high score.
@@ -939,6 +968,14 @@ class TransformerMDD_TP_encdec_errclass_ConPCO(sb.Brain):
         3. Better to ignore silence index in PCO loss calculation.
         '''
         # import pdb; pdb.set_trace()
+        try:
+            sil_index = self.label_encoder.lab2ind["sil"]
+        except:
+            try:
+                sil_index = self.label_encoder.lab2ind["<sil>"]
+            except:
+                sil_index = None
+                print("Silence index not found in label encoder.")
         
         if current_epoch % self.hparams.plot_conpco_interval == 0 and self.hparams.plot_conpco:
             from pathlib import Path
@@ -961,6 +998,7 @@ class TransformerMDD_TP_encdec_errclass_ConPCO(sb.Brain):
             #     show_phoneme_centroid=True,
             #     show_phoneme_scatter=True,
             # )
+            
             if stage == sb.Stage.VALID:
                 output_dir = Path(self.hparams.conpco_plot_dir) / "valid" / f"{current_epoch:03d}"
                 fig, ax, fig_zoom, ax_zoom = plot_phoneme_centroids_with_instances(
@@ -968,7 +1006,7 @@ class TransformerMDD_TP_encdec_errclass_ConPCO(sb.Brain):
                     phoneme_feats=tgt_emb_for_pco.detach().float().cpu(), 
                     phoneme_labels=targets_eos.detach().cpu(), 
                     phone_scores=dummy_gt.detach().cpu(),
-                    ignore_index=[self.hparams.blank_index, self.label_encoder.lab2ind.get("sil", -9999)],
+                    ignore_index=[self.hparams.blank_index, sil_index],
                     max_phones=self.hparams.max_phones,
                     show_audio_centroid=self.hparams.conPCO_plot_show_audio_centroid,
                     show_audio_scatter=self.hparams.conPCO_plot_show_audio_scatter,
@@ -992,7 +1030,7 @@ class TransformerMDD_TP_encdec_errclass_ConPCO(sb.Brain):
             + loss_mispro_all 
             + loss_ga * 10
             + loss_phn_pco
-            + loss_center_clap * 10
+            + loss_center_clap
         )
             # + loss_phn_pco 
 
