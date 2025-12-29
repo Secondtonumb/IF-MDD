@@ -56,6 +56,7 @@ class PhnMonoSSLModel(sb.Brain):
         "Given an input batch it computes the phoneme probabilities."
         batch = batch.to(self.device)
         wavs, wav_lens = batch.sig
+
         # phns_bos, _ = batch.phn_encoded_bos
 
         if stage == sb.Stage.TRAIN:
@@ -86,14 +87,51 @@ class PhnMonoSSLModel(sb.Brain):
         # output layer for ctc log-probabilities
         logits = self.modules.ctc_lin(x)
         p_ctc = self.hparams.log_softmax(logits) # (B, T, C)
+        
+        # OTTC implementation for lm_weight:
+        # import pdb; pdb.set_trace()
+        if hasattr(self.modules, "lm_weight") and stage != sb.Stage.TEST:
+            targets, target_lens = batch.phn_encoded_target
+            labels_mask = (targets != self.hparams.blank_index).float()  # (B, L)
+            weights_logits = self.modules.lm_weight(x)
+            # make mask with wav_lens
+            lens_abs = (wav_lens * feats.shape[-2]).int()
+            # import pdb; pdb.set_trace()
+            output_mask = self.create_attention_mask_from_input_sequence(lens_abs) # torch.Size([64, 389])
+            # output_mask = self.create_attention_mask_from_input_sequence(input_lengths)   
+            import torch.nn.functional as F
+            
+            weights_logits = F.softmax(weights_logits.squeeze().masked_fill_(output_mask == 0, - torch.inf ))
+            weights_labels =   labels_mask /  labels_mask.sum(axis = 1)[:,None] #weights_logits.sum(axis = 1)[:,None] *         
+
+            # get label mask TODO
+            # labels_mask = (labels >= 0).float()
+
+            # import pdb; pdb.set_trace()
+            return p_ctc, logits, weights_logits, weights_labels, wav_lens
+        
         if getattr(self.modules, "RVQ", None) is not None:
             return p_ctc, wav_lens, commitment_loss, codebook_loss
         return p_ctc, wav_lens
+    
+    def create_attention_mask_from_input_sequence(self, input_sequence):
+        ''' create attention mask from input sequence 
+                input_sequence: tensor of shape (batch_size) containing the length of each sequence in the batch
+            output:
+                attention_mask: tensor of shape (batch_size, max_length in input_sequence) 
+        '''
+        tampon = (torch.arange(1,max(input_sequence)+1)).repeat(len(input_sequence), 1).to('cuda')
 
+        attention_mask = (tampon <= input_sequence.unsqueeze(1)).float()
+
+        return attention_mask
+    
     def compute_objectives(self, predictions, batch, stage):
         "Given the network predictions and targets computed the NLL loss."
         if getattr(self.modules, "RVQ", None) is not None:
             p_ctc, wav_lens, commitment_loss, codebook_loss = predictions
+        if getattr(self.modules, "lm_weight", None) is not None:
+            p_ctc, logits, weights_logits, weights_labels, wav_lens = predictions
         else:
             p_ctc, wav_lens = predictions
         ids = batch.id
@@ -113,8 +151,34 @@ class PhnMonoSSLModel(sb.Brain):
             elif self.hparams.training_target == "perceived":
                 targets = perceiveds
                 target_lens = perceived_lens        
-
-        loss_ctc = self.hparams.ctc_cost(p_ctc, targets, wav_lens, target_lens)
+        if getattr(self.modules, "lm_weight", None) is not None:
+            # OTTC loss computation
+            # from utils.losses.ot_loss import 
+            labels_mask = (targets != self.hparams.blank_index).float()  # (B, L)
+            # import pdb; pdb.set_trace()
+            from utils.losses.ot_loss import batched_ottc_loss_bucketized
+            # loss_ctc = self.hparams.ctc_cost(x = logits,
+            #                                  y = targets,
+            #                                  a = weights_logits,
+            #                                  b = weights_labels,
+            #                                  amask = None,
+            #                                  bmask = labels_mask,
+            #                                  euclidian = False,
+            #                                  jsd = False,
+            #                                  )
+            one_hot_labels = torch.nn.functional.one_hot(targets, num_classes=self.hparams.output_neurons)
+            loss_ctc, _, _, _  = batched_ottc_loss_bucketized(
+                                        x = logits,
+                                         y = one_hot_labels,
+                                         a = weights_logits,
+                                         b = weights_labels,
+                                         amask = None,
+                                         bmask = labels_mask,
+                                         euclidian = False,
+                                         jsd = False,
+                                         )
+        else:
+            loss_ctc = self.hparams.ctc_cost(p_ctc, targets, wav_lens, target_lens)
         if getattr(self.modules, "RVQ", None) is not None:
             loss = loss_ctc + (commitment_loss + codebook_loss)
         else:
@@ -2314,4 +2378,3 @@ class PhnMonoEMAModel(PhnMonoSSLModel):
   
             self.per_metrics = self.hparams.per_stats()
             self.mpd_metrics = MpdStats()
-    
