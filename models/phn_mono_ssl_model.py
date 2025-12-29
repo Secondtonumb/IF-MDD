@@ -156,27 +156,18 @@ class PhnMonoSSLModel(sb.Brain):
             # from utils.losses.ot_loss import 
             labels_mask = (targets != self.hparams.blank_index).float()  # (B, L)
             # import pdb; pdb.set_trace()
-            from utils.losses.ot_loss import batched_ottc_loss_bucketized
-            # loss_ctc = self.hparams.ctc_cost(x = logits,
-            #                                  y = targets,
-            #                                  a = weights_logits,
-            #                                  b = weights_labels,
-            #                                  amask = None,
-            #                                  bmask = labels_mask,
-            #                                  euclidian = False,
-            #                                  jsd = False,
-            #                                  )
+            # from utils.losses.ot_loss import batched_ottc_loss_bucketized
             one_hot_labels = torch.nn.functional.one_hot(targets, num_classes=self.hparams.output_neurons)
-            loss_ctc, _, _, _  = batched_ottc_loss_bucketized(
-                                        x = logits,
-                                         y = one_hot_labels,
-                                         a = weights_logits,
-                                         b = weights_labels,
-                                         amask = None,
-                                         bmask = labels_mask,
-                                         euclidian = False,
-                                         jsd = False,
-                                         )
+            loss_ctc, _, _, _ = self.hparams.ctc_cost(x = logits,
+                                             y = one_hot_labels,
+                                             a = weights_logits,
+                                             b = weights_labels,
+                                             amask = None,
+                                             bmask = labels_mask,
+                                             euclidian = False,
+                                             jsd = False,
+                                             )
+
         else:
             loss_ctc = self.hparams.ctc_cost(p_ctc, targets, wav_lens, target_lens)
         if getattr(self.modules, "RVQ", None) is not None:
