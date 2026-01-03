@@ -479,6 +479,7 @@ class PhnMonoSSLModel(sb.Brain):
                 targets = perceiveds
                 target_lens = perceived_lens        
         
+        # support CTCLossWithLabelPriors, OTTC loss
         from utils.losses.CTCLossWithLabelPriors import CTCLossWithLabelPriors
         from utils.losses.ot_loss import batched_ottc_loss_bucketized
         
@@ -487,7 +488,7 @@ class PhnMonoSSLModel(sb.Brain):
             # feature [T, B, D]
             # targets: [B, T]
             # src_length: [B], int
-            #  batch.target_lengths: [B], int
+            # batch.target_lengths: [B], int
             
             p_ctc_ctclp = p_ctc.permute(1, 0, 2)  # (B, T, D) -> (T, B, C)
             abs_wav_lens = (wav_lens * p_ctc.shape[-2] ).to(torch.int32)
@@ -506,19 +507,23 @@ class PhnMonoSSLModel(sb.Brain):
         
         elif self.hparams.ctc_cost == batched_ottc_loss_bucketized:
             if getattr(self.modules, "lm_weight", None) is not None:
-                # OTTC loss computation
-                # from utils.losses.ot_loss import 
-                labels_mask = (targets != self.hparams.blank_index).float()  # (B, L)
-                one_hot_labels = torch.nn.functional.one_hot(targets, num_classes=self.hparams.output_neurons)
-                loss_ctc, _, _, _ = self.hparams.ctc_cost(x = logits,
-                                                 y = one_hot_labels,
-                                                 a = weights_logits,
-                                                 b = weights_labels,
-                                                 amask = None,
-                                                 bmask = labels_mask,
-                                                 euclidian = False,
-                                                 jsd = False,
-                                                 )
+                if stage != sb.Stage.TEST:
+                    # OTTC loss computation
+                    # from utils.losses.ot_loss import 
+                    labels_mask = (targets != self.hparams.blank_index).float()  # (B, L)
+                    one_hot_labels = torch.nn.functional.one_hot(targets, num_classes=self.hparams.output_neurons)
+                    loss_ctc, _, _, _ = self.hparams.ctc_cost(x = logits,
+                                                    y = one_hot_labels,
+                                                    a = weights_logits,
+                                                    b = weights_labels,
+                                                    amask = None,
+                                                    bmask = labels_mask,
+                                                    euclidian = False,
+                                                    jsd = False,
+                                                    )
+            else:
+                # vanilla CTC loss for decode
+                loss_ctc = self.hparams.ctc_cost(p_ctc, targets, wav_lens, target_lens)
 
         else:
             # vanilla CTC loss
@@ -527,6 +532,9 @@ class PhnMonoSSLModel(sb.Brain):
         
         if getattr(self.modules, "RVQ", None) is not None:
             loss = loss_ctc + (commitment_loss + codebook_loss)
+        elif getattr(self.modules, "lm_weight", None) is not None:
+            # TODO: add label smoothing loss?
+            loss = loss_ctc
         else:
             loss = loss_ctc
 
