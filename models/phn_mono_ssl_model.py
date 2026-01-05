@@ -111,6 +111,14 @@ class PhnMonoSSLModel(sb.Brain):
             pos_emb = RelPosEncXL(emb_dim=self.hparams.dnn_neurons)(x).to(self.device)
             # import pdb; pdb.set_trace()
             x, _ = self.modules.ConformerEncoder(x, pos_embs=pos_emb)
+        # import pdb; pdb.set_trace()
+        if getattr(self.modules, "ZipformerEncoder", None) is not None:
+            # from speechbrain.nnet.attention import RelPosEncXL, RelPosMHAXL, RoPEMHA 
+            # pos_emb = RelPosEncXL(emb_dim=self.hparams.dnn_neurons)(x.permute(1, 0, 2)).to(self.device)
+            x = self.modules.ZipformerEncoder(x.permute(1, 0, 2)) # [T, B, D]
+            x = x.permute(1, 0, 2) # [B, T, D]
+        
+        # import pdb; pdb.set_trace()
         # Get RVQ if exists
         if getattr(self.modules, "RVQ", None) is not None:
             # Expect [B, C, T]
@@ -521,9 +529,11 @@ class PhnMonoSSLModel(sb.Brain):
                                                     euclidian = False,
                                                     jsd = False,
                                                     )
-            else:
-                # vanilla CTC loss for decode
-                loss_ctc = self.hparams.ctc_cost(p_ctc, targets, wav_lens, target_lens)
+                else:
+                    # vanilla CTC loss for decode
+                    from speechbrain.nnet.losses import ctc_loss
+                    loss_ctc = ctc_loss(p_ctc, targets, wav_lens, target_lens, blank_index=self.hparams.blank_index)
+                    # loss_ctc = self.hparams.ctc_cost(p_ctc, targets, wav_lens, target_lens)
 
         else:
             # vanilla CTC loss
@@ -902,7 +912,7 @@ class PhnMonoSSLModel(sb.Brain):
                 self.checkpointer.save_and_keep_only(
                     meta={"PER": per, "mpd_f1": mpd_f1, "epoch": epoch},
                     name=ckpt_name,
-                    num_to_keep=1,
+                    num_to_keep=self.hparams.max_save_models,
                     min_keys=["PER"]
                 )
                 self.best_per = per
@@ -914,7 +924,7 @@ class PhnMonoSSLModel(sb.Brain):
                 self.checkpointer.save_and_keep_only(
                     meta={"PER": per, "mpd_f1": mpd_f1, "epoch": epoch},
                     name=ckpt_name,
-                    num_to_keep=1,
+                    num_to_keep=self.hparams.max_save_models,
                     max_keys=["mpd_f1"]
                 )
                 self.best_mpd_f1 = mpd_f1
@@ -2267,6 +2277,7 @@ class PhnMonoSSLModel_RVQforCano(PhnMonoSSLModel):
             pos_emb = RelPosEncXL(emb_dim=self.hparams.dnn_neurons)(x).to(self.device)
             # import pdb; pdb.set_trace()
             x, _ = self.modules.ConformerEncoder(x, pos_embs=pos_emb)
+            
         # Get RVQ if exists
         if getattr(self.modules, "RVQ", None) is not None:
             # Expect [B, C, T]
