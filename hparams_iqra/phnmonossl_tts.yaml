@@ -1,6 +1,13 @@
 # Hyperparameters toggles
 prefix: ""
 
+wandb_project: "iqra_tts"
+
+tags:
+    - PhnMonoSSL
+    - CTC
+    - iqra_tts
+
 ## SSL features Selection
 pretrained_models_path: pretrained_models/
 # pretrained_models:
