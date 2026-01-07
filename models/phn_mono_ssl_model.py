@@ -101,7 +101,7 @@ class PhnMonoSSLModel(sb.Brain):
         #     attn_mask = make_attn_mask(wavs, wav_lens)
         # else:
         #     attn_mask = None
-
+        
         feats = self.modules.perceived_ssl(wavs)
         
         x = self.modules.enc(feats)
@@ -514,6 +514,7 @@ class PhnMonoSSLModel(sb.Brain):
                                             )
         
         elif self.hparams.ctc_cost == batched_ottc_loss_bucketized:
+            # import pdb; pdb.set_trace()
             if getattr(self.modules, "lm_weight", None) is not None:
                 if stage != sb.Stage.TEST:
                     # OTTC loss computation
@@ -3041,3 +3042,560 @@ class PhnMonoEMAModel(PhnMonoSSLModel):
   
             self.per_metrics = self.hparams.per_stats()
             self.mpd_metrics = MpdStats()
+
+
+class PhnMonoSSLModel_CRCTC(PhnMonoSSLModel):
+    """
+    PhnMonoSSLModel with Consistency-Regularized CTC (CR-CTC) loss.
+    
+    CR-CTC applies two different augmentations to the input and enforces
+    consistency between their outputs via KL divergence loss.
+    
+    Reference: https://arxiv.org/abs/2310.11905
+    """
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # CR-CTC hyperparameters with defaults
+        self.cr_loss_weight = getattr(self.hparams, "cr_loss_weight", 0.1)
+        self.cr_loss_masked_scale = getattr(self.hparams, "cr_loss_masked_scale", 1.0)
+        # CR loss tracking
+        self.cr_loss_sum = 0.0
+        self.cr_loss_count = 0
+        self.ctc_loss_sum = 0.0
+        self.ctc_loss_count = 0
+    
+    def _apply_time_warp_augmentation(self, wavs, wav_lens, time_warp_factor=1600, p=1.0, save_comparison=False):
+        """
+        Apply time warping augmentation to waveforms.
+        
+        Args:
+            wavs: Input waveforms [B, T]
+            wav_lens: Relative lengths of waveforms [B]
+            time_warp_factor: Time warping factor (default: 1600)
+            p: Probability of applying time warp (default: 1.0)
+            save_comparison: Whether to save comparison plots and audio files (default: False)
+            
+        Returns:
+            wavs_warped: Time-warped waveforms [B, T]
+        """
+        from icefall.utils import time_warp
+        
+        # Create supervision_segments to avoid applying time_warp on padding frames
+        # Format: [sequence_idx, start_frame, num_frames]
+        num_frames = (wav_lens * wavs.shape[-1]).to(self.device).int()
+        supervision_segments = torch.stack([
+            torch.arange(wavs.shape[0]).to(self.device), 
+            torch.zeros(wavs.shape[0], dtype=torch.int32).to(self.device), 
+            num_frames
+        ], dim=1)
+        
+        # Apply time_warp
+        wavs_warped = time_warp(
+            features=wavs.unsqueeze(-1),
+            p=p,
+            time_warp_factor=time_warp_factor,
+            supervision_segments=supervision_segments,
+        ).squeeze(-1)
+        
+        # Optional: save comparison for debugging
+        if save_comparison:
+            diff = torch.abs(wavs - wavs_warped)
+            print(f"Max difference between original and time-warped waveform: {diff.max().item()}")
+            
+            import matplotlib.pyplot as plt
+            import torchaudio
+            
+            for i, (wav, wav_warped) in enumerate(zip(wavs, wavs_warped)):
+                # Plot waveforms
+                fig, axs = plt.subplots(2, 1, figsize=(10, 6))
+                axs[0].plot(wavs[i].detach().cpu().numpy())
+                axs[0].set_title('Original Waveform')
+                axs[1].plot(wavs_warped[i].detach().cpu().numpy())
+                axs[1].set_title('Time-Warped Waveform')
+                plt.tight_layout()
+                plt.savefig(f'crctc_time_warp_example_{i}.png')
+                plt.close(fig)
+                
+                # Save audio files
+                torchaudio.save(f'original_waveform_{i}.wav', wavs[i].unsqueeze(0).detach().cpu(), 16000)    
+                torchaudio.save(f'time_warped_waveform_{i}.wav', wavs_warped[i].unsqueeze(0).detach().cpu(), 16000)
+        
+        return wavs_warped
+        
+    def compute_forward(self, batch, stage):
+        "Given an input batch it computes the phoneme probabilities."
+        batch = batch.to(self.device)
+        wavs, wav_lens = batch.sig
+
+        # Apply standard augmentation if in training
+        if stage == sb.Stage.TRAIN:
+            if hasattr(self.hparams, "speed_augmentation"):
+                wavs = self.hparams.speed_augmentation(wavs)
+            if hasattr(self.hparams, "augmentation"):
+                # wavs = self.hparams.augmentation(wavs)
+                wavs_1, wav_lens_1 = self.hparams.augmentation.forward(wavs, lengths=wav_lens)
+                wavs_2, wav_lens_2 = self.hparams.augmentation.forward(wavs, lengths=wav_lens)
+                
+                # import matplotlib.pyplot as plt
+                # fig, axs = plt.subplots(3, 1, figsize=(10, 8))
+                # axs[0].specgram(wavs[0].detach().cpu().numpy(), Fs=16000)
+                # axs[0].set_title('Original Features')
+                # axs[1].specgram(wavs_1[0].detach().cpu().numpy(), Fs=16000)
+                # axs[1].set_title('Augmented Features 1')
+                # axs[2].specgram(wavs_2[0].detach().cpu().numpy(), Fs=16000)
+                # axs[2].set_title('Augmented Features 2')
+                # plt.tight_layout()
+                # plt.savefig('crctc_waveform_augmentation_example.png')
+                # plt.close(fig)
+                # import pdb; pdb.set_trace()
+                # assert torch.allclose(wav_lens, wav_lens_1)
+                # assert torch.allclose(wav_lens, wav_lens_2)
+                # assert wav_lens == wav_lens_1
+        
+        # Extract SSL features
+        feats = self.modules.perceived_ssl(wavs)
+        
+        use_crctc = getattr(self.hparams, "use_crctc", True) and stage == sb.Stage.TRAIN
+        
+        if use_crctc:
+            feats_1 = self.modules.perceived_ssl(wavs_1)
+            feats_2 = self.modules.perceived_ssl(wavs_2)
+            # CR-CTC: duplicate features and apply different augmentations
+            # feats shape: [B, T, D]
+            B, T, D = feats.shape
+            
+            # Get CR-CTC hyperparameters with defaults following icefall/k2 conventions
+            # Regular SpecAugment: 2 freq masks (width 27), 10 time masks (width 100), 15% time masking
+            # CR-CTC: 2.5x multiplier on time masking
+            
+            # freq mask ratio: 3/16
+            # time mask ratio: 15%
+            
+            # num_freq_masks = getattr(self.hparams, "cr_num_freq_masks", 2)
+            # max_freq_mask_width = getattr(self.hparams, "cr_max_freq_mask_width", int(3/16 * D))  # 3/16 of feature dim
+            
+            # num_time_masks = getattr(self.hparams, "cr_num_time_masks", 25)  # 10 * 2.5
+            # max_time_mask_width = getattr(self.hparams, "cr_max_time_mask_width", 100)
+            # max_time_mask_ratio = getattr(self.hparams, "cr_max_time_mask_ratio", 0.375)  # 15% * 2.5
+            
+            # Create two augmented versions with different random masks
+            # Augmentation 1
+            # import pdb; pdb.set_trace()
+            # feats_1 = self._apply_specaugment(
+            #     feats.clone(),
+            #     num_freq_masks=num_freq_masks,
+            #     max_freq_mask_width=max_freq_mask_width,
+            #     num_time_masks=num_time_masks,
+            #     max_time_mask_width=max_time_mask_width,
+            #     max_time_mask_ratio=max_time_mask_ratio
+            # )
+            
+            # Augmentation 2 (different random patterns)
+            # feats_2 = self._apply_specaugment(
+            #     feats.clone(),
+            #     num_freq_masks=num_freq_masks,
+            #     max_freq_mask_width=max_freq_mask_width,
+            #     num_time_masks=num_time_masks,
+            #     max_time_mask_width=max_time_mask_width,
+            #     max_time_mask_ratio=max_time_mask_ratio
+            # )
+            
+            # compare original and augmented, plot in 3*1 subplots
+            # import matplotlib.pyplot as plt
+            # fig, axs = plt.subplots(3, 1, figsize=(10, 8))
+            # axs[0].imshow(feats[0].detach().cpu().numpy().T, aspect='auto', origin='lower')
+            # axs[0].set_title('Original Features')
+            # axs[1].imshow(feats_1[0].detach().cpu().numpy().T, aspect='auto', origin='lower')
+            # axs[1].set_title('Augmented Features 1')
+            # axs[2].imshow(feats_2[0].detach().cpu().numpy().T, aspect='auto', origin='lower')
+            # axs[2].set_title('Augmented Features 2')
+            # plt.tight_layout()
+            # plt.savefig('crctc_feature_augmentation_example.png')
+            # plt.close(fig)
+            
+            # pdb.set_trace()
+            # Concatenate both versions: [2*B, T, D]
+            feats_combined = torch.cat([feats_1, feats_2], dim=0)
+            wav_lens_combined = wav_lens.repeat(2)
+            
+            # Encode combined features
+            x = self.modules.enc(feats_combined)
+            
+            if getattr(self.modules, "ConformerEncoder", None) is not None:
+                from speechbrain.nnet.attention import RelPosEncXL
+                pos_emb = RelPosEncXL(emb_dim=self.hparams.dnn_neurons)(x).to(self.device)
+                x, _ = self.modules.ConformerEncoder(x, pos_embs=pos_emb)
+            
+            # CTC output layer
+            logits = self.modules.ctc_lin(x)
+            p_ctc = self.hparams.log_softmax(logits)  # [2*B, T, C]
+            
+            return p_ctc, wav_lens_combined, None, True  # True indicates CR-CTC mode
+            
+        else:
+            # Standard forward pass (no CR-CTC)
+            x = self.modules.enc(feats)
+            
+            if getattr(self.modules, "ConformerEncoder", None) is not None:
+                from speechbrain.nnet.attention import RelPosEncXL
+                pos_emb = RelPosEncXL(emb_dim=self.hparams.dnn_neurons)(x).to(self.device)
+                x, _ = self.modules.ConformerEncoder(x, pos_embs=pos_emb)
+            
+            # CTC output layer
+            logits = self.modules.ctc_lin(x)
+            p_ctc = self.hparams.log_softmax(logits)  # [B, T, C]
+            
+            return p_ctc, wav_lens, None, False  # False indicates standard mode
+    
+    def _apply_specaugment(self, feats, num_freq_masks=2, max_freq_mask_width=27, 
+                          num_time_masks=25, max_time_mask_width=100, 
+                          max_time_mask_ratio=0.375):
+        """
+        Apply SpecAugment with both time and frequency masking.
+        
+        Reference: Park et al., 2019. "SpecAugment: A Simple Data Augmentation Method 
+        for Automatic Speech Recognition"
+        
+        For CR-CTC, we use 2.5x augmentation on time masking:
+        - Regular: 10 time masks, 15% masking fraction
+        - CR-CTC: 25 time masks (10*2.5), 37.5% masking fraction (15%*2.5)
+        
+        Args:
+            feats: Input features [B, T, D]
+            num_freq_masks: Number of frequency masking regions
+            max_freq_mask_width: Maximum width for frequency masking
+            num_time_masks: Number of time masking regions
+            max_time_mask_width: Maximum width for time masking
+            max_time_mask_ratio: Maximum ratio of total time to mask
+            
+        Returns:
+            augmented_feats: Masked features [B, T, D]
+        """
+        B, T, D = feats.shape
+        augmented_feats = feats.clone()
+        
+        # ===== Frequency Masking (along feature dimension D) =====
+        for b in range(B):
+            for _ in range(num_freq_masks):
+                # Randomly select masking region width
+                mask_width = torch.randint(1, max_freq_mask_width + 1, (1,)).item()
+                # Randomly select starting position
+                mask_start = torch.randint(0, max(1, D - mask_width + 1), (1,)).item()
+                mask_end = min(mask_start + mask_width, D)
+                
+                # Apply frequency mask (set to 0)
+                augmented_feats[b, :, mask_start:mask_end] = 0.0
+        
+        # ===== Time Masking (along time dimension T) =====
+        # Calculate maximum number of frames to mask based on ratio
+        max_frames_to_mask = int(T * max_time_mask_ratio)
+        total_frames_masked = 0
+        
+        for b in range(B):
+            num_masks_applied = 0
+            attempts = 0
+            max_attempts = num_time_masks * 3  # Allow extra attempts in case of overlaps
+            
+            while num_masks_applied < num_time_masks and attempts < max_attempts:
+                attempts += 1
+                
+                # Randomly select masking region width
+                mask_width = torch.randint(1, max_time_mask_width + 1, (1,)).item()
+                
+                # Check if adding this mask would exceed the maximum ratio
+                if total_frames_masked + mask_width > max_frames_to_mask:
+                    # Skip this mask if it would exceed the limit
+                    continue
+                
+                # Randomly select starting position
+                mask_start = torch.randint(0, max(1, T - mask_width + 1), (1,)).item()
+                mask_end = min(mask_start + mask_width, T)
+                
+                # Apply time mask (set to 0)
+                augmented_feats[b, mask_start:mask_end, :] = 0.0
+                
+                total_frames_masked += mask_end - mask_start
+                num_masks_applied += 1
+        
+        return augmented_feats
+
+    def _create_time_mask(self, batch_size, seq_len, mask_prob=0.1, mask_length=10):
+        """
+        Create a time mask for CR-CTC augmentation.
+        
+        Args:
+            batch_size: Number of samples in batch
+            seq_len: Sequence length
+            mask_prob: Probability of starting a mask at each position
+            mask_length: Maximum length of each mask span
+            
+        Returns:
+            mask: Boolean tensor of shape [B, T], True indicates masked positions
+        """
+        mask = torch.zeros(batch_size, seq_len, dtype=torch.bool)
+        
+        for b in range(batch_size):
+            # Randomly select positions to start masks
+            num_masks = max(1, int(seq_len * mask_prob / mask_length))
+            mask_starts = torch.randint(0, max(1, seq_len - mask_length), (num_masks,))
+            
+            for start in mask_starts:
+                length = torch.randint(1, mask_length + 1, (1,)).item()
+                end = min(start + length, seq_len)
+                mask[b, start:end] = True
+                
+        return mask
+
+    def compute_objectives(self, predictions, batch, stage):
+        "Given the network predictions and targets computed the NLL loss."
+
+        p_ctc, wav_lens, time_mask, is_crctc_mode = predictions
+        ids = batch.id
+        targets, target_lens = batch.phn_encoded_target
+        canonicals, canonical_lens = batch.phn_encoded_canonical
+        perceiveds, perceived_lens = batch.phn_encoded_perceived
+
+        if is_crctc_mode:
+            # CR-CTC mode: p_ctc is [2*B, T, C], need to split and compute losses
+            B = len(ids)
+            
+            # Duplicate targets for the combined batch
+            targets_combined = targets.repeat(2, 1) if targets.dim() > 1 else targets.repeat(2)
+            target_lens_combined = target_lens.repeat(2)
+            
+            # Compute CTC loss on combined batch
+            loss_ctc = self.hparams.ctc_cost(
+                p_ctc, targets_combined, wav_lens, target_lens_combined
+            )
+            
+            # Compute Consistency Regularization (CR) loss
+            # Split predictions back into two halves
+            p_ctc_1, p_ctc_2 = p_ctc.chunk(2, dim=0)  # Each [B, T, C]
+            
+            # CR loss: KL divergence between the two augmented outputs
+            # Use detached targets for stable training
+            cr_loss = self._compute_cr_loss(
+                p_ctc_1, p_ctc_2, 
+                wav_lens[:B],  # Original wav_lens
+                time_mask
+            )
+            # import pdb; pdb.set_trace()
+            
+            # Combine losses
+            # Scale CTC loss by 0.5 since we have 2x samples
+            loss = 0.5 * loss_ctc + self.cr_loss_weight * cr_loss
+            
+            # Track losses for logging
+            if stage == sb.Stage.TRAIN:
+                self.cr_loss_sum += cr_loss.detach().item()
+                self.cr_loss_count += 1
+                self.ctc_loss_sum += (0.5 * loss_ctc).detach().item()
+                self.ctc_loss_count += 1
+            
+        else:
+            # Standard mode
+            loss_ctc = self.hparams.ctc_cost(p_ctc, targets, wav_lens, target_lens)
+            cr_loss = torch.tensor(0.0, device=self.device)
+            loss = loss_ctc
+            
+            # Track CTC loss for logging
+            if stage == sb.Stage.TRAIN:
+                self.ctc_loss_sum += loss_ctc.detach().item()
+                self.ctc_loss_count += 1
+
+        # Record losses for posterity
+        if stage != sb.Stage.TRAIN:
+            # Use original batch size predictions for evaluation
+            if is_crctc_mode:
+                # Take first half for evaluation
+                p_ctc_eval = p_ctc[:len(ids)]
+                wav_lens_eval = wav_lens[:len(ids)]
+            else:
+                p_ctc_eval = p_ctc
+                wav_lens_eval = wav_lens
+                
+            sequence = sb.decoders.ctc_greedy_decode(
+                p_ctc_eval, wav_lens_eval, blank_id=self.hparams.blank_index
+            )
+            
+            self.ctc_metrics.append(ids, p_ctc_eval, targets, wav_lens_eval, target_lens)
+            
+            self.per_metrics.append(
+                ids=ids,
+                predict=sequence,
+                target=targets,
+                predict_len=None,
+                target_len=target_lens,
+                ind2lab=self.label_encoder.decode_ndim,
+            )
+            
+            self.mpd_metrics.append(
+                ids=ids,
+                predict=sequence,
+                canonical=canonicals,
+                perceived=perceiveds,
+                predict_len=None,
+                canonical_len=canonical_lens,
+                perceived_len=perceived_lens,
+                ind2lab=self.label_encoder.decode_ndim,
+            )
+
+        return loss
+    
+    def _compute_cr_loss(self, p_ctc_1, p_ctc_2, wav_lens, time_mask=None):
+        """
+        Compute Consistency Regularization loss between two augmented outputs.
+        
+        Args:
+            p_ctc_1: Log probabilities from first augmentation [B, T, C]
+            p_ctc_2: Log probabilities from second augmentation [B, T, C]
+            wav_lens: Relative lengths of sequences [B]
+            time_mask: Optional mask (not used in current implementation)
+            
+        Returns:
+            cr_loss: Scalar consistency regularization loss
+        """
+        B, T, C = p_ctc_1.shape
+        
+        # KL divergence: symmetric version
+        # KL(p1 || p2) + KL(p2 || p1) where p1, p2 are log probabilities
+        # Using log_target=True since both are log probabilities
+        
+        kl_1_to_2 = torch.nn.functional.kl_div(
+            input=p_ctc_1,
+            target=p_ctc_2.detach(),
+            reduction="none",
+            log_target=True,
+        )  # [B, T, C]
+        
+        kl_2_to_1 = torch.nn.functional.kl_div(
+            input=p_ctc_2,
+            target=p_ctc_1.detach(),
+            reduction="none",
+            log_target=True,
+        )  # [B, T, C]
+        
+        # Symmetric KL loss
+        cr_loss = kl_1_to_2 + kl_2_to_1  # [B, T, C]
+        
+        # Create length mask to ignore padded positions
+        max_len = T
+        abs_lens = (wav_lens * max_len).long()  # Convert relative to absolute lengths
+        length_mask = torch.arange(max_len, device=self.device).unsqueeze(0) >= abs_lens.unsqueeze(1)
+        length_mask = length_mask.unsqueeze(-1)  # [B, T, 1]
+        
+        # Zero out padded positions
+        cr_loss = cr_loss.masked_fill(length_mask, 0.0)
+        
+        # Average over valid positions
+        num_valid = (~length_mask).sum()
+        cr_loss = cr_loss.sum() / max(1, num_valid)
+        
+        return cr_loss
+    
+    def on_stage_start(self, stage, epoch):
+        "Gets called when a stage (either training, validation, test) starts."
+        self.ctc_metrics = self.hparams.ctc_stats()
+        if hasattr(self.hparams, "augmentation"):
+            self.modules.perceived_ssl.model.config.apply_spec_augment = True
+
+        # Reset CR loss tracking at the start of each epoch
+        if stage == sb.Stage.TRAIN:
+            self.cr_loss_sum = 0.0
+            self.cr_loss_count = 0
+            self.ctc_loss_sum = 0.0
+            self.ctc_loss_count = 0
+
+        if stage != sb.Stage.TRAIN:
+            self.per_metrics = self.hparams.per_stats()
+            self.mpd_metrics = MpdStats()
+    
+    def on_stage_end(self, stage, stage_loss, epoch):
+        """Gets called at the end of an epoch."""
+        if stage == sb.Stage.TRAIN:
+            self.train_loss = stage_loss
+            # Compute average CR loss and CTC loss for the epoch
+            self.avg_cr_loss = self.cr_loss_sum / max(1, self.cr_loss_count)
+            self.avg_ctc_loss_train = self.ctc_loss_sum / max(1, self.ctc_loss_count)
+        else:
+            per = self.per_metrics.summarize("error_rate")
+            mpd_f1 = self.mpd_metrics.summarize("mpd_f1")
+
+        if stage == sb.Stage.VALID:
+            # Log stats
+            self.hparams.train_logger.log_stats(
+                stats_meta={
+                    "epoch": epoch,
+                    "lr_adam": self.adam_optimizer.param_groups[0]["lr"],
+                    "lr_pretrained": self.pretrained_opt_class.param_groups[0]["lr"],
+                },
+                train_stats={
+                    "loss": self.train_loss,
+                    "ctc_loss": getattr(self, 'avg_ctc_loss_train', 0.0),
+                    "cr_loss": getattr(self, 'avg_cr_loss', 0.0),
+                },
+                valid_stats={
+                    "loss": stage_loss,
+                    "ctc_loss": self.ctc_metrics.summarize("average"),
+                    "PER": per,
+                    "mpd_f1": mpd_f1
+                },
+            )
+            
+            # Save best models
+            improved = False
+            ckpt_name = f"{epoch:03d}_PER_{per:.4f}_F1_{mpd_f1:.4f}.ckpt"
+
+            self.checkpointer.save_and_keep_only(
+                meta={"PER": per, "mpd_f1": mpd_f1, "epoch": epoch},
+                name=ckpt_name,
+                num_to_keep=3,
+                importance_keys=[
+                    lambda ckpt: (-ckpt.meta["PER"], ckpt.meta["mpd_f1"]),
+                ]
+            )
+
+            # Early stopping logic
+            if stage_loss < self.best_valid_loss or len(self.best_valid_loss_list) < 10:
+                if stage_loss < self.best_valid_loss:
+                    self.best_valid_loss = stage_loss
+                    improved = True
+                self.best_valid_loss_list.append((stage_loss, epoch, ckpt_name))
+                self.best_valid_loss_list.sort(key=lambda x: x[0])
+                self.best_valid_loss_list = self.best_valid_loss_list[:10]
+
+            if improved:
+                self.no_improve_epochs = 0
+                self.last_improved_epoch = epoch
+            else:
+                self.no_improve_epochs += 1
+
+            # Logging to wandb
+            wandb.log({
+                "epoch": epoch,
+                "train_loss": self.train_loss,
+                "train_ctc_loss": getattr(self, 'avg_ctc_loss_train', 0.0),
+                "train_cr_loss": getattr(self, 'avg_cr_loss', 0.0),
+                "valid_loss": stage_loss,
+                "valid_ctc_loss": self.ctc_metrics.summarize("average"),
+                "PER": per,
+                "mpd_f1": mpd_f1,
+            }, step=epoch)
+            
+            # Early stop if patience exceeded
+            if self.no_improve_epochs >= self.patience:
+                print(f"Early stopping at epoch {epoch}, no improvement for {self.patience} epochs.")
+                raise KeyboardInterrupt("Early stopping triggered")
+
+        if stage == sb.Stage.TEST:
+            self.hparams.train_logger.log_stats(
+                stats_meta={"Epoch loaded": self.hparams.epoch_counter.current},
+                test_stats={"loss": stage_loss, "PER": per, "mpd_f1": mpd_f1},
+            )
+            
+            with open(self.hparams.per_file, "w") as w:
+                self.per_metrics.write_stats(w)
+                
+            with open(self.hparams.mpd_file, "w") as m:
+                self.mpd_metrics.write_stats(m)
