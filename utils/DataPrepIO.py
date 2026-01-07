@@ -88,19 +88,29 @@ class BaseDataIOPrep:
         # Ensure save_folder exists
         save_folder = self.hparams["save_folder"]
         os.makedirs(save_folder, exist_ok=True)
+        import pdb; pdb.set_trace()
+        if self.hparams['lab_enc_file'] is None:
+            # raise ValueError("Label encoder must support insert_bos_eos method")
+            lab_enc_file = os.path.join(save_folder, "label_encoder.txt")
+            # for L2_arctic only
+            self.label_encoder.insert_bos_eos(
+                bos_label="<bos>",
+                eos_label="<eos>",
+                bos_index=42,
+                eos_index=43,
+            )
+        else:
+            lab_enc_file = self.hparams['lab_enc_file']
+            # copy lab_enc_file to current exp folder
+            import shutil
+            shutil.copy(lab_enc_file, os.path.join(save_folder, "label_encoder.txt"))
+            lab_enc_file = os.path.join(save_folder, "label_encoder.txt")
         
-        lab_enc_file = os.path.join(save_folder, "label_encoder.txt")
-        # touch lab_enc_file if not exist
-        
-        self.label_encoder.insert_bos_eos(
-            bos_label="<bos>",
-            eos_label="<eos>",
-            bos_index=42,
-            eos_index=43,
-        )
         special_labels = {
             "blank_label": self.hparams["blank_index"],
         }
+        
+        # touch lab_enc_file if not exist
         
         # Load or create label encoder
         # import pdb; pdb.set_trace()
