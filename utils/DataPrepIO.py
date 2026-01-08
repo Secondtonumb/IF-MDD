@@ -88,7 +88,6 @@ class BaseDataIOPrep:
         # Ensure save_folder exists
         save_folder = self.hparams["save_folder"]
         os.makedirs(save_folder, exist_ok=True)
-        import pdb; pdb.set_trace()
         if self.hparams['lab_enc_file'] is None:
             # raise ValueError("Label encoder must support insert_bos_eos method")
             lab_enc_file = os.path.join(save_folder, "label_encoder.txt")
