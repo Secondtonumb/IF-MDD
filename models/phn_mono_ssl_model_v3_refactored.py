@@ -122,7 +122,7 @@ class CTCLossManager:
     - label_prior: CTC with label priors (CTCLossWithLabelPriors)
     - ottc: Optimal Transport CTC loss
     - crctc: Consistency-Regularized CTC loss
-    - cr_ottc: Consistency-Regularized OTTC loss (TODO)
+    - crottc: Consistency-Regularized OTTC loss (TODO)
     
     Usage:
         loss_manager = CTCLossManager(
@@ -140,7 +140,7 @@ class CTCLossManager:
         self.blank_index = blank_index
         
         # CR-CTC specific attributes
-        if loss_type == 'crctc' or loss_type == 'cr_ottc':
+        if loss_type == 'crctc' or loss_type == 'crottc':
             self.cr_loss_weight = getattr(hparams, "cr_loss_weight", 0.1)
             self.cr_loss_masked_scale = getattr(hparams, "cr_loss_masked_scale", 1.0)
             # CR loss tracking for logging
@@ -278,7 +278,7 @@ class CTCLossManager:
                 loss_dict['ctc_loss'] = loss.detach()  # Keep on GPU
         
         # =========== CR-OTTC Loss ============
-        elif actual_loss_type == 'cr_ottc':
+        elif actual_loss_type == 'ottc':
             if extras and 'logits' in extras and 'weights_logits' in extras and 'weights_labels' in extras:
                 logits = extras['logits']
                 weights_logits = extras['weights_logits']
@@ -724,7 +724,7 @@ class PhnMonoSSLModel(sb.Brain):
             self.train_loss = stage_loss
             
             # Compute average CR-CTC losses for the epoch
-            if self.loss_manager.loss_type == 'crctc' or self.loss_manager.loss_type == 'cr_ottc':
+            if self.loss_manager.loss_type == 'crctc' or self.loss_manager.loss_type == 'crottc':
                 # import pdb; pdb.set_trace()
                 self.avg_cr_loss = (self.cr_loss_sum / max(1, self.cr_loss_count)
                                    if self.cr_loss_count > 0 else 0.0)
@@ -737,7 +737,7 @@ class PhnMonoSSLModel(sb.Brain):
         if stage == sb.Stage.VALID:
             # Prepare train stats
             train_stats = {"loss": self.train_loss}
-            if self.loss_manager.loss_type == 'crctc' or self.loss_manager.loss_type == 'cr_ottc':
+            if self.loss_manager.loss_type == 'crctc' or self.loss_manager.loss_type == 'crottc':
                 train_stats["ctc_loss"] = getattr(self, 'avg_ctc_loss_train', 0.0)
                 train_stats["cr_loss"] = getattr(self, 'avg_cr_loss', 0.0)
             
@@ -804,7 +804,7 @@ class PhnMonoSSLModel(sb.Brain):
             }
             
             # Add CR-CTC specific metrics
-            if self.loss_manager.loss_type == 'crctc' or self.loss_manager.loss_type == 'cr_ottc':
+            if self.loss_manager.loss_type == 'crctc' or self.loss_manager.loss_type == 'crottc':
                 wandb_dict["train_ctc_loss"] = getattr(self, 'avg_ctc_loss_train', 0.0)
                 wandb_dict["train_cr_loss"] = getattr(self, 'avg_cr_loss', 0.0)
             
