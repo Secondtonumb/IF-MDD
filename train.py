@@ -11,7 +11,7 @@ For commercial use, please contact the author.
 This script implements the main training pipeline for the MDD system using
 various SSL models for speech recognition and pronunciation assessment.
 """
-
+import argparse
 import os
 import sys
 import torch
@@ -46,14 +46,26 @@ logger = logging.getLogger(__name__)
 # Mono ASR model
 
 if __name__ == "__main__":
-    # main()
-    # CLI:
-    hparams_file, run_opts, overrides = sb.parse_arguments(sys.argv[1:])
-    # log the running sys.argv[0: ] to logger
+    # Add custom argument parser for mode selection FIRST
+    parser = argparse.ArgumentParser(description='MDD Training/Evaluation Script', add_help=False)
+    parser.add_argument('--mode', type=str, default='train+eval', 
+                       choices=['train', 'eval', 'train+eval'],
+                       help='Execution mode: train only, eval only, or both (default: train+eval)')
+    
+    # Parse only the --mode argument, leave the rest for speechbrain
+    args, remaining_argv = parser.parse_known_args()
+    
+    # Now parse speechbrain arguments from remaining_argv
+    hparams_file, run_opts, overrides = sb.parse_arguments(remaining_argv)
+    
+    # log the running sys.argv to logger
     logger.info(f"# " + " ".join([sys.executable] + sys.argv))
+    logger.info(f"Execution mode: {args.mode}")
+    
     # Load hyperparameters file with command-line overrides
     with open(hparams_file) as fin:
         hparams = load_hyperpyyaml(fin, overrides)
+    
     # Initialize ddp (useful only for multi-GPU DDP training)
     sb.utils.distributed.ddp_init_group(run_opts)
     # Create experiment directory
@@ -143,30 +155,40 @@ if __name__ == "__main__":
     # test_record = test_data.data_ids[:128]
     # test_data = test_data.filtered_sorted(key_test={"id": lambda x: x in test_record},)
     
-    # Training/validation loop
-    try:
-        asr_brain.fit(
-            asr_brain.hparams.epoch_counter,
-            train_data,
-            valid_data,
-            train_loader_kwargs=hparams["train_dataloader_opts"],
-            valid_loader_kwargs=hparams["valid_dataloader_opts"],
-        )
-    except StopIteration:
-        print("Training stopped early due to no improvement.")
     
-    # Test
-    if hparams.get("evaluate_key", True):
-        key = hparams["evaluate_key"]
-        if key == "mpd_f1" or key == "mpd_f1_seq":
-            asr_brain.evaluate(
-                test_data,
-                test_loader_kwargs=hparams["test_dataloader_opts"],
-                max_key=key
+    # Training/validation loop
+    if args.mode in ['train', 'train+eval']:
+        try:
+            asr_brain.fit(
+                asr_brain.hparams.epoch_counter,
+                train_data,
+                valid_data,
+                train_loader_kwargs=hparams["train_dataloader_opts"],
+                valid_loader_kwargs=hparams["valid_dataloader_opts"],
             )
-        elif key == "PER" or key == "PER_seq" or key == "CTC_PER":
-            asr_brain.evaluate(
-                test_data,
-                test_loader_kwargs=hparams["test_dataloader_opts"],
-                min_key=key,
-            )
+        except StopIteration:
+            logger.info("Training stopped early due to no improvement.")
+            # Don't return here, continue to evaluation if mode includes eval
+    
+    # Test - run evaluation based on mode
+    if args.mode in ['eval', 'train+eval']:
+        if hparams.get("evaluate_key", True):
+            key = hparams["evaluate_key"]
+            logger.info(f"Starting evaluation with key: {key}")
+            
+            if key == "mpd_f1" or key == "mpd_f1_seq":
+                asr_brain.evaluate(
+                    test_data,
+                    test_loader_kwargs=hparams["test_dataloader_opts"],
+                    max_key=key
+                )
+            elif key == "PER" or key == "PER_seq" or key == "CTC_PER":
+                asr_brain.evaluate(
+                    test_data,
+                    test_loader_kwargs=hparams["test_dataloader_opts"],
+                    min_key=key,
+                )
+        else:
+            logger.warning("evaluate_key not set in hparams, skipping evaluation")
+    else:
+        logger.info(f"Skipping evaluation (mode={args.mode})")
