@@ -122,6 +122,7 @@ class CTCLossManager:
     - label_prior: CTC with label priors (CTCLossWithLabelPriors)
     - ottc: Optimal Transport CTC loss
     - crctc: Consistency-Regularized CTC loss
+    - cr_ottc: Consistency-Regularized OTTC loss (TODO)
     
     Usage:
         loss_manager = CTCLossManager(
@@ -139,7 +140,7 @@ class CTCLossManager:
         self.blank_index = blank_index
         
         # CR-CTC specific attributes
-        if loss_type == 'crctc':
+        if loss_type == 'crctc' or loss_type == 'cr_ottc':
             self.cr_loss_weight = getattr(hparams, "cr_loss_weight", 0.1)
             self.cr_loss_masked_scale = getattr(hparams, "cr_loss_masked_scale", 1.0)
             # CR loss tracking for logging
@@ -147,6 +148,7 @@ class CTCLossManager:
             self.cr_loss_count = 0
             self.ctc_loss_sum = 0.0
             self.ctc_loss_count = 0
+
             
     def compute_loss(self, p_ctc, targets, wav_lens, target_lens, stage, extras=None):
         """
@@ -173,14 +175,17 @@ class CTCLossManager:
         if isinstance(self.ctc_cost, CTCLossWithLabelPriors):
             actual_loss_type = 'label_prior'
         elif self.ctc_cost == batched_ottc_loss_bucketized:
-            actual_loss_type = 'ottc'
+            if self.loss_type == 'crottc':
+                actual_loss_type = 'crottc'
+            else:
+                actual_loss_type = 'ottc'
         else:
             actual_loss_type = self.loss_type if self.loss_type else 'vanilla'
         
         # ============ Vanilla CTC ============
         if actual_loss_type == 'vanilla':
             loss = self.ctc_cost(p_ctc, targets, wav_lens, target_lens)
-            loss_dict['ctc_loss'] = loss.item()
+            loss_dict['ctc_loss'] = loss.detach()  # Keep on GPU
             
         # ============ CTC with Label Priors ============
         elif actual_loss_type == 'label_prior':
@@ -201,34 +206,44 @@ class CTCLossManager:
                 target_lengths=abs_target_lens,
                 step_type=step_type_dict[stage]
             )
-            loss_dict['ctc_loss'] = loss.item()
+            loss_dict['ctc_loss'] = loss.detach()  # Keep on GPU
             
         # ============ OTTC Loss ============
-        elif actual_loss_type == 'ottc':
+        
+        elif actual_loss_type == 'crottc':
             if extras and 'logits' in extras and 'weights_logits' in extras and 'weights_labels' in extras:
                 logits = extras['logits']
                 weights_logits = extras['weights_logits']
                 weights_labels = extras['weights_labels']
+                # duplicate weights_labels for CR-OTTC
+                weights_labels_dup = weights_labels.repeat(2, 1) if weights_labels.dim() > 1 else weights_labels.repeat(2)
                 
                 labels_mask = (targets != self.blank_index).float()
-                one_hot_labels = torch.nn.functional.one_hot(targets, num_classes=logits.shape[-1])
+                # duplicate labels_mask for CR-OTTC
+                labels_mask_dup = labels_mask.repeat(2, 1) if labels_mask.dim() > 1 else labels_mask.repeat(2)
+                targets_combined = targets.repeat(2, 1) if targets.dim() > 1 else targets.repeat(2)
+                target_lens_combined = target_lens.repeat(2)
+                one_hot_labels = torch.nn.functional.one_hot(targets_combined, num_classes=logits.shape[-1])
+                
+                # import pdb; pdb.set_trace()
                 
                 loss, _, _, _ = self.ctc_cost(
                     x=logits,
                     y=one_hot_labels,
                     a=weights_logits,
-                    b=weights_labels,
+                    b=weights_labels_dup,
                     amask=None,
-                    bmask=labels_mask,
+                    bmask=labels_mask_dup,
                     euclidian=False,
                     jsd=False,
                 )
-                loss_dict['ottc_loss'] = loss.item()
+                
+                loss_dict['ottc_loss'] = loss.detach()  # Keep on GPU
             else:
                 # Fallback to vanilla CTC if not in training
                 from speechbrain.nnet.losses import ctc_loss
                 loss = ctc_loss(p_ctc, targets, wav_lens, target_lens, blank_index=self.blank_index)
-                loss_dict['ctc_loss'] = loss.item()
+                loss_dict['ctc_loss'] = loss.detach()  # Keep on GPU
                 
         # ============ CR-CTC Loss ============
         elif actual_loss_type == 'crctc':
@@ -254,23 +269,66 @@ class CTCLossManager:
                 
                 # Combined loss
                 loss = 0.5 * loss_ctc + self.cr_loss_weight * cr_loss
-                loss_dict['ctc_loss'] = (0.5 * loss_ctc).item()
-                loss_dict['cr_loss'] = cr_loss.item()
+                loss_dict['ctc_loss'] = (0.5 * loss_ctc).detach()  # Keep on GPU
+                loss_dict['cr_loss'] = cr_loss.detach()  # Keep on GPU
                 
             else:
                 # Standard mode
                 loss = self.ctc_cost(p_ctc, targets, wav_lens, target_lens)
-                loss_dict['ctc_loss'] = loss.item()
+                loss_dict['ctc_loss'] = loss.detach()  # Keep on GPU
         
+        # =========== CR-OTTC Loss ============
+        elif actual_loss_type == 'cr_ottc':
+            if extras and 'logits' in extras and 'weights_logits' in extras and 'weights_labels' in extras:
+                logits = extras['logits']
+                weights_logits = extras['weights_logits']
+                weights_labels = extras['weights_labels']
+                
+                labels_mask = (targets != self.blank_index).float()
+                one_hot_labels = torch.nn.functional.one_hot(targets, num_classes=logits.shape[-1])
+                
+                loss, _, _, _ = self.ctc_cost(
+                    x=logits,
+                    y=one_hot_labels,
+                    a=weights_logits,
+                    b=weights_labels,
+                    amask=None,
+                    bmask=labels_mask,
+                    euclidian=False,
+                    jsd=False,
+                )
+                
+                
+                if extras and extras.get('is_crctc_mode', False):
+                    # Compute CR loss
+                    B = len(targets)
+                    p_ctc_1, p_ctc_2 = p_ctc.chunk(2, dim=0)
+                    cr_loss = self._compute_cr_loss(
+                        p_ctc_1, p_ctc_2, 
+                        wav_lens[:B],
+                        None  # Don't use time_mask in loss computation
+                    )
+                    # Combined loss
+                    loss = 0.5 * loss + self.cr_loss_weight * cr_loss
+                    loss_dict['cr_loss'] = cr_loss.detach()  # Keep on GPU
+                    
+                loss_dict['ottc_loss'] = loss.detach()  # Keep on GPU
+                    
+            else:
+                # Fallback to vanilla CTC if not in training
+                from speechbrain.nnet.losses import ctc_loss
+                loss = ctc_loss(p_ctc, targets, wav_lens, target_lens, blank_index=self.blank_index)
+                loss_dict['ctc_loss'] = loss.detach()  # Keep on GPU
+            
         else:
             # Default to vanilla
             loss = self.ctc_cost(p_ctc, targets, wav_lens, target_lens)
-            loss_dict['ctc_loss'] = loss.item()
+            loss_dict['ctc_loss'] = loss.detach()  # Keep on GPU
             
         return loss, loss_dict
     
     def _compute_cr_loss(self, p_ctc_1, p_ctc_2, wav_lens, time_mask=None):
-        """Compute Consistency Regularization loss for CR-CTC"""
+        """Compute Consistency Regularization loss for CR-CTC (GPU-optimized)"""
         B, T, C = p_ctc_1.shape
         device = p_ctc_1.device
         
@@ -285,16 +343,17 @@ class CTCLossManager:
         )
         cr_loss = kl_1_to_2 + kl_2_to_1  # [B, T, C]
         
-        # Length mask to ignore padding
+        # Length mask to ignore padding (optimized)
         abs_lens = (wav_lens * T).long()
-        length_mask = torch.arange(T, device=device).unsqueeze(0) >= abs_lens.unsqueeze(1)
-        length_mask = length_mask.unsqueeze(-1)
+        # Create arange once and reuse
+        time_indices = torch.arange(T, device=device, dtype=abs_lens.dtype).unsqueeze(0)
+        length_mask = (time_indices >= abs_lens.unsqueeze(1)).unsqueeze(-1)
         
         cr_loss = cr_loss.masked_fill(length_mask, 0.0)
         
-        # Average over valid positions
-        num_valid = (~length_mask).sum()
-        cr_loss = cr_loss.sum() / max(1, num_valid)
+        # Average over valid positions (avoid creating large intermediate tensors)
+        num_valid = (T * C * B) - length_mask.sum()
+        cr_loss = cr_loss.sum() / torch.clamp(num_valid, min=1)
         
         return cr_loss
 
@@ -382,9 +441,12 @@ class PhnMonoSSLModel(sb.Brain):
         )
     
     def create_attention_mask_from_input_sequence(self, input_sequence):
-        """Create attention mask from input sequence lengths"""
-        tampon = (torch.arange(1, max(input_sequence)+1)).repeat(len(input_sequence), 1).to(self.device)
-        attention_mask = (tampon <= input_sequence.unsqueeze(1)).float()
+        """Create attention mask from input sequence lengths (optimized for GPU)"""
+        batch_size = input_sequence.size(0)
+        max_len = input_sequence.max().item()  # Single sync point
+        # Create arange directly on GPU
+        indices = torch.arange(max_len, device=self.device, dtype=input_sequence.dtype).unsqueeze(0)
+        attention_mask = (indices < input_sequence.unsqueeze(1)).float()
         return attention_mask
     
     def check_gradients(self, loss):
@@ -408,6 +470,13 @@ class PhnMonoSSLModel(sb.Brain):
         batch = batch.to(self.device)
         wavs, wav_lens = batch.sig
         
+        # check if OTTC mode is enabled
+        use_ottc = (
+            self.loss_manager.loss_type == 'ottc' and 
+            stage == sb.Stage.TRAIN and
+            getattr(self.hparams, "use_ottc", True)
+        )
+        
         # Check if CR-CTC mode is enabled (requires augmentation)
         use_crctc = (
             self.loss_manager.loss_type == 'crctc' and 
@@ -415,13 +484,22 @@ class PhnMonoSSLModel(sb.Brain):
             getattr(self.hparams, "use_crctc", True) and
             hasattr(self.hparams, "augmentation")  # CR-CTC requires augmentation
         )
+
+        # Check if CT-OTTC mode is enabled
+        use_crottc = (
+            self.loss_manager.loss_type == 'crottc' and
+            stage == sb.Stage.TRAIN and
+            getattr(self.hparams, "use_ottc", True) and
+            hasattr(self.hparams, "augmentation")  # OTTC requires augmentation
+        )
         
-        # Apply augmentation in training
+        # Apply augmentation in training,
         if stage == sb.Stage.TRAIN:
             if hasattr(self.hparams, "speed_augmentation"):
                 wavs = self.hparams.speed_augmentation(wavs)
             
-            if use_crctc:
+            # Essential Augmentation for for CR-CTC / CR-OTTC
+            if use_crctc or use_crottc:
                 # CR-CTC: Apply augmentation twice to get two different views
                 wavs_1, wav_lens_1 = self.hparams.augmentation.forward(wavs, lengths=wav_lens)
                 wavs_2, wav_lens_2 = self.hparams.augmentation.forward(wavs, lengths=wav_lens)
@@ -452,19 +530,26 @@ class PhnMonoSSLModel(sb.Brain):
         p_ctc = self.hparams.log_softmax(logits)
         
         # Handle OTTC-specific outputs
-        if hasattr(self.modules, "lm_weight") and stage != sb.Stage.TEST:
-            targets, target_lens = batch.phn_encoded_target
-            labels_mask = (targets != self.hparams.blank_index).float()
-            
-            weights_logits = self.modules.lm_weight(x)
-            lens_abs = (wav_lens * feats.shape[-2]).int()
-            output_mask = self.create_attention_mask_from_input_sequence(lens_abs)
-            
-            import torch.nn.functional as F
-            weights_logits = F.softmax(weights_logits.squeeze().masked_fill_(output_mask == 0, -torch.inf))
-            weights_labels = labels_mask / labels_mask.sum(axis=1)[:, None]
-            
-            return p_ctc, logits, weights_logits, weights_labels, wav_lens
+        if use_crottc or use_ottc:
+            if hasattr(self.modules, "lm_weight") and stage != sb.Stage.TEST:
+                targets, target_lens = batch.phn_encoded_target
+                labels_mask = (targets != self.hparams.blank_index).float()
+                
+                weights_logits = self.modules.lm_weight(x)
+                lens_abs = (wav_lens * feats.shape[-2]).int()
+                output_mask = self.create_attention_mask_from_input_sequence(lens_abs)
+                
+                import torch.nn.functional as F
+                # Optimize: use in-place operations and avoid unnecessary copies
+                weights_logits = weights_logits.squeeze()
+                weights_logits = weights_logits.masked_fill(output_mask == 0, -torch.inf)
+                weights_logits = F.softmax(weights_logits, dim=-1)
+                
+                # Optimize: use clamp to avoid division by zero without sync
+                label_sums = labels_mask.sum(dim=1, keepdim=True).clamp(min=1e-8)
+                weights_labels = labels_mask / label_sums
+                
+                return p_ctc, logits, weights_logits, weights_labels, wav_lens
         
         # Handle RVQ outputs
         if 'commitment_loss' in encoder_extras:
@@ -493,7 +578,7 @@ class PhnMonoSSLModel(sb.Brain):
             else:  # RVQ
                 p_ctc, wav_lens, commitment_loss, codebook_loss = predictions
                 extras = {'commitment_loss': commitment_loss, 'codebook_loss': codebook_loss}
-        elif len(predictions) == 5:  # OTTC
+        elif len(predictions) == 5:  # OTTC or CR-OTTC
             p_ctc, logits, weights_logits, weights_labels, wav_lens = predictions
             extras = {'logits': logits, 'weights_logits': weights_logits, 'weights_labels': weights_labels}
         else:
@@ -521,20 +606,20 @@ class PhnMonoSSLModel(sb.Brain):
             p_ctc, targets, wav_lens, target_lens, stage, extras
         )
         
-        # Track CR-CTC losses for epoch-level logging
+        # Track CR-CTC / CR-OTTC losses for epoch-level logging (keep on GPU)
         if stage == sb.Stage.TRAIN:
             if 'cr_loss' in loss_dict:
-                self.cr_loss_sum += loss_dict['cr_loss']
+                self.cr_loss_sum += loss_dict['cr_loss'].item()  # Only sync when accumulating
                 self.cr_loss_count += 1
             if 'ctc_loss' in loss_dict:
-                self.ctc_loss_sum += loss_dict['ctc_loss']
+                self.ctc_loss_sum += loss_dict['ctc_loss'].item()  # Only sync when accumulating
                 self.ctc_loss_count += 1
         
         # Add RVQ losses if present
         if 'commitment_loss' in extras:
             loss = loss + extras['commitment_loss'] + extras['codebook_loss']
-            loss_dict['commitment_loss'] = extras['commitment_loss'].item()
-            loss_dict['codebook_loss'] = extras['codebook_loss'].item()
+            loss_dict['commitment_loss'] = extras['commitment_loss'].detach()  # Keep on GPU
+            loss_dict['codebook_loss'] = extras['codebook_loss'].detach()  # Keep on GPU
         
         # Evaluation metrics
         if stage != sb.Stage.TRAIN:
@@ -639,7 +724,7 @@ class PhnMonoSSLModel(sb.Brain):
             self.train_loss = stage_loss
             
             # Compute average CR-CTC losses for the epoch
-            if self.loss_manager.loss_type == 'crctc':
+            if self.loss_manager.loss_type == 'crctc' or self.loss_manager.loss_type == 'cr_ottc':
                 # import pdb; pdb.set_trace()
                 self.avg_cr_loss = (self.cr_loss_sum / max(1, self.cr_loss_count)
                                    if self.cr_loss_count > 0 else 0.0)
@@ -652,7 +737,7 @@ class PhnMonoSSLModel(sb.Brain):
         if stage == sb.Stage.VALID:
             # Prepare train stats
             train_stats = {"loss": self.train_loss}
-            if self.loss_manager.loss_type == 'crctc':
+            if self.loss_manager.loss_type == 'crctc' or self.loss_manager.loss_type == 'cr_ottc':
                 train_stats["ctc_loss"] = getattr(self, 'avg_ctc_loss_train', 0.0)
                 train_stats["cr_loss"] = getattr(self, 'avg_cr_loss', 0.0)
             
@@ -719,7 +804,7 @@ class PhnMonoSSLModel(sb.Brain):
             }
             
             # Add CR-CTC specific metrics
-            if self.loss_manager.loss_type == 'crctc':
+            if self.loss_manager.loss_type == 'crctc' or self.loss_manager.loss_type == 'cr_ottc':
                 wandb_dict["train_ctc_loss"] = getattr(self, 'avg_ctc_loss_train', 0.0)
                 wandb_dict["train_cr_loss"] = getattr(self, 'avg_cr_loss', 0.0)
             
