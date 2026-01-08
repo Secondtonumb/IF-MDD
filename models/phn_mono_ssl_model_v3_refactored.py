@@ -244,6 +244,7 @@ class CTCLossManager:
                 loss_ctc = self.ctc_cost(p_ctc, targets_combined, wav_lens, target_lens_combined)
                 
                 # Compute CR loss
+                # import pdb; pdb.set_trace()
                 p_ctc_1, p_ctc_2 = p_ctc.chunk(2, dim=0)
                 cr_loss = self._compute_cr_loss(
                     p_ctc_1, p_ctc_2, 
@@ -256,11 +257,6 @@ class CTCLossManager:
                 loss_dict['ctc_loss'] = (0.5 * loss_ctc).item()
                 loss_dict['cr_loss'] = cr_loss.item()
                 
-                # Track losses for epoch-level logging
-                self.cr_loss_sum += cr_loss.item()
-                self.cr_loss_count += 1
-                self.ctc_loss_sum += (0.5 * loss_ctc).item()
-                self.ctc_loss_count += 1
             else:
                 # Standard mode
                 loss = self.ctc_cost(p_ctc, targets, wav_lens, target_lens)
@@ -364,7 +360,7 @@ class PhnMonoSSLModel(sb.Brain):
                 encoder_type = 'linear'
             else:
                 encoder_type = None
-                
+        
         self.encoder_manager = EncoderManager(
             encoder_type=encoder_type,
             modules=self.modules,
@@ -375,6 +371,8 @@ class PhnMonoSSLModel(sb.Brain):
     def _init_loss_manager(self):
         """Initialize loss manager based on hparams"""
         loss_type = getattr(self.hparams, 'ctc_loss_type', 'vanilla')
+        
+        # import pdb; pdb.set_trace()
         
         self.loss_manager = CTCLossManager(
             loss_type=loss_type,
@@ -410,19 +408,20 @@ class PhnMonoSSLModel(sb.Brain):
         batch = batch.to(self.device)
         wavs, wav_lens = batch.sig
         
-        # Check if CR-CTC mode is enabled
+        # Check if CR-CTC mode is enabled (requires augmentation)
         use_crctc = (
             self.loss_manager.loss_type == 'crctc' and 
             stage == sb.Stage.TRAIN and
-            getattr(self.hparams, "use_crctc", True)
+            getattr(self.hparams, "use_crctc", True) and
+            hasattr(self.hparams, "augmentation")  # CR-CTC requires augmentation
         )
         
         # Apply augmentation in training
         if stage == sb.Stage.TRAIN:
             if hasattr(self.hparams, "speed_augmentation"):
-                wavs, wav_lens = self.hparams.speed_augmentation(wavs, wav_lens)
+                wavs = self.hparams.speed_augmentation(wavs)
             
-            if use_crctc and hasattr(self.hparams, "augmentation"):
+            if use_crctc:
                 # CR-CTC: Apply augmentation twice to get two different views
                 wavs_1, wav_lens_1 = self.hparams.augmentation.forward(wavs, lengths=wav_lens)
                 wavs_2, wav_lens_2 = self.hparams.augmentation.forward(wavs, lengths=wav_lens)
@@ -487,8 +486,9 @@ class PhnMonoSSLModel(sb.Brain):
             p_ctc, wav_lens = predictions
             extras = {}
         elif len(predictions) == 4:
-            if isinstance(predictions[2], bool):  # CR-CTC
+            if isinstance(predictions[3], bool):  # CR-CTC
                 p_ctc, wav_lens, time_mask, is_crctc_mode = predictions
+                # import pdb; pdb.set_trace()
                 extras = {'time_mask': time_mask, 'is_crctc_mode': is_crctc_mode}
             else:  # RVQ
                 p_ctc, wav_lens, commitment_loss, codebook_loss = predictions
@@ -520,6 +520,15 @@ class PhnMonoSSLModel(sb.Brain):
         loss, loss_dict = self.loss_manager.compute_loss(
             p_ctc, targets, wav_lens, target_lens, stage, extras
         )
+        
+        # Track CR-CTC losses for epoch-level logging
+        if stage == sb.Stage.TRAIN:
+            if 'cr_loss' in loss_dict:
+                self.cr_loss_sum += loss_dict['cr_loss']
+                self.cr_loss_count += 1
+            if 'ctc_loss' in loss_dict:
+                self.ctc_loss_sum += loss_dict['ctc_loss']
+                self.ctc_loss_count += 1
         
         # Add RVQ losses if present
         if 'commitment_loss' in extras:
@@ -631,6 +640,7 @@ class PhnMonoSSLModel(sb.Brain):
             
             # Compute average CR-CTC losses for the epoch
             if self.loss_manager.loss_type == 'crctc':
+                # import pdb; pdb.set_trace()
                 self.avg_cr_loss = (self.cr_loss_sum / max(1, self.cr_loss_count)
                                    if self.cr_loss_count > 0 else 0.0)
                 self.avg_ctc_loss_train = (self.ctc_loss_sum / max(1, self.ctc_loss_count)
