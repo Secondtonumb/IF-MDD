@@ -8,9 +8,7 @@ import numpy as np
 from tqdm import tqdm
 import wandb
 from types import SimpleNamespace
-import os
-import logging
-logger = logging.getLogger(__name__)
+import pdb
 
 def phn_list_to_seq(batch):
     """
@@ -68,6 +66,53 @@ class SSL_LLM_origin(sb.Brain):
         valid_tokens = list(range(44))  # 0-43 是音素相关的token（包括blank, bos, eos）
         self.phoneme_bias[valid_tokens] = 0
         
+    def _ensure_initialized(self):
+        """Lazy initialization for components that need LLM to be loaded.
+        This ensures inference works even without calling on_fit_start."""
+        
+        # Initialize llm_norm if not exists
+        if not hasattr(self, "llm_norm") or self.llm_norm is None:
+            hidden_size = self.modules.LLM.config.hidden_size
+            self.llm_norm = nn.LayerNorm(hidden_size).to(self.device)
+            print(f"[Lazy Init] Created llm_norm with hidden_size={hidden_size}")
+        
+        # Initialize prompt_embed based on prompt_type if needed
+        use_prompt = getattr(self.hparams, "use_prompt", False)
+        if use_prompt and (not hasattr(self, "prompt_embed") or self.prompt_embed is None):
+            prompt_type = getattr(self.hparams, "prompt_type", "soft")
+            prompt_len = getattr(self.hparams, "prompt_len", 10)
+            hidden_size = self.modules.LLM.config.hidden_size
+            
+            if prompt_type == "soft":
+                # Learnable soft prompt
+                init_method = getattr(self.hparams, "prompt_init", "xavier")
+                self.prompt_embed = nn.Parameter(
+                    torch.zeros(prompt_len, hidden_size, device=self.device)
+                )
+                
+                if init_method == "xavier":
+                    nn.init.xavier_uniform_(self.prompt_embed)
+                elif init_method == "normal":
+                    nn.init.normal_(self.prompt_embed, mean=0.0, std=0.02)
+                elif init_method == "zeros":
+                    pass  # Already zeros
+                
+                print(f"[Lazy Init] Created soft prompt: {self.prompt_embed.shape}, init={init_method}")
+            
+            elif prompt_type in ["text", "discrete"]:
+                # Text prompt - frozen embeddings
+                prompt_2 = getattr(self.hparams, "prompt_2", "Classify the following phonemes as correct or incorrect: ")
+                tok = self.hparams.LLM_tokenizer
+                prompt_tokens = tok(prompt_2, return_tensors="pt", add_special_tokens=False).to(self.device)
+                prompt_ids = prompt_tokens["input_ids"].squeeze(0)  # [P]
+                
+                embed_fn = self.modules.LLM.get_input_embeddings()
+                with torch.no_grad():
+                    prompt_embeds = embed_fn(prompt_ids)  # [P, H]
+                
+                self.prompt_embed = prompt_embeds  # Not a Parameter, frozen
+                print(f"[Lazy Init] Created text prompt from '{prompt_2}': {self.prompt_embed.shape}")
+        
     def compute_forward(self, batch, stage):
         """Given an input batch it computes the model forward pass.
         
@@ -79,6 +124,9 @@ class SSL_LLM_origin(sb.Brain):
             - ce_targets: dict with target token IDs, or None
             - wav_lens: [B] - sequence lengths
         """
+        # Ensure critical components are initialized (for inference compatibility)
+        self._ensure_initialized()
+        
         batch = batch.to(self.device)
         wavs, wav_lens = batch.sig
         
@@ -100,7 +148,6 @@ class SSL_LLM_origin(sb.Brain):
             raise ValueError(f"Unknown ctc_head_input: {self.hparams.ctc_head_input}")
         
         p_ctc = self.hparams.log_softmax(ctc_logits)
-        
         # If CTC-only training, skip LLM
         ctc_weight = getattr(self.hparams, "ctc_weight", 0.3)
         if ctc_weight >= 1.0 - 1e-8:
@@ -118,10 +165,7 @@ class SSL_LLM_origin(sb.Brain):
         
         # ===== Tokenize phoneme sequences =====
         phn_seq = phn_list_to_seq(batch.phn_list_target)
-        
         phn_tokens = tok(phn_seq, return_tensors="pt", padding=True, add_special_tokens=False).to(device)
-        tok.batch_decode([42956])
-        
         # phn_tokens["input_ids"]: [B, L_phn]
         # phn_tokens["attention_mask"]: [B, L_phn]
         
@@ -149,13 +193,18 @@ class SSL_LLM_origin(sb.Brain):
         
         # ===== Optional prompt tuning =====
         use_prompt = getattr(self.hparams, "use_prompt", False)
-        prompt_embed = None
         prompt_len = 0
         
-        if use_prompt and hasattr(self, "prompt_embed") and self.prompt_embed is not None:
-            prompt_embed = self.prompt_embed  # [P, H] soft embedding
+        # Check if we have prompt embeddings (either soft or text)
+        has_prompt = use_prompt and hasattr(self, "prompt_embed") and self.prompt_embed is not None
+        
+        if has_prompt:
+            prompt_embed = self.prompt_embed  # [P, H] soft/text embedding
             prompt_len = prompt_embed.size(0)
             prompt_embed_batch = prompt_embed.unsqueeze(0).expand(B, -1, -1)  # [B, P, H]
+        else:
+            prompt_embed = None
+            prompt_embed_batch = None
         
         # ===== Build input embedding sequence =====
         # Sequence structure: <prompt?> <SEP> <speech> <BOS> <phoneme_tokens> <EOS>
@@ -201,10 +250,30 @@ class SSL_LLM_origin(sb.Brain):
         seq_len = inputs_embeds.size(1)
         
         if stage == sb.Stage.TRAIN:
-            # Train: full sequence visible (causal will be handled by LLM internally)
+            # Build attention mask: 1 for valid positions, 0 for padding
+            # Note: LLM internally applies causal mask, so we only mark valid/invalid positions
             attention_mask = torch.ones(B, seq_len, dtype=torch.long, device=device)
             
+            # Mask out padding in phoneme sequence
+            # Sequence: [prompt(P)] [SEP(1)] [speech(Ts)] [BOS(1)] [phn(L_phn)] [EOS(1)]
+            sep_pos = prompt_len
+            speech_start = sep_pos + 1
+            speech_end = speech_start + Ts
+            bos_pos = speech_end
+            text_start = bos_pos + 1
+            
+            for b in range(B):
+                num_phn = int(phn_mask[b].sum().item())
+                # Mask positions after actual phonemes + EOS
+                if num_phn < L_phn:
+                    # text_start + num_phn is EOS position
+                    # Everything after EOS should be masked (padding)
+                    attention_mask[b, text_start + num_phn + 1:] = 0
+            
             # Run forward pass
+            # Note: LlamaForCausalLM internally applies causal attention mask
+            # (position i can only attend to positions 0...i-1)
+            # We only need to provide padding mask via attention_mask
             llm_out = self.modules.LLM(
                 inputs_embeds=inputs_embeds,
                 attention_mask=attention_mask,
@@ -213,6 +282,13 @@ class SSL_LLM_origin(sb.Brain):
             )
             # llm_out.logits: [B, seq_len, 128000]
             ce_logits = llm_out.logits
+            
+            # Debug: verify causal masking (only run once)
+            if not hasattr(self, '_causal_check_done'):
+                print(f"[INFO] LLM type: {type(self.modules.LLM).__name__}")
+                print(f"[INFO] LLM should use causal attention by default")
+                print(f"[INFO] Logits shape: {ce_logits.shape}")
+                self._causal_check_done = True
             
             # Build labels: mask out speech/prompt/SEP, keep phoneme tokens
             # Labels structure: <prompt?> <SEP> <speech> <BOS> <phoneme_tokens> <EOS>
@@ -246,10 +322,29 @@ class SSL_LLM_origin(sb.Brain):
         
         else:
             # ===== Validation/Test Stage =====
-            attention_mask = torch.ones(B, seq_len, dtype=torch.long, device=device)
-            
             if stage == sb.Stage.VALID:
                 # Teacher-forcing (use full target): same as training
+                # Build attention mask: 1 for valid positions, 0 for padding
+                # Note: LLM internally applies causal mask, so we only mark valid/invalid positions
+                
+                attention_mask = torch.ones(B, seq_len, dtype=torch.long, device=device)
+                
+                # Mask out padding in phoneme sequence
+                # Sequence: [prompt(P)] [SEP(1)] [speech(Ts)] [BOS(1)] [phn(L_phn)] [EOS(1)]
+                sep_pos = prompt_len
+                speech_start = sep_pos + 1
+                speech_end = speech_start + Ts
+                bos_pos = speech_end
+                text_start = bos_pos + 1
+                
+                for b in range(B):
+                    num_phn = int(phn_mask[b].sum().item())
+                    # Mask positions after actual phonemes + EOS
+                    if num_phn < L_phn:
+                        # text_start + num_phn is EOS position
+                        # Everything after EOS should be masked (padding)
+                        attention_mask[b, text_start + num_phn + 1:] = 0
+                
                 llm_out = self.modules.LLM(
                     inputs_embeds=inputs_embeds,
                     attention_mask=attention_mask,
@@ -278,9 +373,11 @@ class SSL_LLM_origin(sb.Brain):
                 return p_ctc, ce_logits, {"labels": labels}, wav_lens
             
             elif stage == sb.Stage.TEST:
-                # Autoregressive generation: only provide up to BOS
-                import pdb; pdb.set_trace()
-                if prompt_embed is not None:
+                # ===== Autoregressive generation (no teacher forcing) =====
+                # Only provide: [prompt?] [SEP] [speech] [BOS]
+                # Model generates: [phn[0]] [phn[1]] ... [EOS]
+                
+                if prompt_embed_batch is not None:
                     inputs_embeds_inference = torch.cat([
                         prompt_embed_batch,  # [B, P, H]
                         SEP_embed,          # [B, 1, H]
@@ -301,65 +398,40 @@ class SSL_LLM_origin(sb.Brain):
                 
                 attention_mask_inference = torch.ones(B, inputs_embeds_inference.size(1), dtype=torch.long, device=device)
                 
-                # Generate phoneme tokens
+                print(f"[DEBUG] Generate input shape: {inputs_embeds_inference.shape}")
+                print(f"[DEBUG] max_new_tokens: {L_phn + 10}, BOS_ID: {BOS_ID}, EOS_ID: {EOS_ID}, PAD_ID: {PAD_ID}")
+                print(f"[DEBUG] Using full 128K vocab (no constraint)")
+                
+                # Generate phoneme tokens with full vocabulary
                 gen_out = self.modules.LLM.generate(
                     inputs_embeds=inputs_embeds_inference,
                     attention_mask=attention_mask_inference,
-                    max_new_tokens=L_phn + 1,  
+                    max_new_tokens=L_phn + 10,  # 增加生成长度
                     num_return_sequences=1,
                     pad_token_id=PAD_ID,
                     eos_token_id=EOS_ID,
+                    bos_token_id=BOS_ID,
                     do_sample=False,
-                    top_p=None,
-                    top_k=None,
+                    use_cache=True,
                 )
-                
-                gen_out = self.modules.LLM.generate(
-                    inputs_embeds=inputs_embeds_inference,
-                    attention_mask=None,
-                    max_new_tokens=None,  
-                    num_return_sequences=1,
-                    pad_token_id=PAD_ID,
-                    eos_token_id=EOS_ID,
-                    do_sample=False,
-                    top_p=None,
-                    top_k=None,
-                )
-                input_text = """
-                <|begin_of_text|><|start_header_id|>system<|end_header_id|>
 
-                Cutting Knowledge Date: December 2023
-                Today Date: 23 July 2024
-
-                You are a helpful assistant<|eot_id|><|start_header_id|>user<|end_header_id|>
-
-                What is the capital of France?<|eot_id|><|start_header_id|>assistant<|end_header_id|>"""
+                # gen_out: [B, generated_len] 
+                # 注意：当使用 inputs_embeds 时，generate() 只返回新生成的 tokens，不包含 prompt
+                print(f"[DEBUG] Generate output shape: {gen_out.shape}")
+                print(f"[DEBUG] First sample tokens: {gen_out[0].tolist()}")
                 
-                input_ids = self.hparams.LLM_tokenizer(input_text, return_tensors="pt").input_ids.to(device)
-                # create attention mask
-                attention_mask = torch.ones_like(input_ids).to(device)
-                y_out = self.modules.LLM.generate(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    num_return_sequences=2,
-                    )
-
-                self.hparams.LLM_tokenizer.batch_decode(y_out, skip_special_tokens=True)
-
+                # 使用 inputs_embeds 时，generate 已经只返回新生成的部分
+                gen_tokens = gen_out  # [B, generated_len]
                 
+                print(f"[DEBUG] Generated tokens shape: {gen_tokens.shape}")
+                print(f"[DEBUG] Generated tokens[0]: {gen_tokens[0].tolist()}")
+                if gen_tokens.size(1) > 0:
+                    print(f"[DEBUG] Decoded: {self.hparams.LLM_tokenizer.decode(gen_tokens[0], skip_special_tokens=False)}")
+                else:
+                    print(f"[DEBUG] Decoded: <empty>")
                 
-                hyps = self.hparams.LLM_tokenizer.batch_decode(gen_out, skip_special_tokens=True)
-                print("Generated hypotheses:", hyps)
-                # gen_out: [B, Ts+1+generated_len]
-                
-                # Extract generated tokens (after BOS position)
-                bos_len = inputs_embeds_inference.size(1)
-                gen_tokens = gen_out[:, bos_len:]  # [B, generated_len]
-                
-                # Return dummy ce_logits and targets for compatibility
-                dummy_logits = torch.zeros(B, L_phn + 1, 128000, device=device)
-                
-                return p_ctc, dummy_logits, {"generated_ids": gen_tokens}, wav_lens
+                # Return for metrics calculation
+                return p_ctc, None, {"generated_ids": gen_tokens, "target_phonemes": batch.phn_list_target}, wav_lens
 
 
     def compute_objectives(self, predictions, batch, stage):
@@ -377,6 +449,7 @@ class SSL_LLM_origin(sb.Brain):
         # ===== CTC Loss =====
         T = p_ctc.size(1)
         clipped_target_lens = torch.minimum(target_lens, torch.full_like(target_lens, T))
+        # import pdb; pdb.set_trace()
         loss_ctc = self.hparams.ctc_cost(p_ctc.float(), targets, lens_for_ctc, clipped_target_lens)
         
         # ===== LLM Loss (big-vocab CrossEntropyLoss) =====
@@ -436,16 +509,35 @@ class SSL_LLM_origin(sb.Brain):
                 target_len=target_lens,
                 ind2lab=self.label_encoder.decode_ndim,
             )
-            
             # LLM metrics (big-vocab)
             if ce_logits is not None and ce_targets is not None:
                 if isinstance(ce_targets, dict) and "generated_ids" in ce_targets:
                     # Test stage: use generated token IDs
                     gen_ids = ce_targets["generated_ids"]  # [B, gen_len]
-                    # Decode to phoneme strings via tokenizer
+                    target_phn = ce_targets.get("target_phonemes", batch.phn_list_target)
+                    
+                    # Decode generated tokens to text
                     hyps = self.hparams.LLM_tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
-                    # TODO: Compute PER from hyps
-                    import pdb; pdb.set_trace()
+                    
+                    # Compute PER for each sample
+                    for i, (hyp, ref_phn) in enumerate(zip(hyps, target_phn)):
+                        # Split hypothesis into words/phonemes
+                        hyp_words = hyp.split()
+                        ref_words = ref_phn.split() if isinstance(ref_phn, str) else ref_phn
+                        
+                        # Add to LLM PER metrics
+                        self.llm_per_metrics.append(
+                            ids=[ids[i]],
+                            predict=[hyp_words],
+                            target=[ref_words],
+                            predict_len=None,
+                            target_len=None,
+                            ind2lab=lambda x: x
+                        )
+                    
+                    # Note: We don't compute llm_loss in TEST stage for generated tokens
+                    # because we don't have teacher-forced logits
+                    
                 elif isinstance(ce_targets, dict) and "labels" in ce_targets:
                     # Valid stage: use teacher-forced greedy decode
                     llm_predictions = ce_logits.argmax(dim=-1)  # [B, seq_len]
@@ -578,31 +670,54 @@ class SSL_LLM_origin(sb.Brain):
             self.hparams.train_logger.log_stats(
                 stats_meta=stage_stats,
             )
-            import pdb; pdb.set_trace()
+            # import pdb; pdb.set_trace()
             per_ctc = self.per_metrics.summarize("error_rate")
-            per_llm = self.llm_per_metrics.summarize("error_rate")  # 添加LLM PER计算
-            llm_loss = self.llm_metrics.summarize("average")
+            
+            # Check if LLM metrics have data before summarizing (避免空数据错误)
+            per_llm = None
+            llm_loss = None
+            
+            try:
+                per_llm = self.llm_per_metrics.summarize("error_rate")
+            except (ZeroDivisionError, ValueError, IndexError, RuntimeError) as e:
+                print(f"[Warning] LLM PER metrics are empty: {type(e).__name__}: {e}")
+            
+            try:
+                llm_loss = self.llm_metrics.summarize("average")
+            except (ZeroDivisionError, ValueError, IndexError, RuntimeError) as e:
+                print(f"[Warning] LLM loss metrics are empty: {type(e).__name__}: {e}")
+            
             ctc_loss = self.ctc_metrics.summarize("average")
+            
+            test_stats = {"loss": stage_loss, "PER": per_ctc}
+            if per_llm is not None:
+                test_stats["PER_seq"] = per_llm
+            if llm_loss is not None:
+                test_stats["llm_loss"] = llm_loss
+            if hasattr(self.modules, "ctc_lin"):
+                test_stats["ctc_loss"] = ctc_loss
             
             self.hparams.train_logger.log_stats(
                 stats_meta={"Epoch loaded": self.hparams.epoch_counter.current},
-                test_stats={"loss": stage_loss, "PER": per_ctc, 
-                            "PER_seq": per_llm, 
-                            "llm_loss": llm_loss,
-                            "ctc_loss": ctc_loss if hasattr(self.modules, "ctc_lin") else None},
+                test_stats=test_stats,
             )
             with open(self.hparams.per_file, "w") as w:
                 w.write("CTC loss stats:\n")
                 self.ctc_metrics.write_stats(w)
                 w.write("\nCTC PER stats:\n")
                 self.per_metrics.write_stats(w)
-            if not hasattr(self.hparams, 'per_seq_file'):
-                self.hparams.per_seq_file = self.hparams.per_file.replace('.txt', '_llm.txt')
-            with open(self.hparams.per_seq_file, "w") as w:
-                w.write("LLM loss stats:\n")
-                self.llm_metrics.write_stats(w)
-                w.write("\nLLM PER stats:\n")
-                self.llm_per_metrics.write_stats(w)
+            
+            # Only write LLM stats if data exists
+            if llm_loss is not None or per_llm is not None:
+                if not hasattr(self.hparams, 'per_seq_file'):
+                    self.hparams.per_seq_file = self.hparams.per_file.replace('.txt', '_llm.txt')
+                with open(self.hparams.per_seq_file, "w") as w:
+                    if llm_loss is not None:
+                        w.write("LLM loss stats:\n")
+                        self.llm_metrics.write_stats(w)
+                    if per_llm is not None:
+                        w.write("\nLLM PER stats:\n")
+                        self.llm_per_metrics.write_stats(w)
              
     def check_gradients(self, loss):
         """Check if gradients are finite"""
@@ -829,103 +944,7 @@ class SSL_LLM_origin(sb.Brain):
     #         self.setup_phoneme_mask()
     #     scores += self.phoneme_bias
     #     return scores
-    
-    def load_pretrained_components(self, checkpoint_path, components_to_load=None, freeze_loaded=True):
-        """
-        Load specific components from a pretrained model checkpoint
         
-        Args:
-            checkpoint_path (str): Path to the checkpoint directory or file
-            components_to_load (list): List of components to load. 
-                                     Options: ['ssl'] for SSL model only,
-                                              ['ssl', 'ctc_branch'] for SSL + CTC branch, mainly for CTC per
-                                     If None, loads ['ssl'] by default
-            freeze_loaded (bool): Whether to freeze the loaded components
-        """
-        if components_to_load is None:
-            components_to_load = ['ssl']  # Default: load SSL 
-            logger.info("No components specified for loading, defaulting to ['ssl']")
-        
-        logger.info(f"\n🔄 Loading pretrained components from: {checkpoint_path}")
-        logger.info(f"   Components to load: {components_to_load}")
-        
-        from speechbrain.utils.parameter_transfer import Pretrainer
-        
-        if "ctc_branch" in components_to_load:
-            logger.info("⏳ Loading pretrained SSL model and CTC branch from %s", checkpoint_path)
-            pretrainer = Pretrainer(
-                collect_in=self.hparams.pretrained_model_path, 
-                loadables={
-                    "perceived_ssl":     self.modules.perceived_ssl,
-                    "ctc_branch":     self.hparams.ctc_branch,
-                },
-                paths={
-                    "perceived_ssl":     "perceived_ssl.ckpt",
-                    "ctc_branch":   "model.ckpt",
-                },
-                custom_hooks={}
-            )
-        else:
-            logger.info("⏳ Loading pretrained SSL model only from %s", checkpoint_path)
-            pretrainer = Pretrainer(
-                collect_in=self.hparams.pretrained_model_path, 
-                loadables={
-                    "perceived_ssl":     self.modules.perceived_ssl,
-                },
-                paths={
-                    "perceived_ssl":     "perceived_ssl.ckpt",
-                },
-                custom_hooks={}
-            )
-        # DONE
-        paths = pretrainer.collect_files(default_source=self.hparams.pretrained_model_path)
-
-        # Check SSL
-        # before = self.modules.perceived_ssl.state_dict()["model.encoder.layers.23.final_layer_norm.weight"]
-        # Check CTC head
-        # before = self.hparams.ctc_branch[1].state_dict()["w.weight"]
-        # self.modules.ctc_lin.state_dict()['w.weight']
-        
-        pretrainer.load_collected()
-        
-        # Freeze loaded components if requested
-        if freeze_loaded:
-            for component in components_to_load:
-                if component == 'ssl':
-                    for param in self.modules.perceived_ssl.parameters():
-                        param.requires_grad = False
-                    self.ssl_frozen = True
-                    logger.info("   🔒 SSL model frozen")
-                    
-                elif component == 'ctc_branch':
-                    for param in self.hparams.ctc_branch.parameters():
-                        param.requires_grad = False
-                    self.ctc_branch_frozen = True
-                    logger.info("   🔒 CTC branch frozen")
-        
-                elif component == 'encoder':
-                    for param in self.modules.TransASR.encoder.parameters():
-                        param.requires_grad = False
-                    if hasattr(self.modules.TransASR, 'custom_src_module'):
-                        for param in self.modules.TransASR.custom_src_module.parameters():
-                            param.requires_grad = False
-                    self.encoder_frozen = True
-                    logger.info("   🔒 Encoder frozen")
-                    
-                elif component == 'enc':
-                    if hasattr(self.modules, 'enc'):
-                        for param in self.modules.enc.parameters():
-                            param.requires_grad = False
-                        print("   🔒 Encoder projection frozen")
-                        
-                elif component == 'ctc_head':
-                    for param in self.modules.ctc_lin.parameters():
-                        param.requires_grad = False
-                    logger.info("   🔒 CTC head frozen")
-    
-        # print(f"   ✅ Successfully loaded components: {loaded_components}")
-        # return loaded_components
-    
     def on_fit_start(self):
         """Gets called at the beginning of ``fit()``, on multiple processes
         if ``distributed_count > 0`` and backend is ddp.
@@ -940,58 +959,36 @@ class SSL_LLM_origin(sb.Brain):
         # Wrap modules with parallel backend after jit
         self._wrap_distributed()
 
-        # ===== Initialize LayerNorm and Prompt embeddings BEFORE optimizers =====
-        # LayerNorm must persist across forward passes for training
-        H = getattr(self.hparams, "LLM_hidden_size", 4096)
-        self.llm_norm = torch.nn.LayerNorm(H).to(self.device)
+        # ===== NOTE: Initialization moved to _ensure_initialized() =====
+        # This allows the model to work in inference mode without calling fit()
+        # The lazy initialization happens on first forward pass
+        # 
+        # Previously initialized here:
+        # - self.llm_norm (LayerNorm for LLM hidden states)
+        # - self.prompt_embed (soft or text prompt embeddings)
+        # 
+        # Now these are created in _ensure_initialized() which is called by compute_forward()
         
-        # Initialize prompt embeddings if using prompt tuning
-        use_prompt = getattr(self.hparams, "use_prompt", False)
-        if use_prompt:
-            prompt_len = getattr(self.hparams, "prompt_len", 16)
-            self.prompt_embed = torch.nn.Parameter(
-                torch.randn(prompt_len, H, device=self.device)
-            )
-            torch.nn.init.normal_(self.prompt_embed, std=0.02)
-        else:
-            self.prompt_embed = None
-
-        # Initialize optimizers after parameters are configured
+        # Initialize optimizers (happens during training only)
         self.init_optimizers()
         
         if self.checkpointer is not None:
             self.checkpointer.recover_if_possible(
                 min_key="LLM_PER",
             )
-                # Load pretrained components if specified
-        if getattr(self.hparams, 'load_pretrained_components', False):
-            pretrained_path = getattr(self.hparams, 'pretrained_model_path', '')
-            components = getattr(self.hparams, 'components_to_load', ['ssl'])
-            freeze_loaded = getattr(self.hparams, 'freeze_loaded_components', True)
-            
-            import os
-            if pretrained_path and os.path.exists(pretrained_path):
-                try:
-                    self.load_pretrained_components(
-                        checkpoint_path=pretrained_path,
-                        components_to_load=components,
-                        freeze_loaded=freeze_loaded
-                    )
-                except Exception as e:
-                    print(f"❌ Failed to load pretrained components: {e}")
-                    print("   Continuing with random initialization...")
-            else:
-                print(f"⚠️  Pretrained model path not found: {pretrained_path}")
-                print("   Continuing with random initialization...")
-
     
     def init_optimizers(self):
         # Collect all trainable parameters
         model_params = list(self.hparams.model.parameters())
         
-        # Add prompt embeddings if they exist
+        # Add prompt embeddings if they exist AND are learnable parameters
+        # (Only soft prompts are nn.Parameter, text prompts are plain tensors)
         if hasattr(self, "prompt_embed") and self.prompt_embed is not None:
-            model_params.append(self.prompt_embed)
+            if isinstance(self.prompt_embed, torch.nn.Parameter):
+                model_params.append(self.prompt_embed)
+                print(f"[Optimizer] Added soft prompt embeddings to optimizer")
+            else:
+                print(f"[Optimizer] Text prompt embeddings are frozen (not added to optimizer)")
         
         # Add LayerNorm parameters
         if hasattr(self, "llm_norm") and self.llm_norm is not None:
@@ -1014,7 +1011,53 @@ class SSL_LLM_origin(sb.Brain):
     
     
     
-prompt = """speech to text"""
+prompt = """
+You are a phoneme-ID transcriber.
+You will be given an input speech segment. Please transcribe it into a sequence of phonemes. Output only the phoneme embedding only.
+phoneme can only be generated from these given phoneme symbols:
+sh 
+ae 
+l 
+ay 
+k 
+r 
+iy 
+y
+uw
+sil 
+aa 
+eh 
+d
+w
+ah
+z
+ch
+ey
+n
+jh
+aw
+dh
+s
+hh
+f
+th
+ih
+m
+ao
+ow
+v
+er
+g
+t
+uh
+zh
+ng
+err
+p
+b
+oy
+
+"""
 
 # prompt_2 = """
 # You are a phoneme-ID transcriber.
