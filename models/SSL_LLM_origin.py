@@ -8,6 +8,9 @@ import numpy as np
 from tqdm import tqdm
 import wandb
 from types import SimpleNamespace
+import os
+import logging
+logger = logging.getLogger(__name__)
 
 def phn_list_to_seq(batch):
     """
@@ -115,7 +118,10 @@ class SSL_LLM_origin(sb.Brain):
         
         # ===== Tokenize phoneme sequences =====
         phn_seq = phn_list_to_seq(batch.phn_list_target)
+        
         phn_tokens = tok(phn_seq, return_tensors="pt", padding=True, add_special_tokens=False).to(device)
+        tok.batch_decode([42956])
+        
         # phn_tokens["input_ids"]: [B, L_phn]
         # phn_tokens["attention_mask"]: [B, L_phn]
         
@@ -273,6 +279,7 @@ class SSL_LLM_origin(sb.Brain):
             
             elif stage == sb.Stage.TEST:
                 # Autoregressive generation: only provide up to BOS
+                import pdb; pdb.set_trace()
                 if prompt_embed is not None:
                     inputs_embeds_inference = torch.cat([
                         prompt_embed_batch,  # [B, P, H]
@@ -298,7 +305,7 @@ class SSL_LLM_origin(sb.Brain):
                 gen_out = self.modules.LLM.generate(
                     inputs_embeds=inputs_embeds_inference,
                     attention_mask=attention_mask_inference,
-                    max_new_tokens=L_phn + 1,  # max phoneme length + EOS
+                    max_new_tokens=L_phn + 1,  
                     num_return_sequences=1,
                     pad_token_id=PAD_ID,
                     eos_token_id=EOS_ID,
@@ -306,6 +313,43 @@ class SSL_LLM_origin(sb.Brain):
                     top_p=None,
                     top_k=None,
                 )
+                
+                gen_out = self.modules.LLM.generate(
+                    inputs_embeds=inputs_embeds_inference,
+                    attention_mask=None,
+                    max_new_tokens=None,  
+                    num_return_sequences=1,
+                    pad_token_id=PAD_ID,
+                    eos_token_id=EOS_ID,
+                    do_sample=False,
+                    top_p=None,
+                    top_k=None,
+                )
+                input_text = """
+                <|begin_of_text|><|start_header_id|>system<|end_header_id|>
+
+                Cutting Knowledge Date: December 2023
+                Today Date: 23 July 2024
+
+                You are a helpful assistant<|eot_id|><|start_header_id|>user<|end_header_id|>
+
+                What is the capital of France?<|eot_id|><|start_header_id|>assistant<|end_header_id|>"""
+                
+                input_ids = self.hparams.LLM_tokenizer(input_text, return_tensors="pt").input_ids.to(device)
+                # create attention mask
+                attention_mask = torch.ones_like(input_ids).to(device)
+                y_out = self.modules.LLM.generate(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    num_return_sequences=2,
+                    )
+
+                self.hparams.LLM_tokenizer.batch_decode(y_out, skip_special_tokens=True)
+
+                
+                
+                hyps = self.hparams.LLM_tokenizer.batch_decode(gen_out, skip_special_tokens=True)
+                print("Generated hypotheses:", hyps)
                 # gen_out: [B, Ts+1+generated_len]
                 
                 # Extract generated tokens (after BOS position)
@@ -401,6 +445,7 @@ class SSL_LLM_origin(sb.Brain):
                     # Decode to phoneme strings via tokenizer
                     hyps = self.hparams.LLM_tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
                     # TODO: Compute PER from hyps
+                    import pdb; pdb.set_trace()
                 elif isinstance(ce_targets, dict) and "labels" in ce_targets:
                     # Valid stage: use teacher-forced greedy decode
                     llm_predictions = ce_logits.argmax(dim=-1)  # [B, seq_len]
@@ -533,7 +578,7 @@ class SSL_LLM_origin(sb.Brain):
             self.hparams.train_logger.log_stats(
                 stats_meta=stage_stats,
             )
-            # import pdb; pdb.set_trace()
+            import pdb; pdb.set_trace()
             per_ctc = self.per_metrics.summarize("error_rate")
             per_llm = self.llm_per_metrics.summarize("error_rate")  # 添加LLM PER计算
             llm_loss = self.llm_metrics.summarize("average")
@@ -784,7 +829,103 @@ class SSL_LLM_origin(sb.Brain):
     #         self.setup_phoneme_mask()
     #     scores += self.phoneme_bias
     #     return scores
+    
+    def load_pretrained_components(self, checkpoint_path, components_to_load=None, freeze_loaded=True):
+        """
+        Load specific components from a pretrained model checkpoint
         
+        Args:
+            checkpoint_path (str): Path to the checkpoint directory or file
+            components_to_load (list): List of components to load. 
+                                     Options: ['ssl'] for SSL model only,
+                                              ['ssl', 'ctc_branch'] for SSL + CTC branch, mainly for CTC per
+                                     If None, loads ['ssl'] by default
+            freeze_loaded (bool): Whether to freeze the loaded components
+        """
+        if components_to_load is None:
+            components_to_load = ['ssl']  # Default: load SSL 
+            logger.info("No components specified for loading, defaulting to ['ssl']")
+        
+        logger.info(f"\n🔄 Loading pretrained components from: {checkpoint_path}")
+        logger.info(f"   Components to load: {components_to_load}")
+        
+        from speechbrain.utils.parameter_transfer import Pretrainer
+        
+        if "ctc_branch" in components_to_load:
+            logger.info("⏳ Loading pretrained SSL model and CTC branch from %s", checkpoint_path)
+            pretrainer = Pretrainer(
+                collect_in=self.hparams.pretrained_model_path, 
+                loadables={
+                    "perceived_ssl":     self.modules.perceived_ssl,
+                    "ctc_branch":     self.hparams.ctc_branch,
+                },
+                paths={
+                    "perceived_ssl":     "perceived_ssl.ckpt",
+                    "ctc_branch":   "model.ckpt",
+                },
+                custom_hooks={}
+            )
+        else:
+            logger.info("⏳ Loading pretrained SSL model only from %s", checkpoint_path)
+            pretrainer = Pretrainer(
+                collect_in=self.hparams.pretrained_model_path, 
+                loadables={
+                    "perceived_ssl":     self.modules.perceived_ssl,
+                },
+                paths={
+                    "perceived_ssl":     "perceived_ssl.ckpt",
+                },
+                custom_hooks={}
+            )
+        # DONE
+        paths = pretrainer.collect_files(default_source=self.hparams.pretrained_model_path)
+
+        # Check SSL
+        # before = self.modules.perceived_ssl.state_dict()["model.encoder.layers.23.final_layer_norm.weight"]
+        # Check CTC head
+        # before = self.hparams.ctc_branch[1].state_dict()["w.weight"]
+        # self.modules.ctc_lin.state_dict()['w.weight']
+        
+        pretrainer.load_collected()
+        
+        # Freeze loaded components if requested
+        if freeze_loaded:
+            for component in components_to_load:
+                if component == 'ssl':
+                    for param in self.modules.perceived_ssl.parameters():
+                        param.requires_grad = False
+                    self.ssl_frozen = True
+                    logger.info("   🔒 SSL model frozen")
+                    
+                elif component == 'ctc_branch':
+                    for param in self.hparams.ctc_branch.parameters():
+                        param.requires_grad = False
+                    self.ctc_branch_frozen = True
+                    logger.info("   🔒 CTC branch frozen")
+        
+                elif component == 'encoder':
+                    for param in self.modules.TransASR.encoder.parameters():
+                        param.requires_grad = False
+                    if hasattr(self.modules.TransASR, 'custom_src_module'):
+                        for param in self.modules.TransASR.custom_src_module.parameters():
+                            param.requires_grad = False
+                    self.encoder_frozen = True
+                    logger.info("   🔒 Encoder frozen")
+                    
+                elif component == 'enc':
+                    if hasattr(self.modules, 'enc'):
+                        for param in self.modules.enc.parameters():
+                            param.requires_grad = False
+                        print("   🔒 Encoder projection frozen")
+                        
+                elif component == 'ctc_head':
+                    for param in self.modules.ctc_lin.parameters():
+                        param.requires_grad = False
+                    logger.info("   🔒 CTC head frozen")
+    
+        # print(f"   ✅ Successfully loaded components: {loaded_components}")
+        # return loaded_components
+    
     def on_fit_start(self):
         """Gets called at the beginning of ``fit()``, on multiple processes
         if ``distributed_count > 0`` and backend is ddp.
@@ -822,6 +963,27 @@ class SSL_LLM_origin(sb.Brain):
             self.checkpointer.recover_if_possible(
                 min_key="LLM_PER",
             )
+                # Load pretrained components if specified
+        if getattr(self.hparams, 'load_pretrained_components', False):
+            pretrained_path = getattr(self.hparams, 'pretrained_model_path', '')
+            components = getattr(self.hparams, 'components_to_load', ['ssl'])
+            freeze_loaded = getattr(self.hparams, 'freeze_loaded_components', True)
+            
+            import os
+            if pretrained_path and os.path.exists(pretrained_path):
+                try:
+                    self.load_pretrained_components(
+                        checkpoint_path=pretrained_path,
+                        components_to_load=components,
+                        freeze_loaded=freeze_loaded
+                    )
+                except Exception as e:
+                    print(f"❌ Failed to load pretrained components: {e}")
+                    print("   Continuing with random initialization...")
+            else:
+                print(f"⚠️  Pretrained model path not found: {pretrained_path}")
+                print("   Continuing with random initialization...")
+
     
     def init_optimizers(self):
         # Collect all trainable parameters
@@ -852,53 +1014,7 @@ class SSL_LLM_origin(sb.Brain):
     
     
     
-prompt = """
-You are a phoneme-ID transcriber.
-You will be given an input speech segment. Please transcribe it into a sequence of phonemes. Output only the phoneme embedding only.
-phoneme can only be generated from these given phoneme symbols:
-sh 
-ae 
-l 
-ay 
-k 
-r 
-iy 
-y
-uw
-sil 
-aa 
-eh 
-d
-w
-ah
-z
-ch
-ey
-n
-jh
-aw
-dh
-s
-hh
-f
-th
-ih
-m
-ao
-ow
-v
-er
-g
-t
-uh
-zh
-ng
-err
-p
-b
-oy
-
-"""
+prompt = """speech to text"""
 
 # prompt_2 = """
 # You are a phoneme-ID transcriber.
