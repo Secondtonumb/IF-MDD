@@ -35,8 +35,9 @@ from models.Transformer_TP import TransformerMDD_TP
 from models.Transformer_TP_fuse_errclass import TransformerMDD_TP_encdec_errclass
 from models.Transformer_TP_fuse_errclass_ConPCO import TransformerMDD_TP_encdec_errclass_ConPCO
 from models.SSL_LLM import SSL_LLM
-
 from models.SSL_LLM_origin import SSL_LLM_origin
+from models.SSL_LLM_origin_ver2 import SSL_LLM_origin_ver2
+
 from utils.DataPrepIO import LLMDataIOPrep, LLMDataIOPrep_ver2, LLMDataIOPrep_ver3
 
 sys.path.append("./trainer")
@@ -96,8 +97,8 @@ if __name__ == "__main__":
         asr_brain_class = SSL_LLM
     elif hparams["feature_fusion"] == "SSL_LLM_origin":
         asr_brain_class = SSL_LLM_origin
-    elif hparams["feature_fusion"] == "PhnMonoSSL_CRCTC":
-        asr_brain_class = PhnMonoSSLModel_CRCTC
+    elif hparams["feature_fusion"] == "SSL_LLM_origin_ver2":
+        asr_brain_class = SSL_LLM_origin_ver2
 
     if asr_brain_class == SSL_LLM:
         DataPrep  = LLMDataIOPrep_ver3(hparams)
@@ -152,9 +153,8 @@ if __name__ == "__main__":
     # valid_record = valid_data.data_ids[:128]  # Select first 128 for debugging
     # train_data = train_data.filtered_sorted(key_test={"id": lambda x: x in train_record},)
     # valid_data = valid_data.filtered_sorted(key_test={"id": lambda x: x in valid_record},)
-    # test_record = test_data.data_ids[:128]
+    # test_record = test_data.data_ids[:10]
     # test_data = test_data.filtered_sorted(key_test={"id": lambda x: x in test_record},)
-    
     
     # Training/validation loop
     if args.mode in ['train', 'train+eval']:
