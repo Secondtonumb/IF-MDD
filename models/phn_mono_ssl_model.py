@@ -2275,9 +2275,12 @@ class PhnMonoSSLModel_RVQforCano(PhnMonoSSLModel):
         x = self.modules.enc(feats)
         if getattr(self.modules, "ConformerEncoder", None) is not None:
             from speechbrain.nnet.attention import RelPosEncXL, RelPosMHAXL, RoPEMHA 
-            pos_emb = RelPosEncXL(emb_dim=self.hparams.dnn_neurons)(x).to(self.device)
             # import pdb; pdb.set_trace()
-            x, _ = self.modules.ConformerEncoder(x, pos_embs=pos_emb)
+            if self.modules.ConformerEncoder.attention_type == "RelPosMHAXL":
+                pos_emb = RelPosEncXL(emb_dim=self.hparams.dnn_neurons)(x).to(self.device)
+                x, _ = self.modules.ConformerEncoder(x, pos_embs=pos_emb)
+            else:
+                x, _ = self.modules.ConformerEncoder(x)
             
         # Get RVQ if exists
         if getattr(self.modules, "RVQ", None) is not None:
