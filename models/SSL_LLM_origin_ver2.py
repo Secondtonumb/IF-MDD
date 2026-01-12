@@ -71,7 +71,10 @@ class SSL_LLM_origin_ver2(sb.Brain):
         # import pdb; pdb.set_trace()
         # Initialize llm_norm if not exists
         if not hasattr(self, "llm_norm") or self.llm_norm is None:
-            hidden_size = self.modules.LLM.config.hidden_size
+            try:
+                hidden_size = self.modules.LLM.config.hidden_size
+            except:
+                hidden_size = self.modules.LLM.config.text_config.hidden_size
             self.llm_norm = nn.LayerNorm(hidden_size).to(self.device)
             print(f"[Lazy Init] Created llm_norm with hidden_size={hidden_size}")
         
@@ -80,7 +83,11 @@ class SSL_LLM_origin_ver2(sb.Brain):
         if use_prompt and (not hasattr(self, "prompt_embed") or self.prompt_embed is None):
             prompt_type = getattr(self.hparams, "prompt_type", "soft")
             prompt_len = getattr(self.hparams, "prompt_len", 10)
-            hidden_size = self.modules.LLM.config.hidden_size
+            import pdb; pdb.set_trace()
+            try:
+                hidden_size = self.modules.LLM.config.hidden_size
+            except:
+                hidden_size = self.modules.LLM.config.text_config.hidden_size
             
             if prompt_type == "soft":
                 # Learnable soft prompt
@@ -98,30 +105,56 @@ class SSL_LLM_origin_ver2(sb.Brain):
                 print(f"[Lazy Init] Created soft prompt: {self.prompt_embed.shape}, init={init_method}")
             
             elif prompt_type in ["text", "discrete"]:
-                # Text prompt - frozen embeddings
-                # User requested Llama 3 specific prompt structure
-                prompt_llama3_prefix = "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\nYou are a phoneme transcriber.<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n"
-                prompt_llama3_suffix = "\nTranscribe the preceding speech into CMUdict phonemes.<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
-                
                 tok = self.hparams.LLM_tokenizer
-                embed_fn = self.modules.LLM.get_input_embeddings()
+                PLACEHOLDER = "<<<SPEECH_EMBEDDING_HERE>>>"
+
+                # 1. 定义对话结构，把占位符放在你想插入语音的地方
+                #    注意：Llama 3 的 user content 通常紧跟在 header 之后
+                chat_structure = [
+                    {
+                        "role": "system", 
+                        "content": "You are a phoneme transcriber."
+                    },
+                    {
+                        "role": "user", 
+                        # 语音在指令之前
+                        "content": f"{PLACEHOLDER}\nTranscribe the preceding speech into CMUdict phonemes."
+                    }
+                ]
+
+                # 2. 使用官方模板渲染成字符串 (tokenize=False)
+                #    add_generation_prompt=True 会自动加上 <|start_header_id|>assistant...
+                full_prompt_str = tok.apply_chat_template(
+                    chat_structure, 
+                    tokenize=False, 
+                    add_generation_prompt=True
+                )
                 
-                # Tokenize Prefix
-                prefix_tokens = tok(prompt_llama3_prefix, return_tensors="pt", add_special_tokens=False).to(self.device)
+                # full_prompt_str 现在看起来大约是 (自动处理了 BOS 和 Header):
+                # "<|begin_of_text|><|start...|>system...>...user... \n\n<<<SPEECH_EMBEDDING_HERE>>>\nTranscribe...assistant..."
+
+                # 3. 根据占位符切割
+                if PLACEHOLDER not in full_prompt_str:
+                    raise ValueError("Chat template processing removed the placeholder!")
+                
+                prefix_str, suffix_str = full_prompt_str.split(PLACEHOLDER)
+                
+                # 4. 分别 Tokenize (注意不要再加 special tokens，因为模板里已经有了)
+                prefix_tokens = tok(prefix_str, return_tensors="pt", add_special_tokens=False).to(self.device)
+                suffix_tokens = tok(suffix_str, return_tensors="pt", add_special_tokens=False).to(self.device)
+                
                 prefix_ids = prefix_tokens["input_ids"].squeeze(0)
-                
-                # Tokenize Suffix
-                suffix_tokens = tok(prompt_llama3_suffix, return_tensors="pt", add_special_tokens=False).to(self.device)
                 suffix_ids = suffix_tokens["input_ids"].squeeze(0)
-                
+
+                # 下面的代码保持不变
+                embed_fn = self.modules.LLM.get_input_embeddings()
                 with torch.no_grad():
                     self.prompt_prefix_embed = embed_fn(prefix_ids)
                     self.prompt_suffix_embed = embed_fn(suffix_ids)
                 
-                # Keep prompt_embed not None to pass checks
                 self.prompt_embed = torch.cat([self.prompt_prefix_embed, self.prompt_suffix_embed], dim=0)
-                print(f"[Lazy Init] Created Llama 3 Prompts. Prefix: {self.prompt_prefix_embed.shape}, Suffix: {self.prompt_suffix_embed.shape}")
-        
+                print(f"[Lazy Init] Generated Llama 3 Prompt via Template.")
+
     def compute_forward(self, batch, stage):
         """Given an input batch it computes the model forward pass.
         
@@ -146,7 +179,12 @@ class SSL_LLM_origin_ver2(sb.Brain):
         wav_feats = self.modules.perceived_ssl(wavs)  # [B, T, 1024]
         import pdb
         # AudioEncoder
-        Z, _ = self.hparams.audio_encoder_modules(wavs)
+        try:
+            # with Conformer it give extra
+            Z, _ = self.hparams.audio_encoder_modules(wavs)
+        except:
+            # SSL projection only
+            Z = self.hparams.audio_encoder_modules(wavs)
         # CTC branch
         ctc_logits = self.modules.ctc_lin(Z)
         p_ctc = self.hparams.log_softmax(ctc_logits)
