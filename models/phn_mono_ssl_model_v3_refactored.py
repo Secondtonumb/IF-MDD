@@ -548,6 +548,13 @@ class PhnMonoSSLModel(sb.Brain):
         self.init_optimizers()
         
         # Load pretrained components if specified
+        
+        resume_from_pretrainer = getattr(self.hparams, 'resume_from_pretrainer', None)
+        if resume_from_pretrainer is not None:
+            resume_from_paths = resume_from_pretrainer.collect_files(default_source=self.hparams.resume_from)
+            resume_from_pretrainer.load_collected()
+            logging.info(f"✅ Resumed from pretrainer: {self.hparams.resume_from}")
+        
         if getattr(self.hparams, 'load_pretrained_components', False):
             pretrained_path = getattr(self.hparams, 'pretrained_model_path', '')
             components = getattr(self.hparams, 'components_to_load', ['ssl', 'enc', "ctc_head"])
@@ -563,7 +570,9 @@ class PhnMonoSSLModel(sb.Brain):
                 except Exception as e:
                     print(f"❌ Failed to load pretrained components: {e}")
         elif self.checkpointer is not None:
-            self.checkpointer.recover_if_possible(min_key="PER")
+            # self.checkpointer.recover_if_possible(min_key="PER")
+            self.checkpointer.recover_if_possible(min_key="PER", max_key="mpd_f1"
+            )
     
     def load_pretrained_components(self, checkpoint_path, components_to_load=None, freeze_loaded=True):
         """Load specific components from a pretrained model"""

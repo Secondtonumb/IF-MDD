@@ -9,6 +9,7 @@ from tqdm import tqdm
 import wandb
 from types import SimpleNamespace
 import pdb
+from mpd_eval_v4 import MpdStats
 
 import logging
 logger = logging.getLogger(__name__)
@@ -70,11 +71,23 @@ class SSL_LLM_origin_ver2(sb.Brain):
         This ensures inference works even without calling on_fit_start."""
         # import pdb; pdb.set_trace()
         # Initialize llm_norm if not exists
+        llm_handle = self.modules.LLM
+
+        # 2. [关键修改] 自动判断是否被 DDP 包裹
+        # 只要是 DDP 对象，它就没有 get_input_embeddings 方法，必须通过 .module 访问内部真身
+        import torch
+        if isinstance(llm_handle, torch.nn.parallel.DistributedDataParallel):
+            llm_handle = llm_handle.module
+        
+        # 3. 现在 llm_handle 肯定是原始的 CausalLM class 了，可以放心调用
+        embed_fn = llm_handle.get_input_embeddings()
+
         if not hasattr(self, "llm_norm") or self.llm_norm is None:
-            try:
-                hidden_size = self.modules.LLM.config.hidden_size
-            except:
-                hidden_size = self.modules.LLM.config.text_config.hidden_size
+            # try:
+            #     hidden_size = self.modules.LLM.config.hidden_size
+            # except:
+            #     hidden_size = self.modules.LLM.config.text_config.hidden_size
+            hidden_size = self.hparams.LLM_DIM
             self.llm_norm = nn.LayerNorm(hidden_size).to(self.device)
             print(f"[Lazy Init] Created llm_norm with hidden_size={hidden_size}")
         
@@ -83,11 +96,9 @@ class SSL_LLM_origin_ver2(sb.Brain):
         if use_prompt and (not hasattr(self, "prompt_embed") or self.prompt_embed is None):
             prompt_type = getattr(self.hparams, "prompt_type", "soft")
             prompt_len = getattr(self.hparams, "prompt_len", 10)
-            import pdb; pdb.set_trace()
-            try:
-                hidden_size = self.modules.LLM.config.hidden_size
-            except:
-                hidden_size = self.modules.LLM.config.text_config.hidden_size
+            
+            hidden_size = self.hparams.LLM_DIM
+  
             
             if prompt_type == "soft":
                 # Learnable soft prompt
@@ -147,7 +158,7 @@ class SSL_LLM_origin_ver2(sb.Brain):
                 suffix_ids = suffix_tokens["input_ids"].squeeze(0)
 
                 # 下面的代码保持不变
-                embed_fn = self.modules.LLM.get_input_embeddings()
+                # embed_fn = self.modules.LLM.get_input_embeddings()
                 with torch.no_grad():
                     self.prompt_prefix_embed = embed_fn(prefix_ids)
                     self.prompt_suffix_embed = embed_fn(suffix_ids)
@@ -496,13 +507,13 @@ class SSL_LLM_origin_ver2(sb.Brain):
                     pad_token_id=PAD_ID,
                     eos_token_id=EOS_ID,
                     bos_token_id=BOS_ID,
-                    do_sample=True,
+                    do_sample=False,
                     use_cache=True,
-                    max_new_tokens=100, 
-                    top_k = 100,
-                    top_p = 0.9,
-                    repetition_penalty=1.1,
-                    no_repeat_ngram_size=4,
+                    # top_k = 100,
+                    # top_p = 0.9,
+                    # max_new_tokens=100, 
+                    # repetition_penalty=1.1,
+                    # no_repeat_ngram_size=4,
                 )
                 # from matplotlib import pyplot as plt
                 # plt.imshow(inputs_embeds_inference[0].cpu().numpy(), aspect='auto')
@@ -584,6 +595,14 @@ class SSL_LLM_origin_ver2(sb.Brain):
             if stage == sb.Stage.VALID:
                 # VALID: Teacher-Forcing Evaluation
                 # Use logits to compute perplexity-like metrics and greedy decoding accuracy
+
+                try:
+                    canonical = batch.phn_list_canonical
+                    perceived = batch.phn_list_perceived
+                except:
+                    canonical = None
+                    perceived = None
+
                 if ce_logits is not None and isinstance(ce_targets, dict) and "labels" in ce_targets:
                     labels = ce_targets["labels"]
                     
@@ -618,10 +637,26 @@ class SSL_LLM_origin_ver2(sb.Brain):
                                 target_len=None,
                                 ind2lab=lambda x: x 
                             )
-                            
+                            self.mpd_f1_metrics.append(
+                                ids=[ids[b]],
+                                predict=[pred_text.split()],
+                                canonical=[canonical[b]],
+                                perceived=[perceived[b]],
+                                predict_len=None,
+                                canonical_len=None,
+                                perceived_len=None,
+                                ind2lab=lambda x: x
+                            )
+
+ 
             elif stage == sb.Stage.TEST:
                 # TEST: Autoregressive Generation Evaluation
                 # Use generated IDs to compute real PER
+                canonical = batch.phn_list_canonical
+                _, canonical_lens = batch.phn_encoded_canonical
+                perceived = batch.phn_list_perceived
+                _, perceived_lens = batch.phn_encoded_perceived
+                
                 if isinstance(ce_targets, dict) and "generated_ids" in ce_targets:
                     gen_ids = ce_targets["generated_ids"]
                     
@@ -640,6 +675,19 @@ class SSL_LLM_origin_ver2(sb.Brain):
                         target_len=None,
                         ind2lab=lambda x: x
                     )
+                    # 4. Compute MPD F1
+                    # pdb.set_trace()
+                    self.mpd_f1_metrics.append(
+                        ids=ids,
+                        predict=[hyp.split() for hyp in hyps],
+                        canonical=canonical,
+                        perceived=perceived,
+                        predict_len=None,
+                        canonical_len=None,
+                        perceived_len=None,
+                        ind2lab=lambda x: x
+                    )
+                    # pdb.set_trace()
 
         # ===== Combined Loss =====
         ctc_weight = getattr(self.hparams, "ctc_weight", 0.3)
@@ -667,12 +715,15 @@ class SSL_LLM_origin_ver2(sb.Brain):
         "Gets called when a stage (either training, validation, test) starts."
         self.ctc_metrics = self.hparams.ctc_stats()
         self.llm_metrics = self.hparams.llm_stats()  # 添加LLM损失统计
+        self.mpd_f1_metrics = MpdStats()  # 添加MPD F1统计
+        
         if hasattr(self.modules, "ctc_lin"):
             self.ctc_metrics = self.hparams.ctc_stats()
 
         if stage != sb.Stage.TRAIN:
             self.per_metrics = self.hparams.per_stats()
             self.llm_per_metrics = self.hparams.per_stats()# 添加LLM PER统计
+            self.mpd_f1_metrics = MpdStats()  # 添加MPD F1统计
             
     def on_stage_end(self, stage, stage_loss, epoch):
         """Gets called at the end of a stage to summarize and log."""
@@ -688,6 +739,9 @@ class SSL_LLM_origin_ver2(sb.Brain):
             llm_loss = self.llm_metrics.summarize("average")
             # Summarize and log metrics
             stage_stats["llm_loss"] = llm_loss
+            
+            mpd_f1 = self.mpd_f1_metrics.summarize("mpd_f1")
+            stage_stats["llm_mpd_f1"] = mpd_f1
         
             if hasattr(self.modules, "ctc_lin"):
                 ctc_loss = self.ctc_metrics.summarize("average")
@@ -702,14 +756,16 @@ class SSL_LLM_origin_ver2(sb.Brain):
             if epoch % self.hparams.valid_search_interval == 0:
 
                 improved = False
-                ckpt_name = f"{epoch:03d}_CTC_PER_{per_ctc:.4f}_LLM_PER_{per_llm:.4f}.ckpt"
-                self.checkpointer.save_and_keep_only(meta={"CTC_PER": per_ctc, "LLM_PER": per_llm},
+                # ckpt_name = f"{epoch:03d}_CTC_PER_{per_ctc:.4f}_LLM_PER_{per_llm:.4f}.ckpt"
+                ckpt_name = f"epoch{epoch:03d}_CTC_PER{per_ctc:.4f}_LLM_PER{per_llm:.4f}_LLM_MPD_F1_{mpd_f1:.4f}.ckpt"
+                self.checkpointer.save_and_keep_only(meta={"CTC_PER": per_ctc, "LLM_PER": per_llm, "LLM_MPD_F1": mpd_f1},
                                                     name=ckpt_name,
                                                     num_to_keep=2,
                                                     importance_keys=[
                                                         lambda ckpt: (
                                                             -ckpt.meta["LLM_PER"],  
                                                             -ckpt.meta["CTC_PER"],  
+                                                            -ckpt.meta["LLM_MPD_F1"]
                                                         )
                                                     ]
                                                 )
@@ -733,17 +789,21 @@ class SSL_LLM_origin_ver2(sb.Brain):
                 f"{stage.name.lower()}_llm_per": per_llm,
                 f"{stage.name.lower()}_llm_loss": llm_loss,
                 f"{stage.name.lower()}_ctc_loss": ctc_loss if hasattr(self.modules, "ctc_lin") else None,
+                f"{stage.name.lower()}_llm_mpd_f1": mpd_f1 if hasattr(self, "mpd_f1_metrics") else None,
             }, step=epoch)
             if self.no_improve_epochs >= self.patience:
                 print(f"Early stopping at epoch {epoch} (no improvement for {self.patience} epochs)")
                 raise StopIteration
         
         if stage == sb.Stage.TEST:
+            # import pdb; pdb.set_trace()
             self.hparams.train_logger.log_stats(
                 stats_meta=stage_stats,
             )
             # import pdb; pdb.set_trace()
             per_ctc = self.per_metrics.summarize("error_rate")
+            mpd_f1 = self.mpd_f1_metrics.summarize("mpd_f1")
+            
             
             # Check if LLM metrics have data before summarizing (避免空数据错误)
             per_llm = None
@@ -768,6 +828,8 @@ class SSL_LLM_origin_ver2(sb.Brain):
                 test_stats["llm_loss"] = llm_loss
             if hasattr(self.modules, "ctc_lin"):
                 test_stats["ctc_loss"] = ctc_loss
+            if hasattr(self, "mpd_f1_metrics"):
+                test_stats["llm_mpd_f1"] = mpd_f1
             
             self.hparams.train_logger.log_stats(
                 stats_meta={"Epoch loaded": self.hparams.epoch_counter.current},
@@ -790,6 +852,18 @@ class SSL_LLM_origin_ver2(sb.Brain):
                     if per_llm is not None:
                         w.write("\nLLM PER stats:\n")
                         self.llm_per_metrics.write_stats(w)
+            
+                if not hasattr(self.hparams, 'mpd_seq_file'):
+                    self.hparams.mpd_seq_file = self.hparams.mpd_file.replace('.txt', '_llm.txt')
+
+                with open(self.hparams.mpd_seq_file, "w") as m:
+                    m.write("MPD results and stats:\n")
+                    self.mpd_f1_metrics.write_stats(m)
+                    print(
+                        "MPD results and stats written to file",
+                        self.hparams.mpd_seq_file,
+                    )
+                    
              
     def check_gradients(self, loss):
         """Check if gradients are finite"""
@@ -977,8 +1051,9 @@ class SSL_LLM_origin_ver2(sb.Brain):
 
         if self.checkpointer is not None:
             self.checkpointer.recover_if_possible(
-                min_key="LLM_PER",
+                min_key=["LLM_PER", "CTC_PER"]
             )
+        
         if getattr(self.hparams, 'load_pretrained_components', False):
             pretrained_path = getattr(self.hparams, 'pretrained_model_path', '')
             components = getattr(self.hparams, 'components_to_load', ['ssl'])

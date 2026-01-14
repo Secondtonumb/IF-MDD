@@ -1280,6 +1280,7 @@ class TransformerMDD_TP_encdec_errclass_ConPCO(sb.Brain):
                     ind2lab=self.label_encoder.decode_ndim,
                 )
                 
+                # MPD metrics for seq2seq
                 self.mpd_metrics_seq.append(
                     ids=ids,
                     predict=sequence_decoder_out,

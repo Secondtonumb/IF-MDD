@@ -12,6 +12,7 @@ import pdb
 
 import logging
 logger = logging.getLogger(__name__)
+
 def phn_list_to_seq(batch):
     """
     Args:
@@ -24,7 +25,7 @@ def phn_list_to_seq(batch):
         result.append(" ".join(x for x in phn_list))
     return result
     
-class SSL_LLM_origin(sb.Brain):
+class SSL_LLM_origin_ver3(sb.Brain):
     def __init__(self, *args, patience=20, **kwargs):
         super().__init__(*args, **kwargs)
         self.patience = patience
@@ -39,10 +40,6 @@ class SSL_LLM_origin(sb.Brain):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         # 创建LayerNorm层用于特征归一化
         # self.embed_layer_norm = nn.LayerNorm(self.modules.LLM.config.hidden_size).to(self.device)
-        
-        # 将SSL模型移至正确设备
-        if getattr(self.modules, "perceived_ssl", None) is not None:
-            self.modules.perceived_ssl.to(self.device)
         
         # 训练追踪
         self.best_valid_loss = float('inf')
@@ -101,30 +98,56 @@ class SSL_LLM_origin(sb.Brain):
                 print(f"[Lazy Init] Created soft prompt: {self.prompt_embed.shape}, init={init_method}")
             
             elif prompt_type in ["text", "discrete"]:
-                # Text prompt - frozen embeddings
-                # User requested Llama 3 specific prompt structure
-                prompt_llama3_prefix = "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\nYou are a phoneme transcriber.<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n"
-                prompt_llama3_suffix = "\nTranscribe the preceding speech into CMUdict phonemes.<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
-                
                 tok = self.hparams.LLM_tokenizer
-                embed_fn = self.modules.LLM.get_input_embeddings()
+                PLACEHOLDER = "<<<SPEECH_EMBEDDING_HERE>>>"
+
+                # 1. 定义对话结构，把占位符放在你想插入语音的地方
+                #    注意：Llama 3 的 user content 通常紧跟在 header 之后
+                chat_structure = [
+                    {
+                        "role": "system", 
+                        "content": "You are a phoneme transcriber."
+                    },
+                    {
+                        "role": "user", 
+                        # 语音在指令之前
+                        "content": f"{PLACEHOLDER}\nTranscribe the preceding speech into CMUdict phonemes."
+                    }
+                ]
+
+                # 2. 使用官方模板渲染成字符串 (tokenize=False)
+                #    add_generation_prompt=True 会自动加上 <|start_header_id|>assistant...
+                full_prompt_str = tok.apply_chat_template(
+                    chat_structure, 
+                    tokenize=False, 
+                    add_generation_prompt=True
+                )
                 
-                # Tokenize Prefix
-                prefix_tokens = tok(prompt_llama3_prefix, return_tensors="pt", add_special_tokens=False).to(self.device)
+                # full_prompt_str 现在看起来大约是 (自动处理了 BOS 和 Header):
+                # "<|begin_of_text|><|start...|>system...>...user... \n\n<<<SPEECH_EMBEDDING_HERE>>>\nTranscribe...assistant..."
+
+                # 3. 根据占位符切割
+                if PLACEHOLDER not in full_prompt_str:
+                    raise ValueError("Chat template processing removed the placeholder!")
+                
+                prefix_str, suffix_str = full_prompt_str.split(PLACEHOLDER)
+                
+                # 4. 分别 Tokenize (注意不要再加 special tokens，因为模板里已经有了)
+                prefix_tokens = tok(prefix_str, return_tensors="pt", add_special_tokens=False).to(self.device)
+                suffix_tokens = tok(suffix_str, return_tensors="pt", add_special_tokens=False).to(self.device)
+                
                 prefix_ids = prefix_tokens["input_ids"].squeeze(0)
-                
-                # Tokenize Suffix
-                suffix_tokens = tok(prompt_llama3_suffix, return_tensors="pt", add_special_tokens=False).to(self.device)
                 suffix_ids = suffix_tokens["input_ids"].squeeze(0)
-                
+
+                # 下面的代码保持不变
+                embed_fn = self.modules.LLM.get_input_embeddings()
                 with torch.no_grad():
                     self.prompt_prefix_embed = embed_fn(prefix_ids)
                     self.prompt_suffix_embed = embed_fn(suffix_ids)
                 
-                # Keep prompt_embed not None to pass checks
                 self.prompt_embed = torch.cat([self.prompt_prefix_embed, self.prompt_suffix_embed], dim=0)
-                print(f"[Lazy Init] Created Llama 3 Prompts. Prefix: {self.prompt_prefix_embed.shape}, Suffix: {self.prompt_suffix_embed.shape}")
-        
+                print(f"[Lazy Init] Generated Llama 3 Prompt via Template.")
+
     def compute_forward(self, batch, stage):
         """Given an input batch it computes the model forward pass.
         
@@ -145,34 +168,25 @@ class SSL_LLM_origin(sb.Brain):
         if stage == sb.Stage.TRAIN and hasattr(self.hparams, "augmentation"):
             wavs = self.hparams.augmentation(wavs)
 
-        # ===== CTC Branch =====
+        # AudioEncoder + Projector
         wav_feats = self.modules.perceived_ssl(wavs)  # [B, T, 1024]
-        
-        if self.hparams.ctc_head_input == "ssl":
-            ctc_logits = self.modules.ctc_lin(wav_feats)
-        elif getattr(self.modules, "enc_ctc", None) and self.hparams.ctc_head_input == "enc_ctc":
-            ctc_in = self.modules.enc_ctc(wav_feats)
-            ctc_logits = self.modules.ctc_lin(ctc_in)
-        elif self.hparams.ctc_head_input == "enc_llm":
-            Z_tmp = self.modules.enc(wav_feats.transpose(-2, -1)).transpose(-2, -1)
-            ctc_logits = self.modules.ctc_lin(Z_tmp)
-        else:
-            raise ValueError(f"Unknown ctc_head_input: {self.hparams.ctc_head_input}")
-        
+        import pdb
+        # AudioEncoder
+        try:
+            # with Conformer it give extra
+            Z, _ = self.hparams.audio_encoder_modules(wavs)
+        except:
+            # SSL projection only
+            Z = self.hparams.audio_encoder_modules(wavs)
+        # CTC branch
+        ctc_logits = self.modules.ctc_lin(Z)
         p_ctc = self.hparams.log_softmax(ctc_logits)
-        # If CTC-only training, skip LLM
-        ctc_weight = getattr(self.hparams, "ctc_weight", 0.3)
-        if ctc_weight >= 1.0 - 1e-8:
-            return p_ctc, None, None, wav_lens
+        # Z = self.modules.encoder_manager(wav_feats)  # [B, T, H]
 
-        # ===== LLM Branch: Big-vocab (128K) Causal LM =====
-        # Project SSL to LLM dimension
-        Z = self.modules.enc(wav_feats.transpose(-2, -1))  # [B, T, H]
-        Z = Z.transpose(-2, -1)  # [B, T, H]
-        # import pdb; pdb.set_trace()
-        # if Z.requires_grad:
-        #      Z.register_hook(lambda grad: print(f"=== Z Gradient Mean: {grad.abs().mean().item():.6e} | Max: {grad.abs().max().item():.6e} ==="))
-        
+        if hasattr(self.modules, "projector") and self.modules.projector is not None:
+            # import pdb; pdb.set_trace()
+            Z = self.modules.projector(Z) # [B, T, H]  
+        # pdb.set_trace()
         B, Ts, H = Z.shape
         device = self.device
         tok = self.hparams.LLM_tokenizer
@@ -188,6 +202,55 @@ class SSL_LLM_origin(sb.Brain):
         phn_ids = phn_tokens["input_ids"]
         phn_mask = phn_tokens["attention_mask"]
         L_phn = phn_ids.size(1)
+
+        # ===== New: Canon/Word Prompting Logic =====
+        # Check config options
+        use_prompt = getattr(self.hparams, "use_prompt", False)
+        # New flags needed in yaml
+        use_canon = getattr(self.hparams, "use_canon_prompt", False)
+        use_word = getattr(self.hparams, "use_word_prompt", False)
+        
+        dynamic_info_str_list = []
+        
+        # Extract Canon if requested
+        if use_canon:
+            if hasattr(batch, "phn_list_canonical"):
+                # import pdb; pdb.set_trace()
+                if isinstance(batch.phn_list_canonical, list) and isinstance(batch.phn_list_canonical[0], list):
+                    canon_seqs = phn_list_to_seq(batch.phn_list_canonical)
+                else:
+                    canon_seqs = batch.phn_list_canonical
+                canon_strs = [f"\nCanonical Phonemes: {s}" for s in canon_seqs]
+                dynamic_info_str_list.append(canon_strs)
+            else:
+                 print("Warning: use_canon_prompt is True but batch has no phn_list_canonical")
+
+        # Extract Word if requested
+        if use_word:
+            if hasattr(batch, "wrd"):
+                word_seqs = batch.wrd
+                word_strs = [f"\nText Transcript: {s}" for s in word_seqs]
+                dynamic_info_str_list.append(word_strs)
+            else:
+                 print("Warning: use_word_prompt is True but batch has no wrd")
+        # import pdb; pdb.set_trace()
+            
+        # Construct Embeddings for Dynamic Info
+        if dynamic_info_str_list:
+            combined_info_strs = []
+            num_info_types = len(dynamic_info_str_list)
+            for b_idx in range(B):
+                # Ensure we handle potential missing or mismatched lengths gracefully if batching is loose
+                # But SpeechBrain batches are usually consistent
+                info_parts = [dynamic_info_str_list[i][b_idx] for i in range(num_info_types)]
+                combined_info_strs.append("".join(info_parts))
+            
+            info_tokens = tok(combined_info_strs, return_tensors="pt", padding=True, add_special_tokens=False).to(device)
+            info_ids = info_tokens["input_ids"]
+            info_embeds = embed_fn(info_ids) # [B, L_info, H]
+        else:
+            info_embeds = torch.zeros(B, 0, H, device=device)
+            info_tokens = {"attention_mask": torch.zeros(B, 0, device=device)}
         
         # ===== Prepare special tokens =====
         BOS_ID = tok.bos_token_id
@@ -243,6 +306,7 @@ class SSL_LLM_origin(sb.Brain):
              inputs_embeds = torch.cat([
                 prefix_embed.unsqueeze(0).expand(B, -1, -1),
                 Z,
+                info_embeds,
                 suffix_embed.unsqueeze(0).expand(B, -1, -1),
                 phn_embed,
                 EOS_embed
@@ -283,7 +347,16 @@ class SSL_LLM_origin(sb.Brain):
             attention_mask = torch.ones(B, seq_len, dtype=torch.long, device=device)
             
             if has_split_prompt:
-                 text_start = self.prompt_prefix_embed.size(0) + Ts + self.prompt_suffix_embed.size(0)
+                 L_pre = self.prompt_prefix_embed.size(0)
+                 L_info = info_embeds.size(1)
+                 L_suf = self.prompt_suffix_embed.size(0)
+                 text_start = L_pre + Ts + L_info + L_suf
+                 
+                 # Handle info padding mask if valid
+                 if L_info > 0:
+                      info_mask = info_tokens["attention_mask"]
+                      info_start = L_pre + Ts
+                      attention_mask[:, info_start : info_start + L_info] = info_mask
             else:
                 # Mask out padding in phoneme sequence
                 # Sequence: [prompt(P)] [SEP(1)] [speech(Ts)] [BOS(1)] [phn(L_phn)] [EOS(1)]
@@ -362,40 +435,6 @@ class SSL_LLM_origin(sb.Brain):
                 print(f"[INFO] LLM should use causal attention by default")
                 print(f"[INFO] Logits shape: {ce_logits.shape}")
                 self._causal_check_done = True
-            
-            # Build labels: mask out speech/prompt/SEP, keep phoneme tokens
-            # Labels structure: <prompt?> <SEP> <speech> <BOS> <phoneme_tokens> <EOS>
-            #                   (masked) (mask) (masked) (mask) (labels)         (label)
-            
-            # Ignore index for masked positions
-            # ignore_idx = -100
-            # labels = torch.full((B, seq_len), ignore_idx, dtype=torch.long, device=device)
-            
-            # Calculate positions
-            # if has_split_prompt:
-            #      text_start = self.prompt_prefix_embed.size(0) + Ts + self.prompt_suffix_embed.size(0)
-            #      bos_pos = text_start - 1
-            # else:
-            #     # Sequence: [prompt(P)] [SEP(1)] [speech(Ts)] [BOS(1)] [phn(L_phn)] [EOS(1)]
-            #     sep_pos = prompt_len  # SEP位置
-            #     speech_start = sep_pos + 1
-            #     speech_end = speech_start + Ts
-            #     bos_pos = speech_end  # BOS位置
-            #     text_start = bos_pos + 1  # phoneme开始位置
-            
-            # text_end = text_start + L_phn
-            # eos_pos = text_end  # EOS位置
-            
-            # Set phoneme labels (left-shifted for causal LM)
-            # hidden[i] predicts token[i+1]
-            # for b in range(B):
-            #     num_phn = int(phn_mask[b].sum().item())  # actual phoneme length
-            #     if num_phn > 0:
-            #         # BOS predicts first phoneme, phonemes predict next phoneme
-            #         labels[b, bos_pos : text_start + num_phn - 1] = phn_ids[b, : num_phn]
-            #         # Last phoneme position predicts EOS
-            #         labels[b, text_start + num_phn - 1] = EOS_ID
-            # pdb.set_trace()
 
             return p_ctc, ce_logits, {"labels": labels}, wav_lens
         
@@ -409,7 +448,15 @@ class SSL_LLM_origin(sb.Brain):
                 attention_mask = torch.ones(B, seq_len, dtype=torch.long, device=device)
                 
                 if use_prompt and hasattr(self, "prompt_prefix_embed") and hasattr(self, "prompt_suffix_embed"):
-                    text_start = self.prompt_prefix_embed.size(0) + Ts + self.prompt_suffix_embed.size(0)
+                    L_pre = self.prompt_prefix_embed.size(0)
+                    L_info = info_embeds.size(1)
+                    L_suf = self.prompt_suffix_embed.size(0)
+                    text_start = L_pre + Ts + L_info + L_suf
+                     
+                    if L_info > 0:
+                        info_mask = info_tokens["attention_mask"]
+                        info_start = L_pre + Ts
+                        attention_mask[:, info_start : info_start + L_info] = info_mask
                 else:
                     # Mask out padding in phoneme sequence
                     # Sequence: [prompt(P)] [SEP(1)] [speech(Ts)] [BOS(1)] [phn(L_phn)] [EOS(1)]
@@ -441,7 +488,10 @@ class SSL_LLM_origin(sb.Brain):
                 
                 # Calculate positions (same as training)
                 if use_prompt and hasattr(self, "prompt_prefix_embed") and hasattr(self, "prompt_suffix_embed"):
-                    text_start = self.prompt_prefix_embed.size(0) + Ts + self.prompt_suffix_embed.size(0)
+                    L_pre = self.prompt_prefix_embed.size(0)
+                    L_info = info_embeds.size(1)
+                    L_suf = self.prompt_suffix_embed.size(0)
+                    text_start = L_pre + Ts + L_info + L_suf
                     bos_pos = text_start - 1
                 else:
                     sep_pos = prompt_len
@@ -470,6 +520,7 @@ class SSL_LLM_origin(sb.Brain):
                      inputs_embeds_inference = torch.cat([
                         prefix_embed.unsqueeze(0).expand(B, -1, -1),
                         Z,
+                        info_embeds,
                         suffix_embed.unsqueeze(0).expand(B, -1, -1)
                     ], dim=1)
                 
@@ -494,6 +545,15 @@ class SSL_LLM_origin(sb.Brain):
                 
                 attention_mask_inference = torch.ones(B, inputs_embeds_inference.size(1), dtype=torch.long, device=device)
                 
+                if has_split_prompt and info_embeds.size(1) > 0:
+                    info_mask = info_tokens["attention_mask"]
+                    # Calculate start position for info
+                    # Prefix + Z
+                    L_pre = self.prompt_prefix_embed.size(0)
+                    L_info = info_embeds.size(1)
+                    info_start = L_pre + Ts
+                    attention_mask_inference[:, info_start : info_start + L_info] = info_mask
+                
                 # print(f"[DEBUG] Generate input shape: {inputs_embeds_inference.shape}")
                 # print(f"[DEBUG] max_new_tokens: {L_phn + 10}, BOS_ID: {BOS_ID}, EOS_ID: {EOS_ID}, PAD_ID: {PAD_ID}")
                 # print(f"[DEBUG] Using full 128K vocab (no constraint)")
@@ -501,6 +561,7 @@ class SSL_LLM_origin(sb.Brain):
                 # Generate phoneme tokens with full vocabulary
                 # import pdb; pdb.set_trace()
                 # pdb.set_trace()
+
                 gen_out = self.modules.LLM.generate(
                     inputs_embeds=inputs_embeds_inference,
                     attention_mask=attention_mask_inference,
@@ -681,9 +742,6 @@ class SSL_LLM_origin(sb.Brain):
         self.llm_metrics = self.hparams.llm_stats()  # 添加LLM损失统计
         if hasattr(self.modules, "ctc_lin"):
             self.ctc_metrics = self.hparams.ctc_stats()
-            
-        if hasattr(self.hparams, "augmentation"):
-            self.modules.perceived_ssl.model.config.apply_spec_augment = True
 
         if stage != sb.Stage.TRAIN:
             self.per_metrics = self.hparams.per_stats()
@@ -836,7 +894,7 @@ class SSL_LLM_origin(sb.Brain):
         """
 
         if self.hparams.auto_mix_prec:
-            self.pretrained_opt_class.zero_grad()
+            # self.pretrained_opt_class.zero_grad()
             self.adam_optimizer.zero_grad()
 
             with torch.amp.autocast("cuda"):
@@ -845,12 +903,12 @@ class SSL_LLM_origin(sb.Brain):
 
             # normalize the loss by gradient_accumulation and scale for mixed precision
             self.scaler.scale(loss / self.hparams.gradient_accumulation).backward()
-            self.scaler.unscale_(self.pretrained_opt_class)
+            # self.scaler.unscale_(self.pretrained_opt_class)
             self.scaler.unscale_(self.adam_optimizer)
 
             if self.check_gradients(loss):
-                if any(p.requires_grad for p in self.pretrained_opt_class.param_groups[0]['params']):
-                    self.scaler.step(self.pretrained_opt_class)
+                # if any(p.requires_grad for p in self.pretrained_opt_class.param_groups[0]['params']):
+                #     self.scaler.step(self.pretrained_opt_class)
                 if any(p.requires_grad for p in self.adam_optimizer.param_groups[0]['params']):
                     self.scaler.step(self.adam_optimizer)
 
@@ -876,257 +934,91 @@ class SSL_LLM_origin(sb.Brain):
 
         return loss.detach().cpu()
     
-    def generate(self, wavs, wav_lens=None, method="beam", num_beams=5, max_length=100, return_type="text"):
-        """从音频生成音素序列。
-        
-        序列结构: [Speech] [BOS] [Text] [EOS]
-        - Speech: 编码后的语音特征
-        - BOS: 开始标记，同时作为语音和文本的分隔符
-        - Text: 生成的音素序列
-        - EOS: 结束标记
+    def load_pretrained_components(self, checkpoint_path, components_to_load=None, freeze_loaded=True):
+        """
+        Load specific components from a pretrained model checkpoint
         
         Args:
-            wavs (torch.Tensor): 输入音频 [B, T]
-            wav_lens (torch.Tensor, optional): 音频长度 [B]
-            method (str, optional): 解码方法 "greedy" 或 "beam". Defaults to "beam".
-            num_beams (int, optional): 束搜索的束宽. Defaults to 5.
-            max_length (int, optional): 最大生成长度. Defaults to 100.
-            return_type (str, optional): 返回类型. 可选:
-                - "text": 返回音素文本列表，如 ["sil ae p ax l sil", ...]
-                - "list": 返回音素列表的列表，如 [["sil", "ae", "p", "ax", "l", "sil"], ...]
-                - "both": 返回元组 (text_list, phoneme_lists)
-            
-        Returns:
-            Union[List[str], List[List[str]], Tuple[List[str], List[List[str]]]]:
-            根据return_type返回处理后的音素序列
-            
-        Example:
-            >>> # 文本形式
-            >>> texts = brain.generate(wavs, return_type="text")
-            >>> print(texts[0])  # "sil ae p ax l sil"
-            >>> 
-            >>> # 列表形式
-            >>> phonemes = brain.generate(wavs, return_type="list")
-            >>> print(phonemes[0])  # ["sil", "ae", "p", "ax", "l", "sil"]
-            >>> 
-            >>> # 两种形式都要
-            >>> texts, phonemes = brain.generate(wavs, return_type="both")
+            checkpoint_path (str): Path to the checkpoint directory or file
+            components_to_load (list): List of components to load. 
+                                     Options: ['ssl'] for SSL model only,
+                                              ['ssl', 'post_ssl_encoder'] for SSL + CTC branch, mainly for CTC per
+                                     If None, loads ['ssl'] by default
+            freeze_loaded (bool): Whether to freeze the loaded components
         """
-        # 编码音频
-        with torch.no_grad():
-            # SSL编码并投影到LLaMA维度
-            wav_feats = self.modules.perceived_ssl(wavs)
-            enc_in = wav_feats.transpose(-2, -1)
-            Z = self.modules.enc(enc_in)
-            Z = Z.transpose(-2, -1)
-            B = Z.size(0)
-            H = Z.size(-1)
-            # # 添加BOS作为分隔符
-            # bos_embed = self.modules.LLM.get_input_embeddings()(
-            #     torch.tensor([42], device=self.device)  # BOS token
-            # ).expand(Z.size(0), 1, -1)
-            
-            # Append Text Prompt
-                    # Prompt
-            use_prompt = getattr(self.hparams, "use_prompt", False)
-            prompt_tokens = None
-            if use_prompt:
-                prompt_tokens = self.hparams.LLM_tokenizer.encode(prompt_2, add_special_tokens=False, return_tensors="pt").to(self.device)
-                prompt_embed = self.modules.LLM.get_input_embeddings()(prompt_tokens)  # [1, P, H]
-                inputs_embeds = torch.cat([Z, prompt_embed.expand(B, -1, -1)], dim=1)
-            else:
-                inputs_embeds = torch.cat([Z, ], dim=1)  # [B, T + L_max+1, H]
+        if components_to_load is None:
+            components_to_load = ['ssl']  # Default: load SSL 
+            logger.info("No components specified for loading, defaulting to ['ssl']")
+            logger.info("For stable LLM pretraining, consider load a full Speech Encoder")
+        
+        logger.info(f"\n🔄 Loading pretrained components from: {checkpoint_path}")
+        logger.info(f"   Components to load: {components_to_load}")
+        
+        from speechbrain.utils.parameter_transfer import Pretrainer
 
-            norm_layer = torch.nn.LayerNorm(H).to(self.device)
-            inputs_embeds = norm_layer(inputs_embeds)
-            
-            # 对齐dtype到LLM
-            llm_dtype = self.modules.LLM.get_input_embeddings().weight.dtype
-            if inputs_embeds.dtype != llm_dtype:
-                inputs_embeds = inputs_embeds.to(llm_dtype)
-            
-            # 设置生成参数
-            max_length = 100
-            gen_kwargs = {
-                "max_length": max_length,
-                "min_length": 1,
-                "num_return_sequences": 1,
-                "output_attentions": False,
-                "output_hidden_states": False,
-                "pad_token_id": 0,
-            }
-                # "logits_processor": [self._phoneme_logits_processor],
-            
-            if method == "beam":
-                gen_kwargs.update({
-                    "num_beams": num_beams,
-                    "length_penalty": 1.0,
-                    "early_stopping": True,
-                })
-            else:  # greedy
-                gen_kwargs.update({
-                    "do_sample": False,
-                    "num_beams": 1,
-                })
-            
-            # 生成序列
-            outputs = self.modules.LLM.generate(
-                inputs_embeds=inputs_embeds,
-                **gen_kwargs
+        if "post_ssl_encoder" in components_to_load:
+            logger.info("⏳ Loading pretrained SSL model and post_ssl_encoder from %s", checkpoint_path)
+            pretrainer = Pretrainer(
+                collect_in=self.hparams.pretrained_model_path, 
+                loadables={
+                    "perceived_ssl":     self.hparams.perceived_ssl,
+                    "post_encoder_modules":     self.hparams.post_encoder_modules,
+                },
+                paths={
+                    "perceived_ssl":     "perceived_ssl.ckpt",
+                    "post_encoder_modules":   "model.ckpt",
+                },
+                custom_hooks={}
             )
+        # else:
+        #     logger.info("⏳ Loading pretrained SSL model only from %s", checkpoint_path)
+        #     pretrainer = Pretrainer(
+        #         collect_in=self.hparams.pretrained_model_path, 
+        #         loadables={
+        #             "perceived_ssl":     self.modules.perceived_ssl,
+        #         },
+        #         paths={
+        #             "perceived_ssl":     "perceived_ssl.ckpt",
+        #         },
+        #         custom_hooks={}
+        #     )
 
-            return self.process_generated_phonemes(outputs)
+        # DONE
+        paths = pretrainer.collect_files(default_source=self.hparams.pretrained_model_path)
 
-    def process_generated_phonemes(self, phoneme_ids, return_type="text"):
-        """处理生成的音素ID序列。
+        # Check SSL
+        # before = self.modules.perceived_ssl.state_dict()["model.encoder.layers.23.final_layer_norm.weight"]
+        # Check CTC head
+        # before = self.hparams.ctc_branch[1].state_dict()["w.weight"]
+        # before = self.hparams.ssl_proj[1].state_dict()["w.weight"]
+        # self.modules.ctc_lin.state_dict()['w.weight']
         
-        Args:
-            phoneme_ids (torch.Tensor): 音素ID序列 [B, L]
-            return_type (str, optional): 返回类型. 可选:
-                - "text": 返回音素文本列表，如 ["sil ae p ax l sil", ...]
-                - "list": 返回音素列表的列表，如 [["sil", "ae", "p", "ax", "l", "sil"], ...]
-                - "both": 返回元组 (text_list, phoneme_lists)
-                
-        Returns:
-            Union[List[str], List[List[str]], Tuple[List[str], List[List[str]]]:
-            根据return_type返回处理后的音素序列
-        """
-        # 将tensor移到CPU并转换为numpy
-        phoneme_ids = phoneme_ids.cpu().numpy()
-        batch_size = phoneme_ids.shape[0]
+        import pdb; pdb.set_trace()
+        pretrainer.load_collected()
+        import pdb; pdb.set_trace()
         
-        text_outputs = []
-        phoneme_lists = []
-        
-        for i in range(batch_size):
-            # 获取当前序列
-            seq = phoneme_ids[i]
-            
-            # 移除特殊token（bos, eos, pad）并获取有效音素
-            valid_phonemes = []
-            for p_id in seq:
-                # 跳过特殊token
-                if p_id in [0, 42, 43]:  # blank, bos, eos
-                    continue
-                # 获取音素文本
-                phoneme = self.hparams.tokenizer.id2lab[p_id]
-                valid_phonemes.append(phoneme)
-            
-            # 保存音素列表
-            phoneme_lists.append(valid_phonemes)
-            # 生成音素文本（空格分隔）
-            text_outputs.append(" ".join(valid_phonemes))
-        
-        # 根据返回类型返回结果
-        if return_type == "text":
-            return text_outputs
-        elif return_type == "list":
-            return phoneme_lists
-        else:  # "both"
-            return text_outputs, phoneme_lists
-            
-    # def _phoneme_logits_processor(self, input_ids, scores):
-    #     """处理生成的logits，只保留音素相关的token"""
-    #     if getattr(self, "phoneme_bias", None) is None:
-    #         self.setup_phoneme_mask()
-    #     scores += self.phoneme_bias
-    #     return scores
-    
-    # def load_pretrained_components(self, checkpoint_path, components_to_load=None, freeze_loaded=True):
-    #     """
-    #     Load specific components from a pretrained model checkpoint
-        
-    #     Args:
-    #         checkpoint_path (str): Path to the checkpoint directory or file
-    #         components_to_load (list): List of components to load. 
-    #                                  Options: ['ssl'] for SSL model only,
-    #                                           ['ssl', 'ctc_branch'] for SSL + CTC branch, mainly for CTC per
-    #                                  If None, loads ['ssl'] by default
-    #         freeze_loaded (bool): Whether to freeze the loaded components
-    #     """
-    #     if components_to_load is None:
-    #         components_to_load = ['ssl']  # Default: load SSL 
-    #         logger.info("No components specified for loading, defaulting to ['ssl']")
-        
-    #     logger.info(f"\n🔄 Loading pretrained components from: {checkpoint_path}")
-    #     logger.info(f"   Components to load: {components_to_load}")
-        
-    #     from speechbrain.utils.parameter_transfer import Pretrainer
-        
-    #     if "ctc_branch" in components_to_load:
-    #         logger.info("⏳ Loading pretrained SSL model and CTC branch from %s", checkpoint_path)
-    #         pretrainer = Pretrainer(
-    #             collect_in=self.hparams.pretrained_model_path, 
-    #             loadables={
-    #                 "perceived_ssl":     self.modules.perceived_ssl,
-    #                 "ctc_branch":     self.hparams.ctc_branch,
-    #             },
-    #             paths={
-    #                 "perceived_ssl":     "perceived_ssl.ckpt",
-    #                 "ctc_branch":   "model.ckpt",
-    #             },
-    #             custom_hooks={}
-    #         )
-    #     else:
-    #         logger.info("⏳ Loading pretrained SSL model only from %s", checkpoint_path)
-    #         pretrainer = Pretrainer(
-    #             collect_in=self.hparams.pretrained_model_path, 
-    #             loadables={
-    #                 "perceived_ssl":     self.modules.perceived_ssl,
-    #             },
-    #             paths={
-    #                 "perceived_ssl":     "perceived_ssl.ckpt",
-    #             },
-    #             custom_hooks={}
-    #         )
-    #     # DONE
-    #     paths = pretrainer.collect_files(default_source=self.hparams.pretrained_model_path)
-
-    #     # Check SSL
-    #     # before = self.modules.perceived_ssl.state_dict()["model.encoder.layers.23.final_layer_norm.weight"]
-    #     # Check CTC head
-    #     # before = self.hparams.ctc_branch[1].state_dict()["w.weight"]
-    #     # self.modules.ctc_lin.state_dict()['w.weight']
-        
-    #     pretrainer.load_collected()
-        
-    #     # Freeze loaded components if requested
-    #     if freeze_loaded:
-    #         for component in components_to_load:
-    #             if component == 'ssl':
-    #                 for param in self.modules.perceived_ssl.parameters():
-    #                     param.requires_grad = False
-    #                 self.ssl_frozen = True
-    #                 logger.info("   🔒 SSL model frozen")
+        # Freeze loaded components if requested
+        if freeze_loaded:
+            for component in components_to_load:
+                if component == 'ssl':
+                    for param in self.modules.perceived_ssl.parameters():
+                        param.requires_grad = False
+                    self.ssl_frozen = True
+                    logger.info("   🔒 SSL model frozen")
                     
-    #             elif component == 'ctc_branch':
-    #                 for param in self.hparams.ctc_branch.parameters():
-    #                     param.requires_grad = False
-    #                 self.ctc_branch_frozen = True
-    #                 logger.info("   🔒 CTC branch frozen")
-        
-    #             elif component == 'encoder':
-    #                 for param in self.modules.TransASR.encoder.parameters():
-    #                     param.requires_grad = False
-    #                 if hasattr(self.modules.TransASR, 'custom_src_module'):
-    #                     for param in self.modules.TransASR.custom_src_module.parameters():
-    #                         param.requires_grad = False
-    #                 self.encoder_frozen = True
-    #                 logger.info("   🔒 Encoder frozen")
+                elif component == 'post_ssl_encoder':
+                    for param in self.hparams.post_ssl_encoder.parameters():
+                        param.requires_grad = False
+                    self.post_ssl_encoder_frozen = True
+                    logger.info("   🔒 Post SSL Encoder frozen")
                     
-    #             elif component == 'enc':
-    #                 if hasattr(self.modules, 'enc'):
-    #                     for param in self.modules.enc.parameters():
-    #                         param.requires_grad = False
-    #                     print("   🔒 Encoder projection frozen")
-                        
-    #             elif component == 'ctc_head':
-    #                 for param in self.modules.ctc_lin.parameters():
-    #                     param.requires_grad = False
-    #                 logger.info("   🔒 CTC head frozen")
+                elif component == 'ctc_head':
+                    for param in self.modules.ctc_lin.parameters():
+                        param.requires_grad = False
+                    logger.info("   🔒 CTC head frozen")
     
-    #     # print(f"   ✅ Successfully loaded components: {loaded_components}")
-    #     # return loaded_components
+        # print(f"   ✅ Successfully loaded components: {loaded_components}")
+        # return loaded_components
 
     def on_fit_start(self):
         """Gets called at the beginning of ``fit()``, on multiple processes
@@ -1153,8 +1045,9 @@ class SSL_LLM_origin(sb.Brain):
         # Now these are created in _ensure_initialized() which is called by compute_forward()
         
         # Initialize optimizers (happens during training only)
+
         self.init_optimizers()
-        
+
         if self.checkpointer is not None:
             self.checkpointer.recover_if_possible(
                 min_key="LLM_PER",
@@ -1167,11 +1060,10 @@ class SSL_LLM_origin(sb.Brain):
         import os
         if pretrained_path and os.path.exists(pretrained_path):
             try:
-                self.load_pretrained_components(
-                    checkpoint_path=pretrained_path,
-                    components_to_load=components,
-                    freeze_loaded=freeze_loaded
-                )
+                self.hparams.AudioEncoderPretrainer.collect_files(default_source=self.hparams.pretrained_model_path)
+                self.hparams.AudioEncoderPretrainer.load_collected()
+                print("✅ Successfully loaded pretrained components.")
+                # pdb.set_trace()
             except Exception as e:
                 print(f"❌ Failed to load pretrained components: {e}")
                 print("   Continuing with random initialization...")
@@ -1183,6 +1075,9 @@ class SSL_LLM_origin(sb.Brain):
     def init_optimizers(self):
         # Collect all trainable parameters
         model_params = list(self.hparams.model.parameters())
+        trainable_model_params = list(self.hparams.trainable_model.parameters())
+        # model_params = list(self.hparams.trainable_model.parameters())
+        # audio_encoder_params = list(self.hparams.audio_encoder_modules.parameters())
         
         # Add prompt embeddings if they exist AND are learnable parameters
         # (Only soft prompts are nn.Parameter, text prompts are plain tensors)
@@ -1199,39 +1094,14 @@ class SSL_LLM_origin(sb.Brain):
         
         # import pdb; pdb.set_trace()
         # Create optimizer with all model parameters
+
         self.adam_optimizer = self.hparams.adam_opt_class(
-            model_params, 
+            trainable_model_params, 
         )
         
-        # SSL encoder optimizer (separate)
-        self.pretrained_opt_class = self.hparams.pretrained_opt_class(
-            self.modules.perceived_ssl.parameters(), 
-        )
         
         if self.checkpointer is not None:
             self.checkpointer.add_recoverable("adam_opt", self.adam_optimizer)
-            self.checkpointer.add_recoverable("pretrained_opt", self.pretrained_opt_class)
+            # self.checkpointer.add_recoverable("pretrained_opt", self.pretrained_opt_class)
             self.checkpointer.add_recoverable("tokenizer", self.label_encoder)  
     
-    
-
-
-prompt_2 = """
-You are a phoneme transcriber.
-Given the preceding speech, produce a single line of CMUdict phoneme that encodes the phoneme sequence.
-I will give you the reference word sequence.
-"""
-
-# prompt_2 = """
-# You are a phoneme transcriber.
-# Transcribe Speech to phonemes. Output the transcription directly without redundant content. 
-# Ensure that the output is not duplicated.
-
-# I will give you the reference word sequence and canonical phoneme sequence, you will be predicting the perceived (real) uttered phoeneme sequence.
-
-# Example:
-# WORD: Surely I will excuse you she cried.
-
-# Now you will give us the perceived phoneme result.
-# """
-# canonical aligned: sil sh uh r l iy sil ay w ih l ih k s k y uw z y uw sil sh iy k r ay d sil sil

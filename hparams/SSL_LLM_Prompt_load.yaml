@@ -17,8 +17,7 @@ pretrained_models_path: pretrained_models/
 # Pretrained Component Loading
 load_pretrained_components: true      # Enable loading specific components from pretrained model
 pretrained_model_path: /home/m64000/work/IF-MDD/pretrained_models/CTC_for_IF-MDD/
-components_to_load: ["ssl", "ctc_branch"] # Components to load: ssl (necessary), ctc_branch (to monitor CTC performance)
-
+components_to_load: ["ssl"] # Components to load: ssl, encoder, enc_projection, ctc_head, decoder
 # components_to_load: ["ssl", "enc"] # Components to load: ssl, encoder, enc_projection, ctc_head, decoder
 # components_to_load: ["ssl", "enc", "ctc_head"] # Components to load: ssl, encoder, enc_projection, ctc_head, decoder
 freeze_loaded_components: true        # Whether to freeze the loaded components, # 768
@@ -29,6 +28,8 @@ canonical_ssl_model: Null
 # # models hidden size, varies by model
 ENCODER_DIM: 1024
 LLM_DIM: 4096
+dnn_neurons: 384  
+
 
 # # How to fuse the features
 feature_fusion: "mono"        # Options: "mono" for single ssl, "dual_ssl_enc" for dual ssl encoder, "dual_loss" for single SSL dual ssl loss
@@ -41,7 +42,7 @@ valid_annotation: !ref <data_folder_save>/train-dev.json
 test_annotation: !ref <data_folder_save>/test.json
 
 use_prompt: true
-prompt_type: "text"        # "soft" 可学习的向量 | "discrete" 离散 token
+prompt_type: "soft"        # "soft" 可学习的向量 | "discrete" 离散 token
 prompt_len: 16             # 增加到 16，提供更多上下文（原 8）
 prompt_init: "normal"      # "normal" 更适合 LLM，标准差为 0.02
 prompt_dropout: 0.1        # 添加 dropout 防止过拟合
@@ -216,9 +217,9 @@ phn_head: !new:torch.nn.Sequential
 #         normalized_shape: !ref <output_neurons>
 
 # LLM_model: "meta-llama/Llama-3.1-8B"
-LLM_model: "meta-llama/Meta-Llama-3-8B-Instruct"
+# "meta-llama/Meta-Llama-3-8B-Instruct"
 # LLM_model: "Qwen/Qwen2-Audio-7B-Instruct"
-# LLM_model: "meta-llama/Llama-3.1-8B"
+LLM_model: "meta-llama/Llama-3.1-8B"
 # LLM_model: "meta-llama/Llama-4-Scout-17B-16E-Instruct"
 
 # 统计跟踪器
@@ -263,9 +264,6 @@ ctc_cost_mispro: !name:speechbrain.nnet.losses.ctc_loss
 # Outputs
 output_neurons: 44 # l2arctic: 40phns(sil)+err+blank + eos + bos =44
 blank_index: 0
-
-ctc_branch: !new:torch.nn.ModuleList
-  - [!ref <enc_ctc>, !ref <ctc_lin>]
 
 model: !new:torch.nn.ModuleList
     - [!ref <enc>, !ref <ctc_lin>, !ref <LLM>, !ref <enc_ctc>, !ref <phn_embed>, !ref <phn_head>]
@@ -312,11 +310,11 @@ __set_seed: !apply:torch.manual_seed [!ref <seed>]
 # training parameters
 number_of_epochs: 100
 valid_search_interval: 5
-batch_size: 16
-lr: 0.0005  # 从 0.0003 降低，防止 LLM loss 上升
+batch_size: 8
+lr: 0.0002  # 从 0.0003 降低，防止 LLM loss 上升
 sorting: ascending
 sample_rate: 16000
-gradient_accumulation: 1
+gradient_accumulation: 2
 grad_clip: 1.0  # 新增：梯度裁剪，防止梯度爆炸
 lr_pretrained: 0.00001
 lr_prompt: 0.001  # 新增：prompt 专用学习率（可以比主模型高一些）
@@ -337,7 +335,7 @@ valid_dataloader_opts:
     
 
 test_dataloader_opts:
-    batch_size: !ref <batch_size>
+    batch_size: 1
 
 pretrainer: !new:speechbrain.utils.parameter_transfer.Pretrainer
     collect_in: !ref <save_folder>/
