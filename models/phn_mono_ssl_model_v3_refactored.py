@@ -11,11 +11,160 @@ import json
 import wandb
 import time
 import torchaudio
+import csv
+from dataclasses import dataclass, field
+from typing import Optional, List, Dict, Any, Union
 from torch.nn.functional import kl_div
 from speechbrain.nnet.loss.guidedattn_loss import GuidedAttentionLoss
 import re
 from utils.EncoderManager import EncoderManager
 from utils.LossManager import CTCLossManager
+
+
+# ============================================================================
+# Result Data Classes for Flexible Output
+# ============================================================================
+
+@dataclass
+class InferenceResult:
+    """Single inference result with optional metrics"""
+    id: str
+    prediction: str  # Decoded phoneme sequence
+    canonical: Optional[str] = None
+    perceived: Optional[str] = None
+    target: Optional[str] = None
+    per: Optional[float] = None  # Phoneme Error Rate
+    mpd_result: Optional[Dict[str, Any]] = None  # MPD metrics
+
+
+@dataclass
+class TestResults:
+    """Collection of test results with summary statistics"""
+    results: List[InferenceResult] = field(default_factory=list)
+    has_reference: bool = False
+    has_canonical: bool = False
+    has_perceived: bool = False
+    
+    # Summary metrics (only computed if reference available)
+    overall_per: Optional[float] = None
+    overall_mpd_f1: Optional[float] = None
+    overall_mpd_precision: Optional[float] = None
+    overall_mpd_recall: Optional[float] = None
+    
+    def add_result(self, result: InferenceResult):
+        self.results.append(result)
+        if result.target is not None:
+            self.has_reference = True
+        if result.canonical is not None:
+            self.has_canonical = True
+        if result.perceived is not None:
+            self.has_perceived = True
+
+
+# ============================================================================
+# CSV Result Writer
+# ============================================================================
+
+class ResultWriter:
+    """Flexible CSV writer that adapts columns based on available data"""
+    
+    def __init__(self, output_path: str):
+        self.output_path = output_path
+        self.results: List[InferenceResult] = []
+    
+    def add_result(self, result: InferenceResult):
+        self.results.append(result)
+    
+    def add_results(self, results: List[InferenceResult]):
+        self.results.extend(results)
+    
+    def write(self, test_results: Optional[TestResults] = None):
+        """
+        Write results to CSV with flexible columns based on available data.
+        
+        Columns:
+        - Always: id, prediction
+        - If has_canonical: canonical
+        - If has_perceived: perceived  
+        - If has_reference: target, per
+        - If MPD computed: mpd_correct, mpd_precision, mpd_recall, mpd_f1
+        """
+        if test_results is not None:
+            results = test_results.results
+            has_reference = test_results.has_reference
+            has_canonical = test_results.has_canonical
+            has_perceived = test_results.has_perceived
+        else:
+            results = self.results
+            has_reference = any(r.target is not None for r in results)
+            has_canonical = any(r.canonical is not None for r in results)
+            has_perceived = any(r.perceived is not None for r in results)
+        
+        if not results:
+            logging.warning("No results to write")
+            return
+        
+        # Determine columns based on available data
+        columns = ['id', 'prediction']
+        
+        if has_canonical:
+            columns.append('canonical')
+        if has_perceived:
+            columns.append('perceived')
+        if has_reference:
+            columns.extend(['target', 'per'])
+        
+        # Check if MPD results are available
+        has_mpd = any(r.mpd_result is not None for r in results)
+        if has_mpd:
+            columns.extend(['mpd_correct', 'mpd_precision', 'mpd_recall', 'mpd_f1'])
+        
+        # Write CSV
+        os.makedirs(os.path.dirname(self.output_path) if os.path.dirname(self.output_path) else '.', exist_ok=True)
+        
+        with open(self.output_path, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=columns)
+            writer.writeheader()
+            
+            for result in results:
+                row = {
+                    'id': result.id,
+                    'prediction': result.prediction
+                }
+                
+                if has_canonical:
+                    row['canonical'] = result.canonical or ''
+                if has_perceived:
+                    row['perceived'] = result.perceived or ''
+                if has_reference:
+                    row['target'] = result.target or ''
+                    row['per'] = f"{result.per:.4f}" if result.per is not None else ''
+                
+                if has_mpd and result.mpd_result:
+                    row['mpd_correct'] = result.mpd_result.get('correct', '')
+                    row['mpd_precision'] = f"{result.mpd_result.get('precision', 0):.4f}" if result.mpd_result.get('precision') is not None else ''
+                    row['mpd_recall'] = f"{result.mpd_result.get('recall', 0):.4f}" if result.mpd_result.get('recall') is not None else ''
+                    row['mpd_f1'] = f"{result.mpd_result.get('f1', 0):.4f}" if result.mpd_result.get('f1') is not None else ''
+                
+                writer.writerow(row)
+        
+        logging.info(f"✅ Results written to: {self.output_path}")
+        
+        # Write summary if available
+        if test_results and has_reference:
+            summary_path = self.output_path.replace('.csv', '_summary.txt')
+            with open(summary_path, 'w') as f:
+                f.write("=" * 50 + "\n")
+                f.write("Test Results Summary\n")
+                f.write("=" * 50 + "\n")
+                f.write(f"Total samples: {len(results)}\n")
+                if test_results.overall_per is not None:
+                    f.write(f"Overall PER: {test_results.overall_per:.4f}\n")
+                if test_results.overall_mpd_f1 is not None:
+                    f.write(f"Overall MPD F1: {test_results.overall_mpd_f1:.4f}\n")
+                    f.write(f"Overall MPD Precision: {test_results.overall_mpd_precision:.4f}\n")
+                    f.write(f"Overall MPD Recall: {test_results.overall_mpd_recall:.4f}\n")
+            logging.info(f"✅ Summary written to: {summary_path}")
 
 # ============================================================================
 # Base Model with Unified Architecture
@@ -191,6 +340,7 @@ class PhnMonoSSLModel(sb.Brain):
         # Handle OTTC-specific outputs
         if use_crottc or use_ottc:
             if hasattr(self.modules, "lm_weight") and stage != sb.Stage.TEST:
+                import pdb; pdb.set_trace()
                 targets, target_lens = batch.phn_encoded_target
                 labels_mask = (targets != self.hparams.blank_index).float()
                 
@@ -224,7 +374,7 @@ class PhnMonoSSLModel(sb.Brain):
         return p_ctc, wav_lens
     
     def compute_objectives(self, predictions, batch, stage):
-        """Unified objective computation"""
+        """Unified objective computation with flexible reference handling"""
         # Parse predictions based on type
         if len(predictions) == 2:
             p_ctc, wav_lens = predictions
@@ -232,7 +382,6 @@ class PhnMonoSSLModel(sb.Brain):
         elif len(predictions) == 4:
             if isinstance(predictions[3], bool):  # CR-CTC
                 p_ctc, wav_lens, time_mask, is_crctc_mode = predictions
-                # import pdb; pdb.set_trace()
                 extras = {'time_mask': time_mask, 'is_crctc_mode': is_crctc_mode}
             else:  # RVQ
                 p_ctc, wav_lens, commitment_loss, codebook_loss = predictions
@@ -245,47 +394,68 @@ class PhnMonoSSLModel(sb.Brain):
         else:
             raise ValueError(f"Unexpected predictions format: {len(predictions)} elements")
     
-        # Get targets
+        # Get batch IDs
         ids = batch.id
-        targets, target_lens = batch.phn_encoded_target
+        
+        # Check what reference data is available
+        has_target = hasattr(batch, 'phn_encoded_target')
+        has_canonical = hasattr(batch, 'phn_encoded_canonical')
+        has_perceived = hasattr(batch, 'phn_encoded_perceived')
+        
+        # Get targets (required for loss computation in training)
+        targets = None
+        target_lens = None
+        canonicals = None
+        canonical_lens = None
+        perceiveds = None
+        perceived_lens = None
+        
+        if has_target:
+            targets, target_lens = batch.phn_encoded_target
+        if has_canonical:
+            canonicals, canonical_lens = batch.phn_encoded_canonical
+        if has_perceived:
+            perceiveds, perceived_lens = batch.phn_encoded_perceived
         
         # Handle target selection (canonical/perceived/target)
-        if stage != sb.Stage.TRAIN:
-            canonicals, canonical_lens = batch.phn_encoded_canonical
-            perceiveds, perceived_lens = batch.phn_encoded_perceived
-            
+        if stage != sb.Stage.TRAIN and has_target:
             training_target = getattr(self.hparams, 'training_target', 'target')
-            if training_target == "canonical":
+            if training_target == "canonical" and has_canonical:
                 targets = canonicals
                 target_lens = canonical_lens
-            elif training_target == "perceived":
+            elif training_target == "perceived" and has_perceived:
                 targets = perceiveds
                 target_lens = perceived_lens
         
-        # Compute loss using loss manager
-        loss, loss_dict = self.loss_manager.compute_loss(
-            p_ctc, targets, wav_lens, target_lens, stage, extras
-        )
+        # Compute loss (only if targets available)
+        if targets is not None:
+            loss, loss_dict = self.loss_manager.compute_loss(
+                p_ctc, targets, wav_lens, target_lens, stage, extras
+            )
+        else:
+            # No targets available - return dummy loss for inference-only mode
+            loss = torch.tensor(0.0, device=self.device)
+            loss_dict = {}
         
         # Track CR-CTC / CR-OTTC losses for epoch-level logging (keep on GPU)
         if stage == sb.Stage.TRAIN:
             if 'cr_loss' in loss_dict:
-                self.cr_loss_sum += loss_dict['cr_loss'].item()  # Only sync when accumulating
+                self.cr_loss_sum += loss_dict['cr_loss'].item()
                 self.cr_loss_count += 1
             if 'ctc_loss' in loss_dict:
-                self.ctc_loss_sum += loss_dict['ctc_loss'].item()  # Only sync when accumulating
+                self.ctc_loss_sum += loss_dict['ctc_loss'].item()
                 self.ctc_loss_count += 1
             if 'ottc_loss' in loss_dict:
-                self.ctc_loss_sum += loss_dict['ottc_loss'].item()  # Only sync when accumulating
+                self.ctc_loss_sum += loss_dict['ottc_loss'].item()
                 self.ctc_loss_count += 1
         
         # Add RVQ losses if present
         if 'commitment_loss' in extras:
             loss = loss + extras['commitment_loss'] + extras['codebook_loss']
-            loss_dict['commitment_loss'] = extras['commitment_loss'].detach()  # Keep on GPU
-            loss_dict['codebook_loss'] = extras['codebook_loss'].detach()  # Keep on GPU
+            loss_dict['commitment_loss'] = extras['commitment_loss'].detach()
+            loss_dict['codebook_loss'] = extras['codebook_loss'].detach()
         
-        # Evaluation metrics
+        # Evaluation metrics (validation/test stage)
         if stage != sb.Stage.TRAIN:
             # For CR-CTC, use first half for evaluation
             if extras.get('is_crctc_mode', False):
@@ -295,49 +465,78 @@ class PhnMonoSSLModel(sb.Brain):
                 p_ctc_eval = p_ctc
                 wav_lens_eval = wav_lens
             
+            # Decode predictions
             sequence = sb.decoders.ctc_greedy_decode(
                 p_ctc_eval, wav_lens_eval, blank_id=self.hparams.blank_index
             )
             
-            # CTC metrics
-            from utils.losses.CTCLossWithLabelPriors import CTCLossWithLabelPriors
-            if isinstance(self.hparams.ctc_cost, CTCLossWithLabelPriors):
-                try:
-                    self.ctc_metrics.append(
-                        ids,
-                        log_probs=p_ctc_eval.permute(1, 0, 2),
-                        targets=targets,
-                        input_lengths=(wav_lens_eval * p_ctc_eval.shape[1]).to(torch.int32),
-                        target_lengths=(target_lens * targets.shape[1]).to(torch.int32)
-                    )
-                except:
+            # CTC metrics (only if targets available)
+            if has_target and targets is not None:
+                from utils.losses.CTCLossWithLabelPriors import CTCLossWithLabelPriors
+                if isinstance(self.hparams.ctc_cost, CTCLossWithLabelPriors):
+                    try:
+                        self.ctc_metrics.append(
+                            ids,
+                            log_probs=p_ctc_eval.permute(1, 0, 2),
+                            targets=targets,
+                            input_lengths=(wav_lens_eval * p_ctc_eval.shape[1]).to(torch.int32),
+                            target_lengths=(target_lens * targets.shape[1]).to(torch.int32)
+                        )
+                    except:
+                        self.ctc_metrics.append(ids, p_ctc_eval, targets, wav_lens_eval, target_lens)
+                else:
                     self.ctc_metrics.append(ids, p_ctc_eval, targets, wav_lens_eval, target_lens)
-            else:
-                self.ctc_metrics.append(ids, p_ctc_eval, targets, wav_lens_eval, target_lens)
+                
+                # PER metrics
+                # Remove token ID 70 from sequences
+                # sequence = [[token for token in seq if token != 70] for seq in sequence]
+                        
+                self.per_metrics.append(
+                    ids=ids,
+                    predict=sequence,
+                    target=targets,
+                    predict_len=None,
+                    target_len=target_lens,
+                    ind2lab=self.label_encoder.decode_ndim,
+                )
             
-            # PER metrics
-            self.per_metrics.append(
-                ids=ids,
-                predict=sequence,
-                target=targets,
-                predict_len=None,
-                target_len=target_lens,
-                ind2lab=self.label_encoder.decode_ndim,
-            )
+            # MPD metrics (only if canonical and perceived available)
+            if has_canonical and has_perceived and canonicals is not None and perceiveds is not None:
+                self.mpd_metrics.append(
+                    ids=ids,
+                    predict=sequence,
+                    canonical=canonicals,
+                    perceived=perceiveds,
+                    predict_len=None,
+                    canonical_len=canonical_lens,
+                    perceived_len=perceived_lens,
+                    ind2lab=self.label_encoder.decode_ndim,
+                )
             
-            # MPD metrics
-            canonicals, canonical_lens = batch.phn_encoded_canonical
-            perceiveds, perceived_lens = batch.phn_encoded_perceived
-            self.mpd_metrics.append(
-                ids=ids,
-                predict=sequence,
-                canonical=canonicals,
-                perceived=perceiveds,
-                predict_len=None,
-                canonical_len=canonical_lens,
-                perceived_len=perceived_lens,
-                ind2lab=self.label_encoder.decode_ndim,
-            )
+            # Collect results for CSV output in TEST stage
+            if stage == sb.Stage.TEST:
+                if not hasattr(self, 'test_results_for_csv'):
+                    self.test_results_for_csv = TestResults()
+                
+                for i, (seq_id, seq) in enumerate(zip(ids, sequence)):
+                    pred_str = self._decode_sequence(seq)
+                    
+                    result = InferenceResult(
+                        id=seq_id,
+                        prediction=pred_str
+                    )
+                    
+                    if has_canonical and canonicals is not None:
+                        result.canonical = self._decode_tensor(canonicals[i], canonical_lens[i] if canonical_lens is not None else None)
+                    
+                    if has_perceived and perceiveds is not None:
+                        result.perceived = self._decode_tensor(perceiveds[i], perceived_lens[i] if perceived_lens is not None else None)
+                    
+                    if has_target and targets is not None:
+                        result.target = self._decode_tensor(targets[i], target_lens[i] if target_lens is not None else None)
+                        result.per = self._compute_per(pred_str, result.target)
+                    
+                    self.test_results_for_csv.add_result(result)
         
         return loss
     
@@ -347,6 +546,426 @@ class PhnMonoSSLModel(sb.Brain):
         loss = self.compute_objectives(predictions, batch, stage=stage)
         return loss.detach()
     
+    # ========================================================================
+    # Inference Methods
+    # ========================================================================
+    
+    def inference(
+        self,
+        audio_path: str,
+        canonical: Optional[str] = None,
+        return_details: bool = False
+    ) -> Union[str, InferenceResult]:
+        """
+        Run inference on a single audio file.
+        
+        Args:
+            audio_path: Path to the audio file
+            canonical: Optional canonical phoneme sequence (for MPD evaluation)
+            return_details: If True, return InferenceResult with full details
+        
+        Returns:
+            Predicted phoneme sequence string, or InferenceResult if return_details=True
+        """
+        self.modules.eval()
+        
+        with torch.no_grad():
+            # Load and preprocess audio
+            wavs, sr = torchaudio.load(audio_path)
+            
+            # Resample if needed
+            target_sr = getattr(self.hparams, 'sample_rate', 16000)
+            if sr != target_sr:
+                resampler = torchaudio.transforms.Resample(sr, target_sr)
+                wavs = resampler(wavs)
+            
+            # Ensure mono
+            if wavs.shape[0] > 1:
+                wavs = wavs.mean(dim=0, keepdim=True)
+            
+            # Add batch dimension and move to device
+            wavs = wavs.to(self.device)
+            if wavs.dim() == 2:
+                wavs = wavs.unsqueeze(0)  # [1, C, T] -> [B, C, T]
+            if wavs.dim() == 3 and wavs.shape[1] == 1:
+                wavs = wavs.squeeze(1)  # [B, 1, T] -> [B, T]
+            
+            wav_lens = torch.tensor([1.0], device=self.device)
+            
+            # Forward pass
+            feats = self.modules.perceived_ssl(wavs)
+            x, _ = self.encoder_manager(feats, wav_lens)
+            logits = self.modules.ctc_lin(x)
+            p_ctc = self.hparams.log_softmax(logits)
+            
+            # Decode
+            sequence = sb.decoders.ctc_greedy_decode(
+                p_ctc, wav_lens, blank_id=self.hparams.blank_index
+            )
+            
+            # Convert to string
+            pred_str = self._decode_sequence(sequence[0])
+        
+        if not return_details:
+            return pred_str
+        
+        # Build detailed result
+        result = InferenceResult(
+            id=os.path.basename(audio_path),
+            prediction=pred_str,
+            canonical=canonical
+        )
+        
+        return result
+    
+    def inference_batch(
+        self,
+        batch,
+        compute_metrics: bool = True
+    ) -> List[InferenceResult]:
+        """
+        Run inference on a batch and return detailed results.
+        
+        Args:
+            batch: SpeechBrain batch object
+            compute_metrics: Whether to compute metrics if reference available
+        
+        Returns:
+            List of InferenceResult objects
+        """
+        self.modules.eval()
+        
+        with torch.no_grad():
+            batch = batch.to(self.device)
+            wavs, wav_lens = batch.sig
+            ids = batch.id
+            
+            # Forward pass
+            feats = self.modules.perceived_ssl(wavs)
+            x, _ = self.encoder_manager(feats, wav_lens)
+            logits = self.modules.ctc_lin(x)
+            p_ctc = self.hparams.log_softmax(logits)
+            
+            # Decode
+            sequences = sb.decoders.ctc_greedy_decode(
+                p_ctc, wav_lens, blank_id=self.hparams.blank_index
+            )
+        
+        results = []
+        
+        # Check what reference data is available
+        has_target = hasattr(batch, 'phn_encoded_target')
+        has_canonical = hasattr(batch, 'phn_encoded_canonical')
+        has_perceived = hasattr(batch, 'phn_encoded_perceived')
+        
+        # Get reference data if available
+        targets = None
+        target_lens = None
+        canonicals = None
+        canonical_lens = None
+        perceiveds = None
+        perceived_lens = None
+        
+        if has_target:
+            targets, target_lens = batch.phn_encoded_target
+        if has_canonical:
+            canonicals, canonical_lens = batch.phn_encoded_canonical
+        if has_perceived:
+            perceiveds, perceived_lens = batch.phn_encoded_perceived
+        
+        for i, (seq_id, seq) in enumerate(zip(ids, sequences)):
+            pred_str = self._decode_sequence(seq)
+            
+            result = InferenceResult(
+                id=seq_id,
+                prediction=pred_str
+            )
+            
+            # Add reference data if available
+            if has_canonical and canonicals is not None:
+                result.canonical = self._decode_tensor(canonicals[i], canonical_lens[i] if canonical_lens is not None else None)
+            
+            if has_perceived and perceiveds is not None:
+                result.perceived = self._decode_tensor(perceiveds[i], perceived_lens[i] if perceived_lens is not None else None)
+            
+            if has_target and targets is not None:
+                result.target = self._decode_tensor(targets[i], target_lens[i] if target_lens is not None else None)
+                
+                # Compute PER if target available and metrics requested
+                if compute_metrics:
+                    result.per = self._compute_per(pred_str, result.target)
+            
+            # Compute MPD if canonical and perceived available
+            if compute_metrics and has_canonical and has_perceived:
+                result.mpd_result = self._compute_mpd_single(
+                    pred_str,
+                    result.canonical,
+                    result.perceived
+                )
+            
+            results.append(result)
+        
+        return results
+    
+    def inference_dataset(
+        self,
+        dataloader,
+        output_csv: Optional[str] = None,
+        compute_metrics: bool = True,
+        show_progress: bool = True
+    ) -> TestResults:
+        """
+        Run inference on entire dataset and optionally save to CSV.
+        
+        Args:
+            dataloader: PyTorch DataLoader
+            output_csv: Optional path to save CSV results
+            compute_metrics: Whether to compute metrics if reference available
+            show_progress: Whether to show progress bar
+        
+        Returns:
+            TestResults object with all results and summary statistics
+        """
+        self.modules.eval()
+        test_results = TestResults()
+        
+        from tqdm import tqdm
+        iterator = tqdm(dataloader, desc="Inference") if show_progress else dataloader
+        
+        for batch in iterator:
+            batch_results = self.inference_batch(batch, compute_metrics=compute_metrics)
+            for result in batch_results:
+                test_results.add_result(result)
+        
+        # Compute summary metrics if reference data available
+        if test_results.has_reference and compute_metrics:
+            pers = [r.per for r in test_results.results if r.per is not None]
+            if pers:
+                test_results.overall_per = sum(pers) / len(pers)
+        
+        if test_results.has_canonical and test_results.has_perceived and compute_metrics:
+            mpd_results = [r.mpd_result for r in test_results.results if r.mpd_result is not None]
+            if mpd_results:
+                # Aggregate MPD metrics
+                test_results.overall_mpd_precision = sum(m.get('precision', 0) for m in mpd_results) / len(mpd_results)
+                test_results.overall_mpd_recall = sum(m.get('recall', 0) for m in mpd_results) / len(mpd_results)
+                test_results.overall_mpd_f1 = sum(m.get('f1', 0) for m in mpd_results) / len(mpd_results)
+        
+        # Save to CSV if path provided
+        if output_csv:
+            writer = ResultWriter(output_csv)
+            writer.write(test_results)
+        
+        return test_results
+    
+    def _decode_sequence(self, sequence: List[int]) -> str:
+        """Decode a sequence of token indices to string"""
+        if hasattr(self, 'label_encoder') and self.label_encoder is not None:
+            try:
+                decoded = self.label_encoder.decode_ndim(sequence)
+                if isinstance(decoded, list):
+                    return ' '.join(str(p) for p in decoded)
+                return str(decoded)
+            except:
+                pass
+        return ' '.join(str(idx) for idx in sequence)
+    
+    def _decode_tensor(self, tensor: torch.Tensor, length: Optional[torch.Tensor] = None) -> str:
+        """Decode a tensor of token indices to string"""
+        if length is not None:
+            actual_len = int(length.item() * tensor.shape[0]) if length.item() <= 1.0 else int(length.item())
+            tensor = tensor[:actual_len]
+        
+        indices = tensor.cpu().tolist()
+        # Remove padding (typically 0)
+        indices = [idx for idx in indices if idx != 0]
+        return self._decode_sequence(indices)
+    
+    def _compute_per(self, prediction: str, target: str) -> float:
+        """Compute Phoneme Error Rate between prediction and target"""
+        pred_tokens = prediction.split()
+        target_tokens = target.split()
+        
+        if len(target_tokens) == 0:
+            return 0.0 if len(pred_tokens) == 0 else 1.0
+        
+        # Simple edit distance
+        m, n = len(pred_tokens), len(target_tokens)
+        dp = [[0] * (n + 1) for _ in range(m + 1)]
+        
+        for i in range(m + 1):
+            dp[i][0] = i
+        for j in range(n + 1):
+            dp[0][j] = j
+        
+        for i in range(1, m + 1):
+            for j in range(1, n + 1):
+                if pred_tokens[i-1] == target_tokens[j-1]:
+                    dp[i][j] = dp[i-1][j-1]
+                else:
+                    dp[i][j] = 1 + min(dp[i-1][j], dp[i][j-1], dp[i-1][j-1])
+        
+        return dp[m][n] / n
+    
+    def _compute_mpd_single(
+        self,
+        prediction: str,
+        canonical: str,
+        perceived: str
+    ) -> Dict[str, Any]:
+        """
+        Compute MPD metrics for a single sample.
+        
+        Returns dict with: correct, precision, recall, f1
+        """
+        pred_tokens = set(prediction.split())
+        canon_tokens = set(canonical.split())
+        perc_tokens = set(perceived.split())
+        
+        # Mispronunciations are tokens in perceived but not in canonical
+        # (simplified version - actual MPD may be more complex)
+        gt_mispro = perc_tokens - canon_tokens
+        pred_mispro = pred_tokens - canon_tokens
+        
+        if len(gt_mispro) == 0 and len(pred_mispro) == 0:
+            return {'correct': True, 'precision': 1.0, 'recall': 1.0, 'f1': 1.0}
+        
+        if len(gt_mispro) == 0:
+            return {'correct': False, 'precision': 0.0, 'recall': 1.0, 'f1': 0.0}
+        
+        if len(pred_mispro) == 0:
+            return {'correct': False, 'precision': 1.0, 'recall': 0.0, 'f1': 0.0}
+        
+        tp = len(pred_mispro & gt_mispro)
+        precision = tp / len(pred_mispro) if pred_mispro else 0.0
+        recall = tp / len(gt_mispro) if gt_mispro else 0.0
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+        
+        return {
+            'correct': pred_mispro == gt_mispro,
+            'precision': precision,
+            'recall': recall,
+            'f1': f1
+        }
+    
+    # ========================================================================
+    # Flexible Test Stage Handler
+    # ========================================================================
+    
+    def test_with_flexible_output(
+        self,
+        test_set,
+        output_folder: str,
+        min_key: str = "PER",
+        max_key: str = "mpd_f1"
+    ):
+        """
+        Run test stage with flexible output based on available reference data.
+        
+        This method:
+        1. Automatically detects if reference/canonical/perceived data is available
+        2. Computes metrics only when reference data exists
+        3. Generates CSV with appropriate columns
+        4. Saves summary statistics if metrics computed
+        
+        Args:
+            test_set: Test dataset/dataloader
+            output_folder: Folder to save results
+            min_key: Metric to minimize for checkpoint selection
+            max_key: Metric to maximize for checkpoint selection
+        """
+        # Ensure output folder exists
+        os.makedirs(output_folder, exist_ok=True)
+        
+        # Load best checkpoint
+        if self.checkpointer is not None:
+            self.checkpointer.recover_if_possible(
+                min_key=min_key,
+                max_key=max_key
+            )
+        
+        # Prepare for test
+        self.on_stage_start(sb.Stage.TEST, epoch=None)
+        self.modules.eval()
+        
+        test_results = TestResults()
+        total_loss = 0.0
+        batch_count = 0
+        
+        # Check first batch to determine data availability
+        first_batch = next(iter(test_set))
+        has_target = hasattr(first_batch, 'phn_encoded_target')
+        has_canonical = hasattr(first_batch, 'phn_encoded_canonical')
+        has_perceived = hasattr(first_batch, 'phn_encoded_perceived')
+        
+        logging.info(f"📊 Test data availability:")
+        logging.info(f"   - Target reference: {'✓' if has_target else '✗'}")
+        logging.info(f"   - Canonical: {'✓' if has_canonical else '✗'}")
+        logging.info(f"   - Perceived: {'✓' if has_perceived else '✗'}")
+        
+        from tqdm import tqdm
+        
+        with torch.no_grad():
+            for batch in tqdm(test_set, desc="Testing"):
+                batch = batch.to(self.device)
+                
+                # Get predictions
+                predictions = self.compute_forward(batch, stage=sb.Stage.TEST)
+                
+                # Compute loss only if we have targets
+                if has_target:
+                    loss = self.compute_objectives(predictions, batch, stage=sb.Stage.TEST)
+                    total_loss += loss.item()
+                    batch_count += 1
+                
+                # Get batch results
+                batch_results = self.inference_batch(
+                    batch,
+                    compute_metrics=(has_target or (has_canonical and has_perceived))
+                )
+                
+                for result in batch_results:
+                    test_results.add_result(result)
+        
+        # Update test_results flags
+        test_results.has_reference = has_target
+        test_results.has_canonical = has_canonical
+        test_results.has_perceived = has_perceived
+        
+        # Compute summary statistics
+        if has_target:
+            test_results.overall_per = self.per_metrics.summarize("error_rate")
+            avg_loss = total_loss / max(1, batch_count)
+        
+        if has_canonical and has_perceived:
+            test_results.overall_mpd_f1 = self.mpd_metrics.summarize("mpd_f1")
+            mpd_summary = self.mpd_metrics.summarize()
+            if isinstance(mpd_summary, dict):
+                test_results.overall_mpd_precision = mpd_summary.get('precision', None)
+                test_results.overall_mpd_recall = mpd_summary.get('recall', None)
+        
+        # Write CSV results
+        csv_path = os.path.join(output_folder, "test_results.csv")
+        writer = ResultWriter(csv_path)
+        writer.write(test_results)
+        
+        # Log results
+        logging.info("=" * 50)
+        logging.info("Test Results Summary")
+        logging.info("=" * 50)
+        logging.info(f"Total samples: {len(test_results.results)}")
+        
+        if has_target:
+            logging.info(f"Average Loss: {avg_loss:.4f}")
+            logging.info(f"Overall PER: {test_results.overall_per:.4f}")
+        
+        if has_canonical and has_perceived and test_results.overall_mpd_f1 is not None:
+            logging.info(f"Overall MPD F1: {test_results.overall_mpd_f1:.4f}")
+        
+        logging.info(f"Results saved to: {csv_path}")
+        
+        return test_results
+
     def _load_token_names(self):
         """Load token names from label encoder file"""
         token_names = {}
@@ -381,6 +1000,10 @@ class PhnMonoSSLModel(sb.Brain):
         if stage != sb.Stage.TRAIN:
             self.per_metrics = self.hparams.per_stats()
             self.mpd_metrics = MpdStats()
+        
+        # Initialize test results collector for CSV output
+        if stage == sb.Stage.TEST:
+            self.test_results_for_csv = TestResults()
     
     def on_stage_end(self, stage, stage_loss, epoch):
         """Gets called at the end of a epoch"""
@@ -480,16 +1103,45 @@ class PhnMonoSSLModel(sb.Brain):
                 raise KeyboardInterrupt("Early stopping triggered")
         
         if stage == sb.Stage.TEST:
+            # Flexible test output based on available metrics
+            test_stats = {"loss": stage_loss}
+            
+            # Check if per_metrics and mpd_metrics were populated
+            has_per_metrics = hasattr(self, 'per_metrics') and len(self.per_metrics.scores) > 0
+            has_mpd_metrics = hasattr(self, 'mpd_metrics') and len(self.mpd_metrics.scores) > 0
+            
+            if has_per_metrics:
+                per = self.per_metrics.summarize("error_rate")
+                test_stats["PER"] = per
+            
+            if has_mpd_metrics:
+                mpd_f1 = self.mpd_metrics.summarize("mpd_f1")
+                test_stats["mpd_f1"] = mpd_f1
+            
             self.hparams.train_logger.log_stats(
                 stats_meta={"Epoch loaded": self.hparams.epoch_counter.current},
-                test_stats={"loss": stage_loss, "PER": per, "mpd_f1": mpd_f1},
+                test_stats=test_stats,
             )
             
-            with open(self.hparams.per_file, "w") as w:
-                self.per_metrics.write_stats(w)
+            # Write detailed stats files if metrics available
+            if has_per_metrics:
+                per_file = getattr(self.hparams, 'per_file', os.path.join(self.hparams.output_folder, 'per_stats.txt'))
+                with open(per_file, "w") as w:
+                    self.per_metrics.write_stats(w)
+                logging.info(f"✅ PER stats written to: {per_file}")
             
-            with open(self.hparams.mpd_file, "w") as m:
-                self.mpd_metrics.write_stats(m)
+            if has_mpd_metrics:
+                mpd_file = getattr(self.hparams, 'mpd_file', os.path.join(self.hparams.output_folder, 'mpd_stats.txt'))
+                with open(mpd_file, "w") as m:
+                    self.mpd_metrics.write_stats(m)
+                logging.info(f"✅ MPD stats written to: {mpd_file}")
+            
+            # Generate CSV results
+            if hasattr(self, 'test_results_for_csv') and self.test_results_for_csv:
+                csv_path = getattr(self.hparams, 'test_csv_file', 
+                                   os.path.join(self.hparams.output_folder, 'test_results.csv'))
+                writer = ResultWriter(csv_path)
+                writer.write(self.test_results_for_csv)
     
     def fit_batch(self, batch):
         """Fit one batch"""
@@ -555,25 +1207,26 @@ class PhnMonoSSLModel(sb.Brain):
             resume_from_pretrainer.load_collected()
             logging.info(f"✅ Resumed from pretrainer: {self.hparams.resume_from}")
         
-        if getattr(self.hparams, 'load_pretrained_components', False):
-            pretrained_path = getattr(self.hparams, 'pretrained_model_path', '')
-            components = getattr(self.hparams, 'components_to_load', ['ssl', 'enc', "ctc_head"])
-            freeze_loaded = getattr(self.hparams, 'freeze_loaded_components', True)
+        # if getattr(self.hparams, 'load_pretrained_components', False):
+        #     pretrained_path = getattr(self.hparams, 'pretrained_model_path', '')
+        #     components = getattr(self.hparams, 'components_to_load', ['ssl', 'enc', "ctc_head"])
+        #     freeze_loaded = getattr(self.hparams, 'freeze_loaded_components', True)
             
-            if pretrained_path and os.path.exists(pretrained_path):
-                try:
-                    self.load_pretrained_components(
-                        checkpoint_path=pretrained_path,
-                        components_to_load=components,
-                        freeze_loaded=freeze_loaded
-                    )
-                except Exception as e:
-                    print(f"❌ Failed to load pretrained components: {e}")
+        #     if pretrained_path and os.path.exists(pretrained_path):
+        #         try:
+        #             self.load_pretrained_components(
+        #                 checkpoint_path=pretrained_path,
+        #                 components_to_load=components,
+        #                 freeze_loaded=freeze_loaded
+        #             )
+        #         except Exception as e:
+        #             print(f"❌ Failed to load pretrained components: {e}")
         elif self.checkpointer is not None:
             # self.checkpointer.recover_if_possible(min_key="PER")
             self.checkpointer.recover_if_possible(min_key="PER", max_key="mpd_f1"
             )
     
+        
     def load_pretrained_components(self, checkpoint_path, components_to_load=None, freeze_loaded=True):
         """Load specific components from a pretrained model"""
         if components_to_load is None:

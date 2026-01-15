@@ -34,11 +34,13 @@ from models.Transformer import TransformerMDD
 from models.Transformer_TP import TransformerMDD_TP
 from models.Transformer_TP_fuse_errclass import TransformerMDD_TP_encdec_errclass
 from models.Transformer_TP_fuse_errclass_ConPCO import TransformerMDD_TP_encdec_errclass_ConPCO
-from models.SSL_LLM import SSL_LLM
+from models.Trans_IFMDD_ConPCO import Trans_IFMDD_ConPCO
+# from models.SSL_LLM import SSL_LLM
 from models.SSL_LLM_origin import SSL_LLM_origin
 from models.SSL_LLM_origin_ver2 import SSL_LLM_origin_ver2
+from models.SSL_LLM_origin_ver2_expand_tok import SSL_LLM_origin_ver2_expand_tok
 
-from utils.DataPrepIO import LLMDataIOPrep, LLMDataIOPrep_ver2, LLMDataIOPrep_ver3
+from utils.DataPrepIO import LLMDataIOPrep, LLMDataIOPrep_ver2, LLMDataIOPrep_ver3, InferDataIOPrep
 
 sys.path.append("./trainer")
 logger = logging.getLogger(__name__)
@@ -50,7 +52,7 @@ if __name__ == "__main__":
     # Add custom argument parser for mode selection FIRST
     parser = argparse.ArgumentParser(description='MDD Training/Evaluation Script', add_help=False)
     parser.add_argument('--mode', type=str, default='train+eval', 
-                       choices=['train', 'eval', 'train+eval'],
+                       choices=['train', 'eval', 'train+eval', 'infer'],
                        help='Execution mode: train only, eval only, or both (default: train+eval)')
     
     # Parse only the --mode argument, leave the rest for speechbrain
@@ -93,20 +95,29 @@ if __name__ == "__main__":
         asr_brain_class = TransformerMDD_TP_encdec_errclass
     elif hparams["feature_fusion"] == "TransformerMDD_TP_encdec_errclass_ConPCO":
         asr_brain_class = TransformerMDD_TP_encdec_errclass_ConPCO
-    elif hparams["feature_fusion"] == "SSL_LLM":
-        asr_brain_class = SSL_LLM
+    elif hparams["feature_fusion"] == "Trans_IFMDD_ConPCO":
+        asr_brain_class = Trans_IFMDD_ConPCO
+    # elif hparams["feature_fusion"] == "SSL_LLM":
+    #     asr_brain_class = SSL_LLM
     elif hparams["feature_fusion"] == "SSL_LLM_origin":
         asr_brain_class = SSL_LLM_origin
     elif hparams["feature_fusion"] == "SSL_LLM_origin_ver2":
         asr_brain_class = SSL_LLM_origin_ver2
-
-    if asr_brain_class == SSL_LLM:
-        DataPrep  = LLMDataIOPrep_ver3(hparams)
+    elif hparams["feature_fusion"] == "SSL_LLM_origin_ver2_expand_tok":
+        asr_brain_class = SSL_LLM_origin_ver2_expand_tok
+    # if asr_brain_class == SSL_LLM:
+#         DataPrep  = LLMDataIOPrep_ver3(hparams)
     if asr_brain_class == TransformerMDD_TP_encdec_errclass:
         DataPrep  = LLMDataIOPrep_ver2(hparams)
     else:
         DataPrep  = LLMDataIOPrep(hparams)
+    
     train_data, valid_data, test_data, label_encoder = DataPrep.prepare()
+    
+    # Infer Data prep, return id, sig only
+    if args.mode == "infer" and hparams.get("infer_annotation", False):
+        InferDataPrep  = InferDataIOPrep(hparams)
+        infer_data = InferDataPrep.prepare()
 
     logger.info(f"Using ASR brain class: {asr_brain_class.__name__}")
     
@@ -149,8 +160,8 @@ if __name__ == "__main__":
     )
     
     # limit train_data for quick debugging
-    # train_record = train_data.data_ids[:512]  # Select first 1024 for debugging
-    # valid_record = valid_data.data_ids[:128]  # Select first 128 for debugging
+    # train_record = train_data.data_ids[:2048]  # Select first 2048 for debugging
+    # valid_record = valid_data.data_ids[:]  # Select first 128 for debugging
     # train_data = train_data.filtered_sorted(key_test={"id": lambda x: x in train_record},)
     # valid_data = valid_data.filtered_sorted(key_test={"id": lambda x: x in valid_record},)
     # test_record = test_data.data_ids[:10]
@@ -182,7 +193,7 @@ if __name__ == "__main__":
                     test_loader_kwargs=hparams["test_dataloader_opts"],
                     max_key=key
                 )
-            elif key == "PER" or key == "PER_seq" or key == "CTC_PER":
+            elif key == "PER" or key == "PER_seq" or key == "CTC_PER" or key == "LLM_PER":
                 asr_brain.evaluate(
                     test_data,
                     test_loader_kwargs=hparams["test_dataloader_opts"],
@@ -190,5 +201,26 @@ if __name__ == "__main__":
                 )
         else:
             logger.warning("evaluate_key not set in hparams, skipping evaluation")
+    
+    if args.mode in ["infer"]:
+        if hparams.get("evaluate_key", True):
+            key = hparams["evaluate_key"]
+            logger.info(f"Starting inference with key: {key}")
+            # import pdb; pdb.set_trace()
+            if key == "mpd_f1" or key == "mpd_f1_seq":
+                asr_brain.inference(
+                    infer_data,
+                    test_loader_kwargs=hparams["test_dataloader_opts"],
+                    max_key=key,
+                    output_file=hparams.get("inference_output_file", None)
+                )
+            elif key == "PER" or key == "PER_seq" or key == "CTC_PER" or key == "LLM_PER":
+                asr_brain.inference(
+                    infer_data,
+                    test_loader_kwargs=hparams["test_dataloader_opts"],
+                    min_key=key,
+                    output_file=hparams.get("inference_output_file", None)
+                )
+    
     else:
         logger.info(f"Skipping evaluation (mode={args.mode})")

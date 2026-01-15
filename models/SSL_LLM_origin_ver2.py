@@ -11,6 +11,26 @@ from types import SimpleNamespace
 import pdb
 from mpd_eval_v4 import MpdStats
 
+try:
+    from peft import PeftModel, get_peft_model_state_dict, set_peft_model_state_dict
+except ImportError:
+    PeftModel = None
+
+class PeftAdapterRecoverable:
+    """Wrapper to save ONLY the adapter weights of a PeftModel in SpeechBrain checkpoints"""
+    def __init__(self, model):
+        self.model = model
+    
+    def state_dict(self):
+        return get_peft_model_state_dict(self.model)
+    
+    def load_state_dict(self, state_dict):
+        # set_peft_model_state_dict handles loose matching nicely usually
+        set_peft_model_state_dict(self.model, state_dict)
+    
+    def to(self, device):
+        self.model.to(device)
+
 import logging
 logger = logging.getLogger(__name__)
 
@@ -498,7 +518,6 @@ class SSL_LLM_origin_ver2(sb.Brain):
                 
                 # Generate phoneme tokens with full vocabulary
                 # import pdb; pdb.set_trace()
-                # pdb.set_trace()
 
                 gen_out = self.modules.LLM.generate(
                     inputs_embeds=inputs_embeds_inference,
@@ -507,11 +526,11 @@ class SSL_LLM_origin_ver2(sb.Brain):
                     pad_token_id=PAD_ID,
                     eos_token_id=EOS_ID,
                     bos_token_id=BOS_ID,
-                    do_sample=False,
+                    do_sample=True,
                     use_cache=True,
                     # top_k = 100,
                     # top_p = 0.9,
-                    # max_new_tokens=100, 
+                    max_new_tokens=100, 
                     # repetition_penalty=1.1,
                     # no_repeat_ngram_size=4,
                 )
@@ -711,6 +730,298 @@ class SSL_LLM_origin_ver2(sb.Brain):
         loss = self.compute_objectives(predictions, batch, stage=stage)
         return loss.detach()
 
+    @torch.no_grad()
+    def inference_batch(self, batch, max_new_tokens=100, do_sample=False, temperature=1.0, top_k=50, top_p=0.9):
+        """
+        Pure inference when batch only contains id and sig (no target phonemes).
+        
+        Args:
+            batch: A batch containing:
+                - batch.id: list of utterance IDs
+                - batch.sig: tuple of (wavs [B, T], wav_lens [B])
+            max_new_tokens: Maximum number of tokens to generate
+            do_sample: Whether to use sampling (True) or greedy decoding (False)
+            temperature: Sampling temperature (only used if do_sample=True)
+            top_k: Top-k sampling parameter
+            top_p: Top-p (nucleus) sampling parameter
+            
+        Returns:
+            dict: {
+                "ids": list of utterance IDs,
+                "generated_tokens": tensor of generated token IDs [B, gen_len],
+                "generated_text": list of decoded phoneme strings,
+                "ctc_predictions": list of CTC decoded phoneme sequences (if available)
+            }
+        """
+        # Ensure critical components are initialized
+        self._ensure_initialized()
+        
+        batch = batch.to(self.device)
+        wavs, wav_lens = batch.sig
+        ids = batch.id
+        
+        # AudioEncoder + Projector
+        wav_feats = self.modules.perceived_ssl(wavs)  # [B, T, 1024]
+        
+        # AudioEncoder
+        try:
+            Z, _ = self.hparams.audio_encoder_modules(wavs)
+        except:
+            Z = self.hparams.audio_encoder_modules(wavs)
+        
+        # CTC branch (optional, for comparison)
+        ctc_predictions = None
+        if hasattr(self.modules, "ctc_lin"):
+            ctc_logits = self.modules.ctc_lin(Z)
+            p_ctc = self.hparams.log_softmax(ctc_logits)
+            ctc_sequence = sb.decoders.ctc_greedy_decode(
+                p_ctc, wav_lens, blank_id=self.hparams.blank_index
+            )
+            # Decode CTC predictions to phoneme strings
+            ctc_predictions = []
+            for seq in ctc_sequence:
+                phn_list = self.label_encoder.decode_ndim(seq)
+                ctc_predictions.append(" ".join(phn_list))
+        
+        # Projector
+        if hasattr(self.modules, "projector") and self.modules.projector is not None:
+            Z = self.modules.projector(Z)
+        
+        B, Ts, H = Z.shape
+        device = self.device
+        tok = self.hparams.LLM_tokenizer
+        embed_fn = self.modules.LLM.get_input_embeddings()
+        
+        # Get LLM dtype
+        llm_dtype = embed_fn.weight.dtype
+        
+        # Prepare special tokens
+        BOS_ID = tok.bos_token_id
+        EOS_ID = tok.eos_token_id
+        PAD_ID = tok.pad_token_id if tok.pad_token_id is not None else 0
+        
+        if tok.sep_token is None or tok.sep_token_id is None:
+            tok.sep_token = "<|reserved_special_token_0|>"
+        SEP_ID = tok.sep_token_id
+        
+        def col_tokens(tok_id):
+            return torch.full((B, 1), tok_id, dtype=torch.long, device=device)
+        
+        SEP = col_tokens(SEP_ID)
+        BOS = col_tokens(BOS_ID)
+        
+        # Embed special tokens
+        SEP_embed = embed_fn(SEP)
+        BOS_embed = embed_fn(BOS)
+        
+        # Check prompt type
+        use_prompt = getattr(self.hparams, "use_prompt", False)
+        has_split_prompt = use_prompt and hasattr(self, "prompt_prefix_embed") and hasattr(self, "prompt_suffix_embed")
+        has_prompt = use_prompt and hasattr(self, "prompt_embed") and self.prompt_embed is not None
+        
+        # Build input embeddings for inference
+        if has_split_prompt:
+            prefix_embed = self.prompt_prefix_embed
+            suffix_embed = self.prompt_suffix_embed
+            inputs_embeds = torch.cat([
+                prefix_embed.unsqueeze(0).expand(B, -1, -1),
+                Z,
+                suffix_embed.unsqueeze(0).expand(B, -1, -1)
+            ], dim=1)
+        elif has_prompt:
+            prompt_embed = self.prompt_embed
+            prompt_embed_batch = prompt_embed.unsqueeze(0).expand(B, -1, -1)
+            inputs_embeds = torch.cat([
+                prompt_embed_batch,
+                SEP_embed,
+                Z,
+                BOS_embed
+            ], dim=1)
+        else:
+            inputs_embeds = torch.cat([
+                SEP_embed,
+                Z,
+                BOS_embed
+            ], dim=1)
+        
+        # Match LLM dtype
+        if inputs_embeds.dtype != llm_dtype:
+            inputs_embeds = inputs_embeds.to(llm_dtype)
+        
+        attention_mask = torch.ones(B, inputs_embeds.size(1), dtype=torch.long, device=device)
+        
+        # Generate phoneme tokens
+        gen_kwargs = {
+            "inputs_embeds": inputs_embeds,
+            "attention_mask": attention_mask,
+            "max_new_tokens": max_new_tokens,
+            "num_return_sequences": 1,
+            "pad_token_id": PAD_ID,
+            "eos_token_id": EOS_ID,
+            "bos_token_id": BOS_ID,
+            "do_sample": do_sample,
+            "use_cache": True,
+        }
+        
+        if do_sample:
+            gen_kwargs.update({
+                "temperature": temperature,
+                "top_k": top_k,
+                "top_p": top_p,
+            })
+        
+        gen_out = self.modules.LLM.generate(**gen_kwargs)
+        
+        # Decode generated tokens to text
+        generated_text = tok.batch_decode(gen_out, skip_special_tokens=True)
+        
+        return {
+            "ids": ids,
+            "generated_tokens": gen_out,
+            "generated_text": generated_text,
+            "ctc_predictions": ctc_predictions,
+        }
+
+    def inference(
+            self,
+            test_set,
+            max_key=None,
+            min_key=None,
+            progressbar=None,
+            test_loader_kwargs={},
+            max_new_tokens=100,
+            do_sample=False,
+            temperature=1.0,
+            top_k=50,
+            top_p=0.9,
+            output_file=None,
+        ):
+            """
+            Iterate test_set and perform inference (no loss computation).
+            Only requires batch.id and batch.sig.
+
+            Arguments
+            ---------
+            test_set : Dataset, DataLoader
+                If a DataLoader is given, it is iterated directly. Otherwise passed
+                to ``self.make_dataloader()``.
+            max_key : str
+                Key to use for finding best checkpoint.
+            min_key : str
+                Key to use for finding best checkpoint.
+            progressbar : bool
+                Whether to display the progress in a progressbar.
+            test_loader_kwargs : dict
+                Kwargs passed to ``make_dataloader()`` if ``test_set`` is not a
+                DataLoader.
+            max_new_tokens : int
+                Maximum number of tokens to generate.
+            do_sample : bool
+                Whether to use sampling or greedy decoding.
+            temperature : float
+                Sampling temperature.
+            top_k : int
+                Top-k sampling parameter.
+            top_p : float
+                Top-p (nucleus) sampling parameter.
+            output_file : str
+                Optional file path to save results.
+
+            Returns
+            -------
+            list of dict: All inference results
+            """
+            from torch.utils.data import DataLoader
+            from speechbrain.dataio.dataloader import LoopedLoader
+            
+            if progressbar is None:
+                progressbar = not self.noprogressbar
+
+            enable = progressbar and sb.utils.distributed.if_main_process()
+
+            if not (
+                isinstance(test_set, DataLoader)
+                or isinstance(test_set, LoopedLoader)
+            ):
+                test_loader_kwargs["ckpt_prefix"] = None
+                test_set = self.make_dataloader(
+                    test_set, sb.Stage.TEST, **test_loader_kwargs
+                )
+            
+            # Load best checkpoint if available
+            self.on_evaluate_start(max_key=max_key, min_key=min_key)
+            self.modules.eval()
+            
+            all_results = []
+            
+            with torch.no_grad():
+                for batch in tqdm(
+                    test_set,
+                    dynamic_ncols=True,
+                    disable=not enable,
+                    colour=self.tqdm_barcolor.get("test", "green"),
+                ):
+                    # Run inference
+                    result = self.inference_batch(
+                        batch,
+                        max_new_tokens=max_new_tokens,
+                        do_sample=do_sample,
+                        temperature=temperature,
+                        top_k=top_k,
+                        top_p=top_p,
+                    )
+                    
+                    # Collect results
+                    for i, utt_id in enumerate(result["ids"]):
+                        item = {
+                            "id": utt_id,
+                            "llm_prediction": result["generated_text"][i],
+                        }
+                        if result["ctc_predictions"] is not None:
+                            item["ctc_prediction"] = result["ctc_predictions"][i]
+                        all_results.append(item)
+            
+            # Optionally save to file
+            if output_file is not None:
+                import json
+                import csv
+                import os
+                
+                # Determine output directory and base name
+                output_dir = os.path.dirname(output_file) if os.path.dirname(output_file) else "."
+                base_name = os.path.splitext(os.path.basename(output_file))[0]
+                
+                # Save LLM predictions to CSV
+                llm_csv_path = os.path.join(output_dir, f"{base_name}_LLM.csv")
+                with open(llm_csv_path, "w", encoding="utf-8", newline="") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(["ID", "Labels"])
+                    for item in all_results:
+                        # Get file stem (filename without path and extension)
+                        file_stem = os.path.splitext(os.path.basename(str(item["id"])))[0]
+                        writer.writerow([file_stem, item["llm_prediction"]])
+                print(f"LLM predictions saved to {llm_csv_path}")
+                
+                # Save CTC predictions to CSV (if available)
+                if all_results and "ctc_prediction" in all_results[0]:
+                    ctc_csv_path = os.path.join(output_dir, f"{base_name}_CTC.csv")
+                    with open(ctc_csv_path, "w", encoding="utf-8", newline="") as f:
+                        writer = csv.writer(f)
+                        writer.writerow(["ID", "Labels"])
+                        for item in all_results:
+                            file_stem = os.path.splitext(os.path.basename(str(item["id"])))[0]
+                            writer.writerow([file_stem, item["ctc_prediction"]])
+                    print(f"CTC predictions saved to {ctc_csv_path}")
+                
+                # Also save JSONL for full details
+                jsonl_path = os.path.join(output_dir, f"{base_name}.jsonl")
+                with open(jsonl_path, "w", encoding="utf-8") as f:
+                    for item in all_results:
+                        f.write(json.dumps(item, ensure_ascii=False) + "\n")
+                print(f"Full results saved to {jsonl_path}")
+            
+            return all_results
+    
     def on_stage_start(self, stage, epoch):
         "Gets called when a stage (either training, validation, test) starts."
         self.ctc_metrics = self.hparams.ctc_stats()
@@ -1049,10 +1360,25 @@ class SSL_LLM_origin_ver2(sb.Brain):
 
         self.init_optimizers()
 
+        # Wrap PeftModels in checkpointer to only save adapters
+        if self.checkpointer is not None and PeftModel is not None:
+            # We iterate over keys to find PeftModels and wrap them
+            keys_to_wrap = []
+            for name, obj in self.checkpointer.recoverables.items():
+                # Handle DDP wrapped objects
+                real_obj = obj
+                if hasattr(obj, "module"):
+                    real_obj = obj.module
+                
+                if isinstance(real_obj, PeftModel):
+                    keys_to_wrap.append(name)
+            
+            for name in keys_to_wrap:
+                print(f"[Checkpointer] Wrapping '{name}' with PeftAdapterRecoverable to save ONLY adapters.")
+                self.checkpointer.recoverables[name] = PeftAdapterRecoverable(self.checkpointer.recoverables[name])
+
         if self.checkpointer is not None:
-            self.checkpointer.recover_if_possible(
-                min_key=["LLM_PER", "CTC_PER"]
-            )
+            self.checkpointer.recover_if_possible(min_key="LLM_PER")
         
         if getattr(self.hparams, 'load_pretrained_components', False):
             pretrained_path = getattr(self.hparams, 'pretrained_model_path', '')
@@ -1105,5 +1431,5 @@ class SSL_LLM_origin_ver2(sb.Brain):
         if self.checkpointer is not None:
             self.checkpointer.add_recoverable("adam_opt", self.adam_optimizer)
             # self.checkpointer.add_recoverable("pretrained_opt", self.pretrained_opt_class)
-            self.checkpointer.add_recoverable("tokenizer", self.label_encoder)  
-    
+            self.checkpointer.add_recoverable("tokenizer", self.label_encoder)
+
