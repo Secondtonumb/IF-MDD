@@ -264,9 +264,15 @@ class PhnMonoSSLModel(sb.Brain):
             return False
         return True
     
-    def compute_forward(self, batch, stage):
+    def compute_forward(self, batch, stage, pseudo_labels=None, pseudo_label_lens=None):
         """
         Unified forward pass supporting all configurations.
+        
+        Args:
+            batch: Input batch
+            stage: Training stage
+            pseudo_labels: Optional pseudo labels for unlabeled data (for OTTC)
+            pseudo_label_lens: Optional pseudo label lengths (for OTTC)
         
         Returns:
             Depending on configuration, returns:
@@ -339,26 +345,38 @@ class PhnMonoSSLModel(sb.Brain):
         
         # Handle OTTC-specific outputs
         if use_crottc or use_ottc:
+            # 支持 labeled 数据（真实标签）和 unlabeled 数据（伪标签）
             if hasattr(self.modules, "lm_weight") and stage != sb.Stage.TEST:
-                import pdb; pdb.set_trace()
-                targets, target_lens = batch.phn_encoded_target
-                labels_mask = (targets != self.hparams.blank_index).float()
+                # 获取标签（真实或伪标签）
+                if hasattr(batch, 'phn_encoded_target') and batch.phn_encoded_target is not None:
+                    # Labeled data: 使用真实标签
+                    targets, target_lens = batch.phn_encoded_target
+                elif pseudo_labels is not None:
+                    # Unlabeled data: 使用伪标签（从 teacher model 生成）
+                    targets = pseudo_labels
+                    target_lens = pseudo_label_lens
+                else:
+                    # 没有任何标签，跳过 OTTC 权重计算
+                    targets = None
                 
-                weights_logits = self.modules.lm_weight(x)
-                lens_abs = (wav_lens * feats.shape[-2]).int()
-                output_mask = self.create_attention_mask_from_input_sequence(lens_abs)
-                
-                import torch.nn.functional as F
-                # Optimize: use in-place operations and avoid unnecessary copies
-                weights_logits = weights_logits.squeeze()
-                weights_logits = weights_logits.masked_fill(output_mask == 0, -torch.inf)
-                weights_logits = F.softmax(weights_logits, dim=-1)
-                
-                # Optimize: use clamp to avoid division by zero without sync
-                label_sums = labels_mask.sum(dim=1, keepdim=True).clamp(min=1e-8)
-                weights_labels = labels_mask / label_sums
-                
-                return p_ctc, logits, weights_logits, weights_labels, wav_lens
+                if targets is not None:
+                    labels_mask = (targets != self.hparams.blank_index).float()
+                    
+                    weights_logits = self.modules.lm_weight(x)
+                    lens_abs = (wav_lens * feats.shape[-2]).int()
+                    output_mask = self.create_attention_mask_from_input_sequence(lens_abs)
+                    
+                    import torch.nn.functional as F
+                    # Optimize: use in-place operations and avoid unnecessary copies
+                    weights_logits = weights_logits.squeeze()
+                    weights_logits = weights_logits.masked_fill(output_mask == 0, -torch.inf)
+                    weights_logits = F.softmax(weights_logits, dim=-1)
+                    
+                    # Optimize: use clamp to avoid division by zero without sync
+                    label_sums = labels_mask.sum(dim=1, keepdim=True).clamp(min=1e-8)
+                    weights_labels = labels_mask / label_sums
+                    
+                    return p_ctc, logits, weights_logits, weights_labels, wav_lens
         
         # Handle RVQ outputs
         if 'commitment_loss' in encoder_extras:
@@ -616,6 +634,7 @@ class PhnMonoSSLModel(sb.Brain):
             canonical=canonical
         )
         
+        # print out
         return result
     
     def inference_batch(
@@ -1200,7 +1219,7 @@ class PhnMonoSSLModel(sb.Brain):
         self.init_optimizers()
         
         # Load pretrained components if specified
-        
+        # import pdb; pdb.set_trace()
         resume_from_pretrainer = getattr(self.hparams, 'resume_from_pretrainer', None)
         if resume_from_pretrainer is not None:
             resume_from_paths = resume_from_pretrainer.collect_files(default_source=self.hparams.resume_from)
@@ -1221,6 +1240,7 @@ class PhnMonoSSLModel(sb.Brain):
         #             )
         #         except Exception as e:
         #             print(f"❌ Failed to load pretrained components: {e}")
+        
         elif self.checkpointer is not None:
             # self.checkpointer.recover_if_possible(min_key="PER")
             self.checkpointer.recover_if_possible(min_key="PER", max_key="mpd_f1"

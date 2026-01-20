@@ -25,7 +25,7 @@ def phn_list_to_seq(batch):
         result.append(" ".join(x for x in phn_list))
     return result
     
-class SSL_LLM_origin_ver3(sb.Brain):
+class SSL_LLM_origin_ver2(sb.Brain):
     def __init__(self, *args, patience=20, **kwargs):
         super().__init__(*args, **kwargs)
         self.patience = patience
@@ -202,55 +202,6 @@ class SSL_LLM_origin_ver3(sb.Brain):
         phn_ids = phn_tokens["input_ids"]
         phn_mask = phn_tokens["attention_mask"]
         L_phn = phn_ids.size(1)
-
-        # ===== New: Canon/Word Prompting Logic =====
-        # Check config options
-        use_prompt = getattr(self.hparams, "use_prompt", False)
-        # New flags needed in yaml
-        use_canon = getattr(self.hparams, "use_canon_prompt", False)
-        use_word = getattr(self.hparams, "use_word_prompt", False)
-        
-        dynamic_info_str_list = []
-        
-        # Extract Canon if requested
-        if use_canon:
-            if hasattr(batch, "phn_list_canonical"):
-                # import pdb; pdb.set_trace()
-                if isinstance(batch.phn_list_canonical, list) and isinstance(batch.phn_list_canonical[0], list):
-                    canon_seqs = phn_list_to_seq(batch.phn_list_canonical)
-                else:
-                    canon_seqs = batch.phn_list_canonical
-                canon_strs = [f"\nCanonical Phonemes: {s}" for s in canon_seqs]
-                dynamic_info_str_list.append(canon_strs)
-            else:
-                 print("Warning: use_canon_prompt is True but batch has no phn_list_canonical")
-
-        # Extract Word if requested
-        if use_word:
-            if hasattr(batch, "wrd"):
-                word_seqs = batch.wrd
-                word_strs = [f"\nText Transcript: {s}" for s in word_seqs]
-                dynamic_info_str_list.append(word_strs)
-            else:
-                 print("Warning: use_word_prompt is True but batch has no wrd")
-        # import pdb; pdb.set_trace()
-            
-        # Construct Embeddings for Dynamic Info
-        if dynamic_info_str_list:
-            combined_info_strs = []
-            num_info_types = len(dynamic_info_str_list)
-            for b_idx in range(B):
-                # Ensure we handle potential missing or mismatched lengths gracefully if batching is loose
-                # But SpeechBrain batches are usually consistent
-                info_parts = [dynamic_info_str_list[i][b_idx] for i in range(num_info_types)]
-                combined_info_strs.append("".join(info_parts))
-            
-            info_tokens = tok(combined_info_strs, return_tensors="pt", padding=True, add_special_tokens=False).to(device)
-            info_ids = info_tokens["input_ids"]
-            info_embeds = embed_fn(info_ids) # [B, L_info, H]
-        else:
-            info_embeds = torch.zeros(B, 0, H, device=device)
-            info_tokens = {"attention_mask": torch.zeros(B, 0, device=device)}
         
         # ===== Prepare special tokens =====
         BOS_ID = tok.bos_token_id
@@ -306,7 +257,6 @@ class SSL_LLM_origin_ver3(sb.Brain):
              inputs_embeds = torch.cat([
                 prefix_embed.unsqueeze(0).expand(B, -1, -1),
                 Z,
-                info_embeds,
                 suffix_embed.unsqueeze(0).expand(B, -1, -1),
                 phn_embed,
                 EOS_embed
@@ -347,16 +297,7 @@ class SSL_LLM_origin_ver3(sb.Brain):
             attention_mask = torch.ones(B, seq_len, dtype=torch.long, device=device)
             
             if has_split_prompt:
-                 L_pre = self.prompt_prefix_embed.size(0)
-                 L_info = info_embeds.size(1)
-                 L_suf = self.prompt_suffix_embed.size(0)
-                 text_start = L_pre + Ts + L_info + L_suf
-                 
-                 # Handle info padding mask if valid
-                 if L_info > 0:
-                      info_mask = info_tokens["attention_mask"]
-                      info_start = L_pre + Ts
-                      attention_mask[:, info_start : info_start + L_info] = info_mask
+                 text_start = self.prompt_prefix_embed.size(0) + Ts + self.prompt_suffix_embed.size(0)
             else:
                 # Mask out padding in phoneme sequence
                 # Sequence: [prompt(P)] [SEP(1)] [speech(Ts)] [BOS(1)] [phn(L_phn)] [EOS(1)]
@@ -448,15 +389,7 @@ class SSL_LLM_origin_ver3(sb.Brain):
                 attention_mask = torch.ones(B, seq_len, dtype=torch.long, device=device)
                 
                 if use_prompt and hasattr(self, "prompt_prefix_embed") and hasattr(self, "prompt_suffix_embed"):
-                    L_pre = self.prompt_prefix_embed.size(0)
-                    L_info = info_embeds.size(1)
-                    L_suf = self.prompt_suffix_embed.size(0)
-                    text_start = L_pre + Ts + L_info + L_suf
-                     
-                    if L_info > 0:
-                        info_mask = info_tokens["attention_mask"]
-                        info_start = L_pre + Ts
-                        attention_mask[:, info_start : info_start + L_info] = info_mask
+                    text_start = self.prompt_prefix_embed.size(0) + Ts + self.prompt_suffix_embed.size(0)
                 else:
                     # Mask out padding in phoneme sequence
                     # Sequence: [prompt(P)] [SEP(1)] [speech(Ts)] [BOS(1)] [phn(L_phn)] [EOS(1)]
@@ -488,10 +421,7 @@ class SSL_LLM_origin_ver3(sb.Brain):
                 
                 # Calculate positions (same as training)
                 if use_prompt and hasattr(self, "prompt_prefix_embed") and hasattr(self, "prompt_suffix_embed"):
-                    L_pre = self.prompt_prefix_embed.size(0)
-                    L_info = info_embeds.size(1)
-                    L_suf = self.prompt_suffix_embed.size(0)
-                    text_start = L_pre + Ts + L_info + L_suf
+                    text_start = self.prompt_prefix_embed.size(0) + Ts + self.prompt_suffix_embed.size(0)
                     bos_pos = text_start - 1
                 else:
                     sep_pos = prompt_len
@@ -520,7 +450,6 @@ class SSL_LLM_origin_ver3(sb.Brain):
                      inputs_embeds_inference = torch.cat([
                         prefix_embed.unsqueeze(0).expand(B, -1, -1),
                         Z,
-                        info_embeds,
                         suffix_embed.unsqueeze(0).expand(B, -1, -1)
                     ], dim=1)
                 
@@ -544,15 +473,6 @@ class SSL_LLM_origin_ver3(sb.Brain):
                     inputs_embeds_inference = inputs_embeds_inference.to(llm_dtype)
                 
                 attention_mask_inference = torch.ones(B, inputs_embeds_inference.size(1), dtype=torch.long, device=device)
-                
-                if has_split_prompt and info_embeds.size(1) > 0:
-                    info_mask = info_tokens["attention_mask"]
-                    # Calculate start position for info
-                    # Prefix + Z
-                    L_pre = self.prompt_prefix_embed.size(0)
-                    L_info = info_embeds.size(1)
-                    info_start = L_pre + Ts
-                    attention_mask_inference[:, info_start : info_start + L_info] = info_mask
                 
                 # print(f"[DEBUG] Generate input shape: {inputs_embeds_inference.shape}")
                 # print(f"[DEBUG] max_new_tokens: {L_phn + 10}, BOS_ID: {BOS_ID}, EOS_ID: {EOS_ID}, PAD_ID: {PAD_ID}")
