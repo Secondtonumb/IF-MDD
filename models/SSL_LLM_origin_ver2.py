@@ -186,6 +186,61 @@ class SSL_LLM_origin_ver2(sb.Brain):
                 self.prompt_embed = torch.cat([self.prompt_prefix_embed, self.prompt_suffix_embed], dim=0)
                 print(f"[Lazy Init] Generated Llama 3 Prompt via Template.")
 
+    def _build_input_embeddings(self, B, Z, phn_embed, SEP_embed, BOS_embed, EOS_embed, 
+                                has_split_prompt=False, prompt_embed_batch=None):
+        """Build input embedding sequence for LLM forward pass.
+        
+        Consolidates all embedding concatenation logic to handle different prompt scenarios:
+        1. Split prompt: [prefix] [speech] [suffix] [phonemes] [EOS]
+        2. With prompt: [prompt] [SEP] [speech] [BOS] [phonemes] [EOS]
+        3. Without prompt: [SEP] [speech] [BOS] [phonemes] [EOS]
+        
+        Args:
+            B: Batch size
+            Z: Speech embeddings [B, Ts, H]
+            phn_embed: Phoneme embeddings [B, L_phn, H]
+            SEP_embed: SEP token embedding [B, 1, H]
+            BOS_embed: BOS token embedding [B, 1, H]
+            EOS_embed: EOS token embedding [B, 1, H]
+            has_split_prompt: Whether using split prompt (prefix/suffix)
+            prompt_embed_batch: Prompt embeddings [B, P, H] or None
+            
+        Returns:
+            inputs_embeds: Concatenated input embeddings [B, seq_len, H]
+        """
+        if has_split_prompt:
+            # [prefix] [speech] [suffix] [phonemes] [EOS]
+            prefix_embed = self.prompt_prefix_embed
+            suffix_embed = self.prompt_suffix_embed
+            inputs_embeds = torch.cat([
+                prefix_embed.unsqueeze(0).expand(B, -1, -1),
+                Z,
+                suffix_embed.unsqueeze(0).expand(B, -1, -1),
+                phn_embed,
+                EOS_embed
+            ], dim=1)
+        elif prompt_embed_batch is not None:
+            # [prompt] [SEP] [speech] [BOS] [phonemes] [EOS]
+            inputs_embeds = torch.cat([
+                prompt_embed_batch,  # [B, P, H]
+                SEP_embed,          # [B, 1, H]
+                Z,                   # [B, Ts, H]
+                BOS_embed,          # [B, 1, H]
+                phn_embed,          # [B, L_phn, H]
+                EOS_embed           # [B, 1, H]
+            ], dim=1)  # [B, P+1+Ts+1+L_phn+1, H]
+        else:
+            # [SEP] [speech] [BOS] [phonemes] [EOS]
+            inputs_embeds = torch.cat([
+                SEP_embed,          # [B, 1, H]
+                Z,                   # [B, Ts, H]
+                BOS_embed,          # [B, 1, H]
+                phn_embed,          # [B, L_phn, H]
+                EOS_embed           # [B, 1, H]
+            ], dim=1)  # [B, 1+Ts+1+L_phn+1, H]
+        
+        return inputs_embeds
+
     def compute_forward(self, batch, stage):
         """Given an input batch it computes the model forward pass.
         
@@ -288,34 +343,11 @@ class SSL_LLM_origin_ver2(sb.Brain):
         
         # Concatenate everything
         has_split_prompt = use_prompt and hasattr(self, "prompt_prefix_embed") and hasattr(self, "prompt_suffix_embed")
-
-        if has_split_prompt:
-             prefix_embed = self.prompt_prefix_embed
-             suffix_embed = self.prompt_suffix_embed
-             inputs_embeds = torch.cat([
-                prefix_embed.unsqueeze(0).expand(B, -1, -1),
-                Z,
-                suffix_embed.unsqueeze(0).expand(B, -1, -1),
-                phn_embed,
-                EOS_embed
-            ], dim=1)
-        elif prompt_embed is not None:
-            inputs_embeds = torch.cat([
-                prompt_embed_batch,  # [B, P, H]
-                SEP_embed,          # [B, 1, H]
-                Z,                   # [B, Ts, H]
-                BOS_embed,          # [B, 1, H]
-                phn_embed,          # [B, L_phn, H]
-                EOS_embed           # [B, 1, H]
-            ], dim=1)  # [B, P+1+Ts+1+L_phn+1, H]
-        else:
-            inputs_embeds = torch.cat([
-                SEP_embed,          # [B, 1, H]
-                Z,                   # [B, Ts, H]
-                BOS_embed,          # [B, 1, H]
-                phn_embed,          # [B, L_phn, H]
-                EOS_embed           # [B, 1, H]
-            ], dim=1)  # [B, 1+Ts+1+L_phn+1, H]
+        inputs_embeds = self._build_input_embeddings(
+            B, Z, phn_embed, SEP_embed, BOS_embed, EOS_embed,
+            has_split_prompt=has_split_prompt, 
+            prompt_embed_batch=prompt_embed_batch
+        )
         
         # Persist LayerNorm (created in on_fit_start, not per-forward)
         # if hasattr(self, "llm_norm") and self.llm_norm is not None:
@@ -526,13 +558,14 @@ class SSL_LLM_origin_ver2(sb.Brain):
                     pad_token_id=PAD_ID,
                     eos_token_id=EOS_ID,
                     bos_token_id=BOS_ID,
-                    do_sample=False,
+                    do_sample=True,
                     use_cache=True,
-                    num_beams=4,
-                    # top_k = 100,
+                    num_beams=1,
+                    # top_k = 71,
                     # top_p = 0.9,
-                    max_new_tokens=200, 
-                    # repetition_penalty=1.01,
+                    # max_new_tokens=200, 
+                    temperature=1.2,
+                    # repetition_penalty=1.00,
                     # no_repeat_ngram_size=4,
                 )
                 # from matplotlib import pyplot as plt
