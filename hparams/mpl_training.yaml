@@ -1,0 +1,303 @@
+# ============================================================================
+# MPL (Momentum Pseudo Label) Training Configuration
+# ============================================================================
+# This configuration extends the base phoneme model with semi-supervised
+# training using momentum pseudo labels.
+#
+# Usage:
+#   python train_mpl.py hparams/mpl_training.yaml --data_folder /path/to/data
+#
+# For continuing from a pretrained model:
+#   python train_mpl.py hparams/mpl_training.yaml \
+#       --pretrained_model_path /path/to/pretrained/save
+# ============================================================================
+
+# Seed for reproducibility
+seed: 3047
+__set_seed: !apply:torch.manual_seed [!ref <seed>]
+
+# ============================================================================
+# Model Configuration (Same as your existing configs)
+# ============================================================================
+prefix: "MPL"
+ctc_loss_type: "ottc"  # Options: "vanilla", "ottc", "crctc", "crottc"
+encoder_type: "conformer"  # Options: null, "conformer", "zipformer", "rvq"
+
+wandb_project: "IF-MDD-MPL"
+tags:
+    - PhnMonoSSL
+    - MPL
+    - ConformerEncoder
+
+# ============================================================================
+# SSL Model Selection
+# ============================================================================
+pretrained_models_path: pretrained_models/
+perceived_ssl_model: "wavlm_large"
+canonical_ssl_model: null
+
+# Models hidden size
+ENCODER_DIM: 1024
+
+# Feature fusion
+feature_fusion: "mono"
+
+# ============================================================================
+# Data paths
+# ============================================================================
+data_folder_save: "./data"
+
+# Labeled training data (with phoneme annotations)
+train_annotation: !ref <data_folder_save>/train-train.json
+
+# Unlabeled training data (audio only, no annotations)
+unlabeled_annotation: !ref <data_folder_save>/train-unlabeled.json
+
+# Validation and test
+valid_annotation: !ref <data_folder_save>/train-dev.json
+test_annotation: !ref <data_folder_save>/test.json
+
+# ============================================================================
+# Output paths
+# ============================================================================
+output_folder: !ref exp_mpl/<perceived_ssl_model>_<feature_fusion>_<prefix>
+per_file: !ref <output_folder>/per.txt
+mpd_file: !ref <output_folder>/mpd.txt
+save_folder: !ref <output_folder>/save
+train_log: !ref <output_folder>/train_log.txt
+
+# ============================================================================
+# Training hyperparameters
+# ============================================================================
+number_of_epochs: 100
+mpl_start_epoch: 50  # Start MPL from this epoch (assumes pre-trained model)
+
+# Batch sizes
+batch_size: 32
+batch_size_labeled: 32
+batch_size_unlabeled: 32  # Can use larger batch for unlabeled (no targets)
+
+# Learning rates
+lr: 0.0003
+lr_pretrained: 0.00001
+
+# Gradient accumulation
+gradient_accumulation: 1
+auto_mix_prec: true
+precision: fp16
+
+# MPL specific hyperparameters
+base_model_factor: 0.01  # Teacher contribution at the end of training (EMA decay)
+mpl_variant: chain  # "chain" or "interleaved"
+
+# Early stopping
+patience: 20
+
+# Data
+# sorting: ascending
+sorting: descending
+sample_rate: 16000
+num_workers: 4
+
+# ============================================================================
+# Model Architecture
+# ============================================================================
+output_neurons: 71  # l2arctic: 40phns(sil)+err+blank + eos + bos
+
+activation: !name:torch.nn.LeakyReLU
+dnn_layers: 2
+dnn_neurons: 384
+
+freeze_perceived_ssl: False
+freeze_perceived_feature_extractor: True
+
+# ============================================================================
+# Student Model Components
+# ============================================================================
+perceived_ssl: !apply:trainer.AutoSSLoader.AutoSSLLoader
+    model_name: !ref <perceived_ssl_model>
+    freeze: !ref <freeze_perceived_ssl>
+    freeze_feature_extractor: !ref <freeze_perceived_feature_extractor>
+    save_path: !ref <pretrained_models_path>
+    output_all_hiddens: False
+
+canonical_ssl: null
+
+ssl_proj: !new:torch.nn.Sequential
+    - !new:speechbrain.lobes.models.VanillaNN.VanillaNN
+        input_shape: [null, null, !ref <ENCODER_DIM>]
+        activation: !ref <activation>
+        dnn_blocks: !ref <dnn_layers>
+        dnn_neurons: !ref <dnn_neurons>
+    - !new:torch.nn.LayerNorm
+        normalized_shape: !ref <dnn_neurons>
+
+# Conformer Encoder (Student)
+kernel_size: 31
+attention_type: "RoPEMHA"
+
+ConformerEncoder: !new:speechbrain.lobes.models.transformer.Conformer.ConformerEncoder
+    num_layers: 2
+    nhead: 8
+    d_ffn: !ref <dnn_neurons>
+    d_model: !ref <dnn_neurons>
+    dropout: 0.1
+    kernel_size: !ref <kernel_size>
+    attention_type: !ref <attention_type>
+
+# CTC output layer (Student)
+ctc_lin: !new:speechbrain.nnet.linear.Linear
+    input_size: !ref <dnn_neurons>
+    n_neurons: !ref <output_neurons>
+
+# LM weight for OTTC (Student)
+lm_weight: !new:speechbrain.nnet.linear.Linear
+    input_size: !ref <dnn_neurons>
+    n_neurons: 1
+
+# ============================================================================
+# Teacher Model Components (EMA updated)
+# ============================================================================
+# Note: Teacher uses identical architecture but separate weights
+# Teacher weights are updated via exponential moving average (EMA)
+
+perceived_ssl_teacher: !apply:trainer.AutoSSLoader.AutoSSLLoader
+    model_name: !ref <perceived_ssl_model>
+    freeze: True  # Teacher is always frozen during forward
+    freeze_feature_extractor: True
+    save_path: !ref <pretrained_models_path>
+    output_all_hiddens: False
+
+ssl_proj_teacher: !new:torch.nn.Sequential
+    - !new:speechbrain.lobes.models.VanillaNN.VanillaNN
+        input_shape: [null, null, !ref <ENCODER_DIM>]
+        activation: !ref <activation>
+        dnn_blocks: !ref <dnn_layers>
+        dnn_neurons: !ref <dnn_neurons>
+    - !new:torch.nn.LayerNorm
+        normalized_shape: !ref <dnn_neurons>
+
+ConformerEncoder_teacher: !new:speechbrain.lobes.models.transformer.Conformer.ConformerEncoder
+    num_layers: 2
+    nhead: 8
+    d_ffn: !ref <dnn_neurons>
+    d_model: !ref <dnn_neurons>
+    dropout: 0.1
+    kernel_size: !ref <kernel_size>
+    attention_type: !ref <attention_type>
+
+ctc_lin_teacher: !new:speechbrain.nnet.linear.Linear
+    input_size: !ref <dnn_neurons>
+    n_neurons: !ref <output_neurons>
+
+# ============================================================================
+# Loss Functions
+# ============================================================================
+blank_index: 0
+
+log_softmax: !new:speechbrain.nnet.activations.Softmax
+    apply_log: True
+
+# Use OTTC loss (same as your existing config)
+ctc_cost: !name:utils.losses.ot_loss.batched_ottc_loss_bucketized
+
+# Standard CTC for pseudo-label loss (on unlabeled data)
+ctc_cost_pseudo: !name:speechbrain.nnet.losses.ctc_loss
+    blank_index: !ref <blank_index>
+
+# ============================================================================
+# Augmentation (Critical for MPL - teacher sees clean, student sees augmented)
+# ============================================================================
+augmentation: !new:speechbrain.augment.time_domain.SpeedPerturb
+    orig_freq: !ref <sample_rate>
+    speeds: [95, 100, 105]
+
+# ============================================================================
+# Module Collections
+# ============================================================================
+model: !new:torch.nn.ModuleList
+    - [!ref <ssl_proj>, !ref <ConformerEncoder>, !ref <ctc_lin>, !ref <lm_weight>]
+
+modules:
+    perceived_ssl: !ref <perceived_ssl>
+    canonical_ssl: !ref <canonical_ssl>
+    ssl_proj: !ref <ssl_proj>
+    ConformerEncoder: !ref <ConformerEncoder>
+    ctc_lin: !ref <ctc_lin>
+    lm_weight: !ref <lm_weight>
+
+# Teacher modules (initialized from student, updated via EMA)
+modules_teacher:
+    perceived_ssl: !ref <perceived_ssl_teacher>
+    ssl_proj: !ref <ssl_proj_teacher>
+    ConformerEncoder: !ref <ConformerEncoder_teacher>
+    ctc_lin: !ref <ctc_lin_teacher>
+
+# ============================================================================
+# Optimizers
+# ============================================================================
+adam_opt_class: !name:torch.optim.Adam
+    lr: !ref <lr>
+
+pretrained_opt_class: !name:torch.optim.Adam
+    lr: !ref <lr_pretrained>
+
+# ============================================================================
+# Epoch Counter
+# ============================================================================
+epoch_counter: !new:speechbrain.utils.epoch_loop.EpochCounter
+    limit: !ref <number_of_epochs>
+
+# ============================================================================
+# Checkpointing
+# ============================================================================
+checkpointer: !new:speechbrain.utils.checkpoints.Checkpointer
+    checkpoints_dir: !ref <save_folder>
+    recoverables:
+        model: !ref <model>
+        perceived_ssl: !ref <perceived_ssl>
+        counter: !ref <epoch_counter>
+    allow_partial_load: True
+
+# ============================================================================
+# Logging
+# ============================================================================
+train_logger: !new:speechbrain.utils.train_logger.FileTrainLogger
+    save_file: !ref <train_log>
+
+# ============================================================================
+# Metrics
+# ============================================================================
+ctc_stats: !name:speechbrain.utils.metric_stats.MetricStats
+    metric: !name:speechbrain.nnet.losses.ctc_loss
+        blank_index: !ref <blank_index>
+        reduction: batch
+
+per_stats: !name:speechbrain.utils.metric_stats.ErrorRateStats
+
+# ============================================================================
+# Data loader options
+# ============================================================================
+train_dataloader_opts:
+    batch_size: !ref <batch_size>
+
+valid_dataloader_opts:
+    batch_size: !ref <batch_size>
+
+test_dataloader_opts:
+    batch_size: !ref <batch_size>
+
+# ============================================================================
+# Pretrainer (for loading pretrained model to start MPL)
+# ============================================================================
+pretrainer: !new:speechbrain.utils.parameter_transfer.Pretrainer
+    collect_in: !ref <save_folder>/
+    loadables:
+        perceived_ssl: !ref <perceived_ssl>
+        model: !ref <model>
+
+# ============================================================================
+# Decoding
+# ============================================================================
+decoding_function: !name:speechbrain.decoders.ctc_greedy_decode
+    blank_id: !ref <blank_index>

@@ -1,6 +1,18 @@
 # Hyperparameters toggles
 prefix: ""
 
+lab_enc_file: /home/m64000/work/IF-MDD/exp_l2arctic/wavlm_large_None_PhnMonoSSL_ottc_confEnc_kernal/save/label_encoder.txt
+ctc_loss_type: "ottc"  # Options: "ctc", "ottc", "crctc"
+encoder_type: "conformer"  # Options: None, "conformer", "zipformer", "rvq"
+
+wandb_project: "l2arctic"
+# Wandb Tags
+tags:
+    - PhnMonoSSL
+    - ottc
+    - ConformerEncoder
+    - l2arctic
+
 ## SSL features Selection
 pretrained_models_path: pretrained_models/
 # pretrained_models:
@@ -92,7 +104,7 @@ canonical_ssl: !apply:trainer.AutoSSLoader.AutoSSLLoader
 
 canonical_ssl_emb_layer: -1
 
-enc: !new:torch.nn.Sequential
+ssl_proj: !new:torch.nn.Sequential
   - !new:speechbrain.lobes.models.VanillaNN.VanillaNN
      input_shape: [null, null, !ref <ENCODER_DIM>]
      activation: !ref <activation>
@@ -101,8 +113,8 @@ enc: !new:torch.nn.Sequential
   - !new:torch.nn.LayerNorm
      normalized_shape: !ref <dnn_neurons>
 
-
 kernel_size: 31
+attention_type: "RoPEMHA" # "RelPosMHAXL"
 ConformerEncoder: !new:speechbrain.lobes.models.transformer.Conformer.ConformerEncoder
       num_layers: 2
       nhead: 8
@@ -110,6 +122,7 @@ ConformerEncoder: !new:speechbrain.lobes.models.transformer.Conformer.ConformerE
       d_model: !ref <dnn_neurons>
       dropout: 0.1
       kernel_size: !ref <kernel_size>
+      attention_type: !ref <attention_type>
 
 ctc_lin:  !new:speechbrain.nnet.linear.Linear
     input_size: !ref <dnn_neurons>
@@ -152,7 +165,7 @@ output_neurons: 44 # l2arctic: 40phns(sil)+err+blank + eos + bos =44
 blank_index: 0
 
 model: !new:torch.nn.ModuleList
-    - [!ref <enc>, !ref <ConformerEncoder>, !ref <ctc_lin>, !ref <lm_weight>]
+    - [!ref <ssl_proj>, !ref <ConformerEncoder>, !ref <ctc_lin>, !ref <lm_weight>]
 
 adam_opt_class: !name:torch.optim.Adam
     lr: !ref <lr>
@@ -201,11 +214,11 @@ __set_seed: !apply:torch.manual_seed [!ref <seed>]
 
 # training parameters
 number_of_epochs: 100
-batch_size: 16
+batch_size: 32
 lr: 0.0003
 sorting: ascending
 sample_rate: 16000
-gradient_accumulation: 2
+gradient_accumulation: 1
 lr_pretrained: 0.00001
 
 # Mix-Precision Training
@@ -224,7 +237,7 @@ valid_dataloader_opts:
     
 
 test_dataloader_opts:
-    batch_size: 1
+    batch_size: !ref <batch_size>
 
 pretrainer: !new:speechbrain.utils.parameter_transfer.Pretrainer
     collect_in: !ref <save_folder>/
@@ -234,7 +247,8 @@ pretrainer: !new:speechbrain.utils.parameter_transfer.Pretrainer
 
 encoder: !new:speechbrain.nnet.containers.LengthsCapableSequential
     perceived_ssl: !ref <perceived_ssl>
-    enc: !ref <enc>
+    ssl_proj: !ref <ssl_proj>
+    ConformerEncoder: !ref <ConformerEncoder>
     ctc_lin: !ref <ctc_lin>
     log_softmax: !ref <log_softmax>
 

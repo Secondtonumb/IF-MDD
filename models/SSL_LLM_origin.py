@@ -1032,101 +1032,101 @@ class SSL_LLM_origin(sb.Brain):
     #     scores += self.phoneme_bias
     #     return scores
     
-    def load_pretrained_components(self, checkpoint_path, components_to_load=None, freeze_loaded=True):
-        """
-        Load specific components from a pretrained model checkpoint
+    # def load_pretrained_components(self, checkpoint_path, components_to_load=None, freeze_loaded=True):
+    #     """
+    #     Load specific components from a pretrained model checkpoint
         
-        Args:
-            checkpoint_path (str): Path to the checkpoint directory or file
-            components_to_load (list): List of components to load. 
-                                     Options: ['ssl'] for SSL model only,
-                                              ['ssl', 'ctc_branch'] for SSL + CTC branch, mainly for CTC per
-                                     If None, loads ['ssl'] by default
-            freeze_loaded (bool): Whether to freeze the loaded components
-        """
-        if components_to_load is None:
-            components_to_load = ['ssl']  # Default: load SSL 
-            logger.info("No components specified for loading, defaulting to ['ssl']")
+    #     Args:
+    #         checkpoint_path (str): Path to the checkpoint directory or file
+    #         components_to_load (list): List of components to load. 
+    #                                  Options: ['ssl'] for SSL model only,
+    #                                           ['ssl', 'ctc_branch'] for SSL + CTC branch, mainly for CTC per
+    #                                  If None, loads ['ssl'] by default
+    #         freeze_loaded (bool): Whether to freeze the loaded components
+    #     """
+    #     if components_to_load is None:
+    #         components_to_load = ['ssl']  # Default: load SSL 
+    #         logger.info("No components specified for loading, defaulting to ['ssl']")
         
-        logger.info(f"\n🔄 Loading pretrained components from: {checkpoint_path}")
-        logger.info(f"   Components to load: {components_to_load}")
+    #     logger.info(f"\n🔄 Loading pretrained components from: {checkpoint_path}")
+    #     logger.info(f"   Components to load: {components_to_load}")
         
-        from speechbrain.utils.parameter_transfer import Pretrainer
+    #     from speechbrain.utils.parameter_transfer import Pretrainer
         
-        if "ctc_branch" in components_to_load:
-            logger.info("⏳ Loading pretrained SSL model and CTC branch from %s", checkpoint_path)
-            pretrainer = Pretrainer(
-                collect_in=self.hparams.pretrained_model_path, 
-                loadables={
-                    "perceived_ssl":     self.modules.perceived_ssl,
-                    "ctc_branch":     self.hparams.ctc_branch,
-                },
-                paths={
-                    "perceived_ssl":     "perceived_ssl.ckpt",
-                    "ctc_branch":   "model.ckpt",
-                },
-                custom_hooks={}
-            )
-        else:
-            logger.info("⏳ Loading pretrained SSL model only from %s", checkpoint_path)
-            pretrainer = Pretrainer(
-                collect_in=self.hparams.pretrained_model_path, 
-                loadables={
-                    "perceived_ssl":     self.modules.perceived_ssl,
-                },
-                paths={
-                    "perceived_ssl":     "perceived_ssl.ckpt",
-                },
-                custom_hooks={}
-            )
-        # DONE
-        paths = pretrainer.collect_files(default_source=self.hparams.pretrained_model_path)
+    #     if "ctc_branch" in components_to_load:
+    #         logger.info("⏳ Loading pretrained SSL model and CTC branch from %s", checkpoint_path)
+    #         pretrainer = Pretrainer(
+    #             collect_in=self.hparams.pretrained_model_path, 
+    #             loadables={
+    #                 "perceived_ssl":     self.modules.perceived_ssl,
+    #                 "ctc_branch":     self.hparams.ctc_branch,
+    #             },
+    #             paths={
+    #                 "perceived_ssl":     "perceived_ssl.ckpt",
+    #                 "ctc_branch":   "model.ckpt",
+    #             },
+    #             custom_hooks={}
+    #         )
+    #     else:
+    #         logger.info("⏳ Loading pretrained SSL model only from %s", checkpoint_path)
+    #         pretrainer = Pretrainer(
+    #             collect_in=self.hparams.pretrained_model_path, 
+    #             loadables={
+    #                 "perceived_ssl":     self.modules.perceived_ssl,
+    #             },
+    #             paths={
+    #                 "perceived_ssl":     "perceived_ssl.ckpt",
+    #             },
+    #             custom_hooks={}
+    #         )
+    #     # DONE
+    #     paths = pretrainer.collect_files(default_source=self.hparams.pretrained_model_path)
 
-        # Check SSL
-        # before = self.modules.perceived_ssl.state_dict()["model.encoder.layers.23.final_layer_norm.weight"]
-        # Check CTC head
-        # before = self.hparams.ctc_branch[1].state_dict()["w.weight"]
-        # self.modules.ctc_lin.state_dict()['w.weight']
+    #     # Check SSL
+    #     # before = self.modules.perceived_ssl.state_dict()["model.encoder.layers.23.final_layer_norm.weight"]
+    #     # Check CTC head
+    #     # before = self.hparams.ctc_branch[1].state_dict()["w.weight"]
+    #     # self.modules.ctc_lin.state_dict()['w.weight']
         
-        pretrainer.load_collected()
+    #     pretrainer.load_collected()
         
-        # Freeze loaded components if requested
-        if freeze_loaded:
-            for component in components_to_load:
-                if component == 'ssl':
-                    for param in self.modules.perceived_ssl.parameters():
-                        param.requires_grad = False
-                    self.ssl_frozen = True
-                    logger.info("   🔒 SSL model frozen")
+    #     # Freeze loaded components if requested
+    #     if freeze_loaded:
+    #         for component in components_to_load:
+    #             if component == 'ssl':
+    #                 for param in self.modules.perceived_ssl.parameters():
+    #                     param.requires_grad = False
+    #                 self.ssl_frozen = True
+    #                 logger.info("   🔒 SSL model frozen")
                     
-                elif component == 'ctc_branch':
-                    for param in self.hparams.ctc_branch.parameters():
-                        param.requires_grad = False
-                    self.ctc_branch_frozen = True
-                    logger.info("   🔒 CTC branch frozen")
+    #             elif component == 'ctc_branch':
+    #                 for param in self.hparams.ctc_branch.parameters():
+    #                     param.requires_grad = False
+    #                 self.ctc_branch_frozen = True
+    #                 logger.info("   🔒 CTC branch frozen")
         
-                elif component == 'encoder':
-                    for param in self.modules.TransASR.encoder.parameters():
-                        param.requires_grad = False
-                    if hasattr(self.modules.TransASR, 'custom_src_module'):
-                        for param in self.modules.TransASR.custom_src_module.parameters():
-                            param.requires_grad = False
-                    self.encoder_frozen = True
-                    logger.info("   🔒 Encoder frozen")
+    #             elif component == 'encoder':
+    #                 for param in self.modules.TransASR.encoder.parameters():
+    #                     param.requires_grad = False
+    #                 if hasattr(self.modules.TransASR, 'custom_src_module'):
+    #                     for param in self.modules.TransASR.custom_src_module.parameters():
+    #                         param.requires_grad = False
+    #                 self.encoder_frozen = True
+    #                 logger.info("   🔒 Encoder frozen")
                     
-                elif component == 'enc':
-                    if hasattr(self.modules, 'enc'):
-                        for param in self.modules.enc.parameters():
-                            param.requires_grad = False
-                        print("   🔒 Encoder projection frozen")
+    #             elif component == 'enc':
+    #                 if hasattr(self.modules, 'enc'):
+    #                     for param in self.modules.enc.parameters():
+    #                         param.requires_grad = False
+    #                     print("   🔒 Encoder projection frozen")
                         
-                elif component == 'ctc_head':
-                    for param in self.modules.ctc_lin.parameters():
-                        param.requires_grad = False
-                    logger.info("   🔒 CTC head frozen")
+    #             elif component == 'ctc_head':
+    #                 for param in self.modules.ctc_lin.parameters():
+    #                     param.requires_grad = False
+    #                 logger.info("   🔒 CTC head frozen")
     
-        # print(f"   ✅ Successfully loaded components: {loaded_components}")
-        # return loaded_components
+    #     # print(f"   ✅ Successfully loaded components: {loaded_components}")
+    #     # return loaded_components
 
     def on_fit_start(self):
         """Gets called at the beginning of ``fit()``, on multiple processes

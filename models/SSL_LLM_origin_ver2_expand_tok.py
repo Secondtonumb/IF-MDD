@@ -15,21 +15,142 @@ try:
     from peft import PeftModel, get_peft_model_state_dict, set_peft_model_state_dict
 except ImportError:
     PeftModel = None
+    get_peft_model_state_dict = None
+    set_peft_model_state_dict = None
 
+# Import SpeechBrain checkpoint utilities for registering hooks
+from speechbrain.utils.checkpoints import register_checkpoint_hooks, mark_as_saver, mark_as_loader
+
+
+@register_checkpoint_hooks
 class PeftAdapterRecoverable:
-    """Wrapper to save ONLY the adapter weights of a PeftModel in SpeechBrain checkpoints"""
+    """
+    Wrapper to save ONLY the adapter weights of a PeftModel in SpeechBrain checkpoints.
+    
+    This is crucial for efficient checkpointing when fine-tuning large LLMs with LoRA/Adapter:
+    - Base LLM weights (~8GB+) are NOT saved each epoch
+    - Only adapter weights (~10-100MB) are saved
+    - Loading: Base LLM loads once, then adapter weights are merged
+    
+    Usage in YAML:
+        LLM: !new:peft.PeftModel
+            base_model: !ref <base_llm>
+            peft_config: !ref <lora_config>
+    
+    The checkpointer will automatically wrap PeftModel objects with this class.
+    """
     def __init__(self, model):
-        self.model = model
+        """
+        Args:
+            model: A PeftModel instance (or DDP-wrapped PeftModel)
+        """
+        # Handle DDP wrapper
+        if hasattr(model, 'module'):
+            self.model = model.module
+            self._is_ddp = True
+        else:
+            self.model = model
+            self._is_ddp = False
+        self._original_wrapper = model  # Keep reference to original (may be DDP)
     
-    def state_dict(self):
-        return get_peft_model_state_dict(self.model)
+    @mark_as_saver
+    def save(self, path):
+        """Save ONLY the adapter state dict (not full model)"""
+        if get_peft_model_state_dict is None:
+            raise ImportError("peft library is required for PeftAdapterRecoverable")
+        state_dict = get_peft_model_state_dict(self.model)
+        torch.save(state_dict, path)
     
-    def load_state_dict(self, state_dict):
-        # set_peft_model_state_dict handles loose matching nicely usually
+    @mark_as_loader
+    def load(self, path, end_of_epoch=False, device=None):
+        """Load adapter weights into the PeftModel"""
+        if set_peft_model_state_dict is None:
+            raise ImportError("peft library is required for PeftAdapterRecoverable")
+        del end_of_epoch  # Unused
+        state_dict = torch.load(path, map_location=device)
         set_peft_model_state_dict(self.model, state_dict)
     
     def to(self, device):
-        self.model.to(device)
+        """Move model to device"""
+        self._original_wrapper.to(device)
+        return self
+    
+    def __getattr__(self, name):
+        """Proxy attribute access to underlying model for compatibility"""
+        if name in ['model', '_is_ddp', '_original_wrapper']:
+            return object.__getattribute__(self, name)
+        return getattr(self._original_wrapper, name)
+
+
+@register_checkpoint_hooks
+class LLMAdapterOnlyRecoverable:
+    """
+    Alternative wrapper for when you want explicit control over what gets saved.
+    
+    Use this when:
+    1. LLM is NOT wrapped with PeftModel but has custom adapter modules
+    2. You want to save only specific layers (e.g., projector, adapter layers)
+    
+    Example usage in init_optimizers:
+        self.checkpointer.add_recoverable(
+            "llm_adapters",
+            LLMAdapterOnlyRecoverable(
+                self.modules.LLM,
+                adapter_names=["lora", "adapter"]  # Name patterns to match
+            )
+        )
+    """
+    def __init__(self, llm_model, adapter_names=None, save_patterns=None):
+        """
+        Args:
+            llm_model: The LLM module
+            adapter_names: List of substring patterns to match adapter layer names
+                          e.g., ["lora", "adapter", "projector"]
+            save_patterns: Alternative regex patterns for matching
+        """
+        self.llm_model = llm_model
+        self.adapter_names = adapter_names or ["lora", "adapter"]
+        self.save_patterns = save_patterns
+        
+    def _get_adapter_params(self):
+        """Get state dict containing only adapter parameters"""
+        adapter_state = {}
+        
+        # Handle DDP
+        model = self.llm_model.module if hasattr(self.llm_model, 'module') else self.llm_model
+        
+        for name, param in model.named_parameters():
+            # Check if this parameter belongs to an adapter
+            is_adapter = any(adapter_name in name.lower() for adapter_name in self.adapter_names)
+            if is_adapter:
+                adapter_state[name] = param.data.clone()
+        
+        return adapter_state
+    
+    @mark_as_saver
+    def save(self, path):
+        """Save only adapter parameters"""
+        state_dict = self._get_adapter_params()
+        torch.save(state_dict, path)
+    
+    @mark_as_loader
+    def load(self, path, end_of_epoch=False, device=None):
+        """Load adapter parameters"""
+        del end_of_epoch  # Unused
+        state_dict = torch.load(path, map_location=device)
+        
+        model = self.llm_model.module if hasattr(self.llm_model, 'module') else self.llm_model
+        
+        current_state = model.state_dict()
+        for name, param in state_dict.items():
+            if name in current_state:
+                current_state[name] = param
+        
+        model.load_state_dict(current_state, strict=False)
+    
+    def to(self, device):
+        self.llm_model.to(device)
+        return self
 
 import logging
 logger = logging.getLogger(__name__)
@@ -45,8 +166,426 @@ def phn_list_to_seq(batch):
     for phn_list in batch:
         result.append(" ".join(x for x in phn_list))
     return result
+
+
+class PhonemeTokenMapper:
+    """
+    Maps phoneme IDs (from CTC label_encoder) to LLM reserved special tokens.
     
-class SSL_LLM_origin_ver2(sb.Brain):
+    This avoids semantic corruption from directly tokenizing phoneme text with LLM tokenizer.
+    Instead, we use LLM's reserved special tokens as a dedicated phoneme vocabulary.
+    
+    Mapping Strategy:
+    - Phoneme ID 0 (blank) -> <|reserved_special_token_0|>
+    - Phoneme ID 1 -> <|reserved_special_token_1|>
+    - ...
+    - Phoneme ID N -> <|reserved_special_token_N|>
+    
+    Smart Initialization:
+    - New phoneme tokens are initialized with embeddings from similar English characters
+    - e.g., <|p_aa|> inherits from 'a', <|p_sh|> inherits from 's', etc.
+    - This gives the model a "semantic hint" to start learning from
+    
+    Special handling:
+    - BOS/EOS use LLM's native BOS/EOS tokens
+    - Reserved tokens 0-99 are available in Llama 3
+    """
+    
+    def __init__(self, label_encoder, llm_tokenizer, llm_model=None, device='cuda', 
+                 smart_init=True, noise_scale=0.01):
+        """
+        Initialize the phoneme-to-LLM-token mapper.
+        
+        Args:
+            label_encoder: SpeechBrain label encoder with phoneme vocabulary
+            llm_tokenizer: LLM tokenizer (e.g., Llama 3 tokenizer)
+            llm_model: LLM model (required for smart initialization of embeddings)
+            device: torch device
+            smart_init: Whether to use smart embedding initialization
+            noise_scale: Scale of noise to add during smart initialization (default: 0.01)
+        """
+        self.label_encoder = label_encoder
+        self.tokenizer = llm_tokenizer
+        self.llm_model = llm_model
+        self.device = device
+        self.smart_init = smart_init
+        self.noise_scale = noise_scale
+        
+        # Build mappings
+        self._build_mappings()
+        
+        # Apply smart initialization if model is provided
+        if smart_init and llm_model is not None:
+            self._apply_smart_initialization()
+    
+    def _infer_reference_char(self, phoneme_name: str) -> str:
+        """
+        Infer a reference English text for a phoneme based on its name.
+        
+        Strategy: Use the phoneme name itself (e.g., 'aa', 'sh') as the reference text.
+        The LLM tokenizer will find the best matching token for this text.
+        
+        Args:
+            phoneme_name: The phoneme name from label_encoder (e.g., 'aa', 'sh', 'ng')
+            
+        Returns:
+            A reference string to use for embedding initialization
+        """
+        phn = phoneme_name.lower().strip()
+        
+        # Remove stress markers (0, 1, 2) if present (e.g., 'aa0' -> 'aa')
+        phn_base = phn.rstrip('012')
+        
+        # Special tokens -> space (neutral embedding)
+        if phn in ['<blank>', 'sil', 'sp', 'spn', '<unk>', 'SIL', 'SPN', '<pad>']:
+            return ' '
+        
+        # Skip BOS/EOS - they use LLM native tokens, no need for smart init
+        if phn in ['<bos>', '<eos>']:
+            return None
+        
+        # Use the phoneme name itself as reference text
+        # The tokenizer will find the closest matching embedding
+        return phn_base if phn_base else phn
+        
+    def _build_mappings(self):
+        """Build bidirectional mappings between phoneme IDs and LLM token IDs."""
+        
+        # Get phoneme vocabulary from label_encoder
+        # label_encoder.lab2ind: {'aa': 1, 'sil': 2, ...}
+        # label_encoder.ind2lab: {1: 'aa', 2: 'sil', ...}
+        
+        self.num_phonemes = len(self.label_encoder.lab2ind)
+        logger.info(f"[PhonemeTokenMapper] Building mappings for {self.num_phonemes} phonemes")
+        
+        # Phoneme ID -> LLM Token ID
+        self.phn_to_llm = {}
+        # LLM Token ID -> Phoneme ID  
+        self.llm_to_phn = {}
+        # LLM Token ID -> Phoneme Name (for readable decoding)
+        self.llm_to_phn_name = {}
+        # Phoneme Name -> LLM Token ID
+        self.phn_name_to_llm = {}
+        
+        # Reserve token 0-2 for special purposes
+        # Token 0: <blank> (CTC blank)
+        # Token 1: <bos> equivalent (use LLM's actual BOS)
+        # Token 2: <eos> equivalent (use LLM's actual EOS)
+        
+        # Get reserved token IDs from tokenizer
+        # Llama 3 format: <|reserved_special_token_N|>
+        reserved_token_offset = 0  # Start from reserved_special_token_0
+        
+        for phn_id in range(self.num_phonemes):
+            # Get phoneme name
+            phn_name = self.label_encoder.ind2lab.get(phn_id, f"UNK_{phn_id}")
+            
+            # Skip BOS/EOS - they use LLM's native tokens
+            if phn_name in ['<bos>', '<eos>']:
+                if phn_name == '<bos>':
+                    llm_token_id = self.tokenizer.bos_token_id
+                else:
+                    llm_token_id = self.tokenizer.eos_token_id
+            else:
+                # Map to reserved special token
+                reserved_token_name = f"<|reserved_special_token_{reserved_token_offset}|>"
+                
+                # Get token ID for this reserved token
+                llm_token_id = self.tokenizer.convert_tokens_to_ids(reserved_token_name)
+                
+                if llm_token_id == self.tokenizer.unk_token_id:
+                    logger.warning(f"[PhonemeTokenMapper] Reserved token {reserved_token_name} not found!")
+                    # Fallback: use offset directly (risky but better than crash)
+                    llm_token_id = 128000 + reserved_token_offset  # Llama 3 reserved tokens start around here
+                
+                reserved_token_offset += 1
+            
+            # Store mappings
+            self.phn_to_llm[phn_id] = llm_token_id
+            self.llm_to_phn[llm_token_id] = phn_id
+            self.llm_to_phn_name[llm_token_id] = phn_name
+            self.phn_name_to_llm[phn_name] = llm_token_id
+        
+        # Store special token IDs for convenience
+        self.bos_token_id = self.tokenizer.bos_token_id
+        self.eos_token_id = self.tokenizer.eos_token_id
+        self.pad_token_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else 0
+        
+        # Get blank token ID (usually phoneme ID 0)
+        blank_phn_id = self.label_encoder.lab2ind.get('<blank>', 0)
+        self.blank_llm_token_id = self.phn_to_llm.get(blank_phn_id, self.phn_to_llm[0])
+        
+        logger.info(f"[PhonemeTokenMapper] Mapping complete:")
+        logger.info(f"   - Total phonemes: {self.num_phonemes}")
+        logger.info(f"   - Reserved tokens used: {reserved_token_offset}")
+        logger.info(f"   - BOS token ID: {self.bos_token_id}")
+        logger.info(f"   - EOS token ID: {self.eos_token_id}")
+        logger.info(f"   - Blank token ID: {self.blank_llm_token_id}")
+        
+        # Print first few mappings for verification
+        logger.info(f"   - Sample mappings:")
+        for i, (phn_id, llm_id) in enumerate(list(self.phn_to_llm.items())[:68]):
+            phn_name = self.label_encoder.ind2lab.get(phn_id, f"UNK_{phn_id}")
+            logger.info(f"     {phn_name} (id={phn_id}) -> LLM token {llm_id}")
+    
+    def _apply_smart_initialization(self):
+        """
+        Apply smart initialization to phoneme token embeddings.
+        
+        For each phoneme, find a reference text (the phoneme name itself),
+        get its embedding from the LLM, and use it to initialize the 
+        reserved special token's embedding (with small noise added).
+        
+        This gives the model a "semantic hint" so it doesn't start from random.
+        """
+        if self.llm_model is None:
+            logger.warning("[PhonemeTokenMapper] No LLM model provided, skipping smart initialization")
+            return
+        
+        # Handle DDP wrapper
+        model = self.llm_model
+        if hasattr(model, 'module'):
+            model = model.module
+        
+        # Get embedding layer
+        embeddings = model.get_input_embeddings().weight.data
+        embed_dim = embeddings.size(1)
+        
+        initialized_count = 0
+        skipped_count = 0
+        
+        logger.info(f"[PhonemeTokenMapper] Applying smart initialization...")
+        
+        with torch.no_grad():
+            for phn_id in range(self.num_phonemes):
+                phn_name = self.label_encoder.ind2lab.get(phn_id, f"UNK_{phn_id}")
+                llm_token_id = self.phn_to_llm.get(phn_id)
+                
+                if llm_token_id is None:
+                    skipped_count += 1
+                    continue
+                
+                # Skip BOS/EOS - they already have meaningful embeddings
+                if phn_name in ['<bos>', '<eos>']:
+                    skipped_count += 1
+                    continue
+                
+                # Get reference text for this phoneme
+                ref_text = self._infer_reference_char(phn_name)
+                if ref_text is None:
+                    skipped_count += 1
+                    continue
+                
+                # Tokenize reference text to get reference token ID
+                ref_tokens = self.tokenizer(ref_text, add_special_tokens=False)['input_ids']
+                
+                if len(ref_tokens) == 0:
+                    # If tokenization fails, use space
+                    ref_tokens = self.tokenizer(' ', add_special_tokens=False)['input_ids']
+                
+                # Use first token's embedding as reference
+                ref_token_id = ref_tokens[0]
+                
+                if ref_token_id >= embeddings.size(0) or llm_token_id >= embeddings.size(0):
+                    logger.warning(f"[SmartInit] Token ID out of range: ref={ref_token_id}, phn={llm_token_id}")
+                    skipped_count += 1
+                    continue
+                
+                # Get reference embedding
+                ref_embed = embeddings[ref_token_id].clone()
+                
+                # Add small noise to avoid identical embeddings
+                noise = torch.randn_like(ref_embed) * self.noise_scale
+                
+                # Initialize the phoneme token's embedding
+                embeddings[llm_token_id] = ref_embed + noise
+                
+                initialized_count += 1
+                
+                # Log first few initializations for debugging
+                if initialized_count <= 10:
+                    logger.info(f"   {phn_name} -> '{ref_text}' (token {ref_token_id}) -> reserved token {llm_token_id}")
+        
+        logger.info(f"[PhonemeTokenMapper] Smart initialization complete:")
+        logger.info(f"   - Initialized: {initialized_count} phoneme tokens")
+        logger.info(f"   - Skipped: {skipped_count} tokens (BOS/EOS/special)")
+        logger.info(f"   - Noise scale: {self.noise_scale}")
+    
+    def encode_phoneme_ids(self, phoneme_ids: torch.Tensor) -> torch.Tensor:
+        """
+        Convert phoneme IDs (from label_encoder) to LLM token IDs.
+        
+        Args:
+            phoneme_ids: Tensor of phoneme IDs [B, L] or [L]
+            
+        Returns:
+            Tensor of LLM token IDs with same shape
+        """
+        # Handle both batched and unbatched input
+        input_shape = phoneme_ids.shape
+        flat_ids = phoneme_ids.flatten().tolist()
+        
+        # Map each phoneme ID to LLM token ID
+        llm_ids = [self.phn_to_llm.get(int(pid), self.blank_llm_token_id) for pid in flat_ids]
+        
+        # Convert back to tensor with original shape
+        result = torch.tensor(llm_ids, dtype=torch.long, device=phoneme_ids.device)
+        return result.view(input_shape)
+    
+    def encode_phoneme_list(self, phoneme_list: list) -> torch.Tensor:
+        """
+        Convert a list of phoneme names to LLM token IDs.
+        
+        Args:
+            phoneme_list: List of phoneme names, e.g., ["sil", "aa", "b", "sil"]
+            
+        Returns:
+            Tensor of LLM token IDs [L]
+        """
+        llm_ids = []
+        for phn_name in phoneme_list:
+            if phn_name in self.phn_name_to_llm:
+                llm_ids.append(self.phn_name_to_llm[phn_name])
+            else:
+                # Unknown phoneme - use blank
+                logger.warning(f"[PhonemeTokenMapper] Unknown phoneme '{phn_name}', using blank")
+                llm_ids.append(self.blank_llm_token_id)
+        
+        return torch.tensor(llm_ids, dtype=torch.long, device=self.device)
+    
+    def encode_batch_phoneme_lists(self, batch_phoneme_lists: list, return_mask: bool = True):
+        """
+        Encode a batch of phoneme lists to padded LLM token IDs.
+        
+        Args:
+            batch_phoneme_lists: List of phoneme lists, e.g., [["sil", "aa"], ["sil", "b", "aa"]]
+            return_mask: Whether to return attention mask
+            
+        Returns:
+            token_ids: Padded tensor [B, max_len]
+            attention_mask: Mask tensor [B, max_len] (if return_mask=True)
+        """
+        # Encode each sequence
+        encoded_seqs = [self.encode_phoneme_list(phn_list) for phn_list in batch_phoneme_lists]
+        
+        # Find max length
+        max_len = max(len(seq) for seq in encoded_seqs)
+        batch_size = len(encoded_seqs)
+        
+        # Pad sequences
+        padded_ids = torch.full((batch_size, max_len), self.pad_token_id, dtype=torch.long, device=self.device)
+        attention_mask = torch.zeros((batch_size, max_len), dtype=torch.long, device=self.device)
+        
+        for i, seq in enumerate(encoded_seqs):
+            seq_len = len(seq)
+            padded_ids[i, :seq_len] = seq
+            attention_mask[i, :seq_len] = 1
+        
+        if return_mask:
+            return padded_ids, attention_mask
+        return padded_ids
+    
+    def decode_llm_ids(self, llm_ids: torch.Tensor, skip_special: bool = True) -> list:
+        """
+        Convert LLM token IDs back to phoneme names.
+        
+        Args:
+            llm_ids: Tensor of LLM token IDs [B, L] or [L]
+            skip_special: Whether to skip BOS/EOS/PAD tokens
+            
+        Returns:
+            List of phoneme name lists (if batched) or single list
+        """
+        is_batched = llm_ids.dim() == 2
+        
+        if not is_batched:
+            llm_ids = llm_ids.unsqueeze(0)
+        
+        batch_results = []
+        
+        for seq in llm_ids:
+            phonemes = []
+            for token_id in seq.tolist():
+                # Skip special tokens if requested
+                if skip_special:
+                    if token_id in [self.bos_token_id, self.eos_token_id, self.pad_token_id]:
+                        continue
+                
+                # Map back to phoneme name
+                if token_id in self.llm_to_phn_name:
+                    phn_name = self.llm_to_phn_name[token_id]
+                    # Skip blank in output
+                    if phn_name != '<blank>':
+                        phonemes.append(phn_name)
+                else:
+                    # Unknown token - might be from LLM generation outside phoneme vocab
+                    # Try to decode with tokenizer for debugging
+                    decoded = self.tokenizer.decode([token_id])
+                    logger.debug(f"[PhonemeTokenMapper] Unknown LLM token {token_id} -> '{decoded}'")
+            
+            batch_results.append(phonemes)
+        
+        if not is_batched:
+            return batch_results[0]
+        return batch_results
+    
+    def decode_to_string(self, llm_ids: torch.Tensor, skip_special: bool = True) -> list:
+        """
+        Convert LLM token IDs to space-separated phoneme strings.
+        
+        Args:
+            llm_ids: Tensor of LLM token IDs [B, L] or [L]
+            skip_special: Whether to skip BOS/EOS/PAD tokens
+            
+        Returns:
+            List of phoneme strings (if batched) or single string
+        """
+        phoneme_lists = self.decode_llm_ids(llm_ids, skip_special=skip_special)
+        
+        if isinstance(phoneme_lists[0], list):
+            # Batched
+            return [" ".join(phn_list) for phn_list in phoneme_lists]
+        else:
+            # Single sequence
+            return " ".join(phoneme_lists)
+    
+    def get_valid_token_ids(self) -> list:
+        """
+        Get list of all valid LLM token IDs for phoneme generation.
+        Useful for constrained decoding.
+        
+        Returns:
+            List of valid LLM token IDs
+        """
+        valid_ids = list(self.llm_to_phn.keys())
+        # Also include BOS/EOS
+        valid_ids.extend([self.bos_token_id, self.eos_token_id])
+        return list(set(valid_ids))
+    
+    def create_phoneme_bias(self, vocab_size: int = None) -> torch.Tensor:
+        """
+        Create a bias tensor for constrained generation.
+        Valid phoneme tokens get 0 bias, others get -inf.
+        
+        Args:
+            vocab_size: Size of LLM vocabulary (auto-detected if None)
+            
+        Returns:
+            Bias tensor [vocab_size]
+        """
+        if vocab_size is None:
+            vocab_size = len(self.tokenizer)
+        
+        bias = torch.full((vocab_size,), float('-inf'), device=self.device)
+        
+        for llm_token_id in self.get_valid_token_ids():
+            if 0 <= llm_token_id < vocab_size:
+                bias[llm_token_id] = 0.0
+        
+        return bias
+
+
+class SSL_LLM_origin_ver2_expand_tok(sb.Brain):
     def __init__(self, *args, patience=20, **kwargs):
         super().__init__(*args, **kwargs)
         self.patience = patience
@@ -103,13 +642,37 @@ class SSL_LLM_origin_ver2(sb.Brain):
         embed_fn = llm_handle.get_input_embeddings()
 
         if not hasattr(self, "llm_norm") or self.llm_norm is None:
-            # try:
-            #     hidden_size = self.modules.LLM.config.hidden_size
-            # except:
-            #     hidden_size = self.modules.LLM.config.text_config.hidden_size
             hidden_size = self.hparams.LLM_DIM
             self.llm_norm = nn.LayerNorm(hidden_size).to(self.device)
             print(f"[Lazy Init] Created llm_norm with hidden_size={hidden_size}")
+        
+        # ===== Initialize PhonemeTokenMapper =====
+        # This maps phoneme IDs from label_encoder to LLM reserved tokens
+        # to avoid semantic corruption from directly tokenizing phoneme text
+        # import pdb; pdb.set_trace()
+        if not hasattr(self, "phoneme_mapper") or self.phoneme_mapper is None:
+            if hasattr(self, "label_encoder") and self.label_encoder is not None:
+                # Get smart_init setting from hparams (default: True)
+                smart_init = getattr(self.hparams, "phoneme_smart_init", True)
+                noise_scale = getattr(self.hparams, "phoneme_init_noise", 0.01)
+                
+                self.phoneme_mapper = PhonemeTokenMapper(
+                    label_encoder=self.label_encoder,
+                    llm_tokenizer=self.hparams.LLM_tokenizer,
+                    llm_model=llm_handle,  # Pass LLM for smart initialization
+                    device=self.device,
+                    smart_init=smart_init,
+                    noise_scale=noise_scale
+                )
+                print(f"[Lazy Init] Created PhonemeTokenMapper with {self.phoneme_mapper.num_phonemes} phonemes")
+                print(f"[Lazy Init] Smart init: {smart_init}, noise_scale: {noise_scale}")
+                
+                # Update phoneme_bias to use mapper's valid tokens
+                self.phoneme_bias = self.phoneme_mapper.create_phoneme_bias()
+                print(f"[Lazy Init] Updated phoneme_bias with {len(self.phoneme_mapper.get_valid_token_ids())} valid tokens")
+            else:
+                logger.warning("[Lazy Init] label_encoder not available, PhonemeTokenMapper not initialized")
+                self.phoneme_mapper = None
         
         # Initialize prompt_embed based on prompt_type if needed
         use_prompt = getattr(self.hparams, "use_prompt", False)
@@ -186,61 +749,6 @@ class SSL_LLM_origin_ver2(sb.Brain):
                 self.prompt_embed = torch.cat([self.prompt_prefix_embed, self.prompt_suffix_embed], dim=0)
                 print(f"[Lazy Init] Generated Llama 3 Prompt via Template.")
 
-    def _build_input_embeddings(self, B, Z, phn_embed, SEP_embed, BOS_embed, EOS_embed, 
-                                has_split_prompt=False, prompt_embed_batch=None):
-        """Build input embedding sequence for LLM forward pass.
-        
-        Consolidates all embedding concatenation logic to handle different prompt scenarios:
-        1. Split prompt: [prefix] [speech] [suffix] [phonemes] [EOS]
-        2. With prompt: [prompt] [SEP] [speech] [BOS] [phonemes] [EOS]
-        3. Without prompt: [SEP] [speech] [BOS] [phonemes] [EOS]
-        
-        Args:
-            B: Batch size
-            Z: Speech embeddings [B, Ts, H]
-            phn_embed: Phoneme embeddings [B, L_phn, H]
-            SEP_embed: SEP token embedding [B, 1, H]
-            BOS_embed: BOS token embedding [B, 1, H]
-            EOS_embed: EOS token embedding [B, 1, H]
-            has_split_prompt: Whether using split prompt (prefix/suffix)
-            prompt_embed_batch: Prompt embeddings [B, P, H] or None
-            
-        Returns:
-            inputs_embeds: Concatenated input embeddings [B, seq_len, H]
-        """
-        if has_split_prompt:
-            # [prefix] [speech] [suffix] [phonemes] [EOS]
-            prefix_embed = self.prompt_prefix_embed
-            suffix_embed = self.prompt_suffix_embed
-            inputs_embeds = torch.cat([
-                prefix_embed.unsqueeze(0).expand(B, -1, -1),
-                Z,
-                suffix_embed.unsqueeze(0).expand(B, -1, -1),
-                phn_embed,
-                EOS_embed
-            ], dim=1)
-        elif prompt_embed_batch is not None:
-            # [prompt] [SEP] [speech] [BOS] [phonemes] [EOS]
-            inputs_embeds = torch.cat([
-                prompt_embed_batch,  # [B, P, H]
-                SEP_embed,          # [B, 1, H]
-                Z,                   # [B, Ts, H]
-                BOS_embed,          # [B, 1, H]
-                phn_embed,          # [B, L_phn, H]
-                EOS_embed           # [B, 1, H]
-            ], dim=1)  # [B, P+1+Ts+1+L_phn+1, H]
-        else:
-            # [SEP] [speech] [BOS] [phonemes] [EOS]
-            inputs_embeds = torch.cat([
-                SEP_embed,          # [B, 1, H]
-                Z,                   # [B, Ts, H]
-                BOS_embed,          # [B, 1, H]
-                phn_embed,          # [B, L_phn, H]
-                EOS_embed           # [B, 1, H]
-            ], dim=1)  # [B, 1+Ts+1+L_phn+1, H]
-        
-        return inputs_embeds
-
     def compute_forward(self, batch, stage):
         """Given an input batch it computes the model forward pass.
         
@@ -254,7 +762,7 @@ class SSL_LLM_origin_ver2(sb.Brain):
         """
         # Ensure critical components are initialized (for inference compatibility)
         self._ensure_initialized()
-        
+        # import pdb; pdb.set_trace()
         batch = batch.to(self.device)
         wavs, wav_lens = batch.sig
         
@@ -263,7 +771,7 @@ class SSL_LLM_origin_ver2(sb.Brain):
 
         # AudioEncoder + Projector
         wav_feats = self.modules.perceived_ssl(wavs)  # [B, T, 1024]
-        
+        import pdb
         # AudioEncoder
         try:
             # with Conformer it give extra
@@ -285,27 +793,44 @@ class SSL_LLM_origin_ver2(sb.Brain):
         tok = self.hparams.LLM_tokenizer
         embed_fn = self.modules.LLM.get_input_embeddings()
         
-        # ===== Tokenize phoneme sequences =====
-        phn_seq = phn_list_to_seq(batch.phn_list_target)
-        phn_tokens = tok(phn_seq, return_tensors="pt", padding=True, add_special_tokens=False).to(device)
-        # phn_tokens["input_ids"]: [B, L_phn]
-        # phn_tokens["attention_mask"]: [B, L_phn]
-        # tok.batch_decode(phn_tokens["input_ids"], skip_special_tokens=False)
+        # ===== Tokenize phoneme sequences using PhonemeTokenMapper =====
+        # This maps phoneme names to LLM reserved tokens to avoid semantic corruption
+        if hasattr(self, "phoneme_mapper") and self.phoneme_mapper is not None:
+            # Use PhonemeTokenMapper for proper phoneme -> reserved token mapping
+            # import pdb;  pdb.set_trace()
+            phn_ids, phn_mask = self.phoneme_mapper.encode_batch_phoneme_lists(
+                batch.phn_list_target, return_mask=True
+            )
+            # import pdb; pdb.set_trace()
+            # phn_ids: [B, L_phn] - LLM reserved token IDs
+            # phn_mask: [B, L_phn] - attention mask (1 for valid, 0 for padding)
+            
+            # Get special token IDs from mapper
+            BOS_ID = self.phoneme_mapper.bos_token_id
+            EOS_ID = self.phoneme_mapper.eos_token_id
+            PAD_ID = self.phoneme_mapper.pad_token_id
+        else:
+            # Fallback: use original tokenizer (not recommended, will cause semantic issues)
+            logger.warning("[compute_forward] PhonemeTokenMapper not available, using raw tokenizer (may cause issues)")
+            phn_seq = phn_list_to_seq(batch.phn_list_target)
+            phn_tokens = tok(phn_seq, return_tensors="pt", padding=True, add_special_tokens=False).to(device)
+            phn_ids = phn_tokens["input_ids"]
+            phn_mask = phn_tokens["attention_mask"]
+            BOS_ID = tok.bos_token_id
+            EOS_ID = tok.eos_token_id
+            PAD_ID = tok.pad_token_id if tok.pad_token_id is not None else 0
         
-        phn_ids = phn_tokens["input_ids"]
-        phn_mask = phn_tokens["attention_mask"]
         L_phn = phn_ids.size(1)
         
         # ===== Prepare special tokens =====
-        BOS_ID = tok.bos_token_id
-        EOS_ID = tok.eos_token_id
-        PAD_ID = tok.pad_token_id if tok.pad_token_id is not None else 0
-        
-        # SEP token (use reserved special token if not defined)
-        if tok.sep_token is None or tok.sep_token_id is None:
-            tok.sep_token = "<|reserved_special_token_0|>"
-        SEP_ID = tok.sep_token_id
-        
+        # SEP token (use a reserved special token not used for phonemes)
+        # We use reserved_special_token_99 to avoid collision with phoneme mappings
+        SEP_token_name = "<|reserved_special_token_99|>"
+        SEP_ID = tok.convert_tokens_to_ids(SEP_token_name)
+        if SEP_ID == tok.unk_token_id:
+            # Fallback if token not found
+            SEP_ID = 128099  # Llama 3 reserved token approximate location
+        # import pdb; pdb.set_trace()
         def col_tokens(tok_id):
             """Create [B, 1] tensor of token ID"""
             return torch.full((B, 1), tok_id, dtype=torch.long, device=device)
@@ -343,11 +868,34 @@ class SSL_LLM_origin_ver2(sb.Brain):
         
         # Concatenate everything
         has_split_prompt = use_prompt and hasattr(self, "prompt_prefix_embed") and hasattr(self, "prompt_suffix_embed")
-        inputs_embeds = self._build_input_embeddings(
-            B, Z, phn_embed, SEP_embed, BOS_embed, EOS_embed,
-            has_split_prompt=has_split_prompt, 
-            prompt_embed_batch=prompt_embed_batch
-        )
+
+        if has_split_prompt:
+             prefix_embed = self.prompt_prefix_embed
+             suffix_embed = self.prompt_suffix_embed
+             inputs_embeds = torch.cat([
+                prefix_embed.unsqueeze(0).expand(B, -1, -1),
+                Z,
+                suffix_embed.unsqueeze(0).expand(B, -1, -1),
+                phn_embed,
+                EOS_embed
+            ], dim=1)
+        elif prompt_embed is not None:
+            inputs_embeds = torch.cat([
+                prompt_embed_batch,  # [B, P, H]
+                SEP_embed,          # [B, 1, H]
+                Z,                   # [B, Ts, H]
+                BOS_embed,          # [B, 1, H]
+                phn_embed,          # [B, L_phn, H]
+                EOS_embed           # [B, 1, H]
+            ], dim=1)  # [B, P+1+Ts+1+L_phn+1, H]
+        else:
+            inputs_embeds = torch.cat([
+                SEP_embed,          # [B, 1, H]
+                Z,                   # [B, Ts, H]
+                BOS_embed,          # [B, 1, H]
+                phn_embed,          # [B, L_phn, H]
+                EOS_embed           # [B, 1, H]
+            ], dim=1)  # [B, 1+Ts+1+L_phn+1, H]
         
         # Persist LayerNorm (created in on_fit_start, not per-forward)
         # if hasattr(self, "llm_norm") and self.llm_norm is not None:
@@ -550,7 +1098,7 @@ class SSL_LLM_origin_ver2(sb.Brain):
                 
                 # Generate phoneme tokens with full vocabulary
                 # import pdb; pdb.set_trace()
-
+                # pdb.set_trace()
                 gen_out = self.modules.LLM.generate(
                     inputs_embeds=inputs_embeds_inference,
                     attention_mask=attention_mask_inference,
@@ -560,12 +1108,10 @@ class SSL_LLM_origin_ver2(sb.Brain):
                     bos_token_id=BOS_ID,
                     do_sample=True,
                     use_cache=True,
-                    num_beams=1,
-                    # top_k = 71,
+                    # top_k = 100,
                     # top_p = 0.9,
-                    # max_new_tokens=200, 
-                    temperature=1.2,
-                    # repetition_penalty=1.00,
+                    max_new_tokens=100, 
+                    # repetition_penalty=1.1,
                     # no_repeat_ngram_size=4,
                 )
                 # from matplotlib import pyplot as plt
@@ -623,10 +1169,14 @@ class SSL_LLM_origin_ver2(sb.Brain):
                     B, seq_len, vocab_size = ce_logits.shape
                     ignore_idx = -100
                     ce_loss_fn = nn.CrossEntropyLoss(ignore_index=ignore_idx)
+                    # pdb.set_trace()
+                    
                     loss_ce = ce_loss_fn(
                         ce_logits.reshape(-1, vocab_size),
                         labels.reshape(-1)
                     )
+                    
+                    # pdb.set_trace()
 
         # --- 2. Compute Metrics (VALID & TEST) ---
         if stage != sb.Stage.TRAIN:
@@ -635,8 +1185,6 @@ class SSL_LLM_origin_ver2(sb.Brain):
                 p_ctc, wav_lens, blank_id=self.hparams.blank_index
             )
             self.ctc_metrics.append(ids, p_ctc, targets, lens_for_ctc, clipped_target_lens)
-            # remove id==70 in ctc sequence
-            # ctc_sequence = [[phn for phn in seq if phn != 70] for seq in ctc_sequence]
             self.per_metrics.append(
                 ids=ids,
                 predict=ctc_sequence,
@@ -681,9 +1229,18 @@ class SSL_LLM_origin_ver2(sb.Brain):
                             pred_tokens = llm_predictions[b, valid_pos]
                             valid_labels = labels[b, valid_pos]
                             
-                            pred_text = self.hparams.LLM_tokenizer.decode(pred_tokens, skip_special_tokens=True)
-                            target_text = self.hparams.LLM_tokenizer.decode(valid_labels, skip_special_tokens=True)
-                            
+                            # Decode using PhonemeTokenMapper for proper phoneme decoding
+                            if hasattr(self, "phoneme_mapper") and self.phoneme_mapper is not None:
+                                # import pdb; pdb.set_trace()
+                                pred_phonemes = self.phoneme_mapper.decode_llm_ids(pred_tokens, skip_special=True)
+                                target_phonemes = self.phoneme_mapper.decode_llm_ids(valid_labels, skip_special=True)
+                                pred_text = " ".join(pred_phonemes)
+                                target_text = " ".join(target_phonemes)
+                            else:
+                                # Fallback to raw tokenizer decode
+                                pred_text = self.hparams.LLM_tokenizer.decode(pred_tokens, skip_special_tokens=True)
+                                target_text = self.hparams.LLM_tokenizer.decode(valid_labels, skip_special_tokens=True)
+                            # pdb.set_trace()
                             self.llm_per_metrics.append(
                                 ids=[ids[b]],
                                 predict=[pred_text.split()],
@@ -715,9 +1272,15 @@ class SSL_LLM_origin_ver2(sb.Brain):
                 if isinstance(ce_targets, dict) and "generated_ids" in ce_targets:
                     gen_ids = ce_targets["generated_ids"]
                     
-                    # 1. Decode Hypotheses (Generated)
-                    hyps = self.hparams.LLM_tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
-                    
+                    # 1. Decode Hypotheses (Generated) using PhonemeTokenMapper
+                    if hasattr(self, "phoneme_mapper") and self.phoneme_mapper is not None:
+                        # Proper decoding: LLM reserved tokens -> phoneme names
+                        hyps = self.phoneme_mapper.decode_to_string(gen_ids, skip_special=True)
+                        if isinstance(hyps, str):
+                            hyps = [hyps]  # Ensure list format
+                    else:
+                        # Fallback to raw tokenizer decode (not recommended)
+                        hyps = self.hparams.LLM_tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
                     # 2. Decode References (Targets)
                     refs = phn_list_to_seq(batch.phn_list_target)
                     
@@ -766,303 +1329,6 @@ class SSL_LLM_origin_ver2(sb.Brain):
         loss = self.compute_objectives(predictions, batch, stage=stage)
         return loss.detach()
 
-    @torch.no_grad()
-    def inference_batch(self, batch, max_new_tokens=100, do_sample=False, temperature=1.0, top_k=50, top_p=0.9, num_beams=1):
-        """
-        Pure inference when batch only contains id and sig (no target phonemes).
-        
-        Args:
-            batch: A batch containing:
-                - batch.id: list of utterance IDs
-                - batch.sig: tuple of (wavs [B, T], wav_lens [B])
-            max_new_tokens: Maximum number of tokens to generate
-            do_sample: Whether to use sampling (True) or greedy decoding (False)
-            temperature: Sampling temperature (only used if do_sample=True)
-            top_k: Top-k sampling parameter
-            top_p: Top-p (nucleus) sampling parameter
-            num_beams: Number of beams for beam search (if applicable)
-            
-        Returns:
-            dict: {
-                "ids": list of utterance IDs,
-                "generated_tokens": tensor of generated token IDs [B, gen_len],
-                "generated_text": list of decoded phoneme strings,
-                "ctc_predictions": list of CTC decoded phoneme sequences (if available)
-            }
-        """
-        # Ensure critical components are initialized
-        self._ensure_initialized()
-        
-        batch = batch.to(self.device)
-        wavs, wav_lens = batch.sig
-        ids = batch.id
-        
-        # AudioEncoder + Projector
-        wav_feats = self.modules.perceived_ssl(wavs)  # [B, T, 1024]
-        
-        # AudioEncoder
-        try:
-            Z, _ = self.hparams.audio_encoder_modules(wavs)
-        except:
-            Z = self.hparams.audio_encoder_modules(wavs)
-        
-        # CTC branch (optional, for comparison)
-        ctc_predictions = None
-        if hasattr(self.modules, "ctc_lin"):
-            ctc_logits = self.modules.ctc_lin(Z)
-            p_ctc = self.hparams.log_softmax(ctc_logits)
-            ctc_sequence = sb.decoders.ctc_greedy_decode(
-                p_ctc, wav_lens, blank_id=self.hparams.blank_index
-            )
-            # Decode CTC predictions to phoneme strings
-            ctc_predictions = []
-            for seq in ctc_sequence:
-                # seq = [s for s in seq if s != self.hparams.blank_index]
-                # seq = [s for s in seq if s != 70]
-                phn_list = self.label_encoder.decode_ndim(seq)
-                ctc_predictions.append(" ".join(phn_list))
-        
-        # Projector
-        if hasattr(self.modules, "projector") and self.modules.projector is not None:
-            Z = self.modules.projector(Z)
-        
-        B, Ts, H = Z.shape
-        device = self.device
-        tok = self.hparams.LLM_tokenizer
-        embed_fn = self.modules.LLM.get_input_embeddings()
-        
-        # Get LLM dtype
-        llm_dtype = embed_fn.weight.dtype
-        
-        # Prepare special tokens
-        BOS_ID = tok.bos_token_id
-        EOS_ID = tok.eos_token_id
-        PAD_ID = tok.pad_token_id if tok.pad_token_id is not None else 0
-        
-        if tok.sep_token is None or tok.sep_token_id is None:
-            tok.sep_token = "<|reserved_special_token_0|>"
-        SEP_ID = tok.sep_token_id
-        
-        def col_tokens(tok_id):
-            return torch.full((B, 1), tok_id, dtype=torch.long, device=device)
-        
-        SEP = col_tokens(SEP_ID)
-        BOS = col_tokens(BOS_ID)
-        
-        # Embed special tokens
-        SEP_embed = embed_fn(SEP)
-        BOS_embed = embed_fn(BOS)
-        
-        # Check prompt type
-        use_prompt = getattr(self.hparams, "use_prompt", False)
-        has_split_prompt = use_prompt and hasattr(self, "prompt_prefix_embed") and hasattr(self, "prompt_suffix_embed")
-        has_prompt = use_prompt and hasattr(self, "prompt_embed") and self.prompt_embed is not None
-        
-        # Build input embeddings for inference
-        if has_split_prompt:
-            prefix_embed = self.prompt_prefix_embed
-            suffix_embed = self.prompt_suffix_embed
-            inputs_embeds = torch.cat([
-                prefix_embed.unsqueeze(0).expand(B, -1, -1),
-                Z,
-                suffix_embed.unsqueeze(0).expand(B, -1, -1)
-            ], dim=1)
-        elif has_prompt:
-            prompt_embed = self.prompt_embed
-            prompt_embed_batch = prompt_embed.unsqueeze(0).expand(B, -1, -1)
-            inputs_embeds = torch.cat([
-                prompt_embed_batch,
-                SEP_embed,
-                Z,
-                BOS_embed
-            ], dim=1)
-        else:
-            inputs_embeds = torch.cat([
-                SEP_embed,
-                Z,
-                BOS_embed
-            ], dim=1)
-        
-        # Match LLM dtype
-        if inputs_embeds.dtype != llm_dtype:
-            inputs_embeds = inputs_embeds.to(llm_dtype)
-        
-        attention_mask = torch.ones(B, inputs_embeds.size(1), dtype=torch.long, device=device)
-        
-        # Generate phoneme tokens
-        gen_kwargs = {
-            "inputs_embeds": inputs_embeds,
-            "attention_mask": attention_mask,
-            "max_new_tokens": max_new_tokens,
-            "num_return_sequences": 1,
-            "pad_token_id": PAD_ID,
-            "eos_token_id": EOS_ID,
-            "bos_token_id": BOS_ID,
-            "do_sample": do_sample,
-            "use_cache": True,
-        }
-        
-        if do_sample:
-            gen_kwargs.update({
-                "temperature": temperature,
-                "top_k": top_k,
-                "top_p": top_p,
-            })
-        
-        gen_out = self.modules.LLM.generate(**gen_kwargs)
-        
-        # Decode generated tokens to text
-        generated_text = tok.batch_decode(gen_out, skip_special_tokens=True)
-        
-        return {
-            "ids": ids,
-            "generated_tokens": gen_out,
-            "generated_text": generated_text,
-            "ctc_predictions": ctc_predictions,
-        }
-
-    def inference(
-            self,
-            test_set,
-            max_key=None,
-            min_key=None,
-            progressbar=None,
-            test_loader_kwargs={},
-            max_new_tokens=100,
-            do_sample=False,
-            temperature=1.0,
-            top_k=50,
-            top_p=0.9,
-            output_file=None,
-        ):
-            """
-            Iterate test_set and perform inference (no loss computation).
-            Only requires batch.id and batch.sig.
-
-            Arguments
-            ---------
-            test_set : Dataset, DataLoader
-                If a DataLoader is given, it is iterated directly. Otherwise passed
-                to ``self.make_dataloader()``.
-            max_key : str
-                Key to use for finding best checkpoint.
-            min_key : str
-                Key to use for finding best checkpoint.
-            progressbar : bool
-                Whether to display the progress in a progressbar.
-            test_loader_kwargs : dict
-                Kwargs passed to ``make_dataloader()`` if ``test_set`` is not a
-                DataLoader.
-            max_new_tokens : int
-                Maximum number of tokens to generate.
-            do_sample : bool
-                Whether to use sampling or greedy decoding.
-            temperature : float
-                Sampling temperature.
-            top_k : int
-                Top-k sampling parameter.
-            top_p : float
-                Top-p (nucleus) sampling parameter.
-            output_file : str
-                Optional file path to save results.
-
-            Returns
-            -------
-            list of dict: All inference results
-            """
-            from torch.utils.data import DataLoader
-            from speechbrain.dataio.dataloader import LoopedLoader
-            
-            if progressbar is None:
-                progressbar = not self.noprogressbar
-
-            enable = progressbar and sb.utils.distributed.if_main_process()
-
-            if not (
-                isinstance(test_set, DataLoader)
-                or isinstance(test_set, LoopedLoader)
-            ):
-                test_loader_kwargs["ckpt_prefix"] = None
-                test_set = self.make_dataloader(
-                    test_set, sb.Stage.TEST, **test_loader_kwargs
-                )
-            
-            # Load best checkpoint if available
-            self.on_evaluate_start(max_key=max_key, min_key=min_key)
-            self.modules.eval()
-            
-            all_results = []
-            
-            with torch.no_grad():
-                for batch in tqdm(
-                    test_set,
-                    dynamic_ncols=True,
-                    disable=not enable,
-                    colour=self.tqdm_barcolor.get("test", "green"),
-                ):
-                    # Run inference
-                    result = self.inference_batch(
-                        batch,
-                        max_new_tokens=max_new_tokens,
-                        do_sample=do_sample,
-                        temperature=temperature,
-                        top_k=top_k,
-                        top_p=top_p,
-                        num_beams=3,
-                    )
-                    
-                    # Collect results
-                    for i, utt_id in enumerate(result["ids"]):
-                        item = {
-                            "id": utt_id,
-                            "llm_prediction": result["generated_text"][i],
-                        }
-                        if result["ctc_predictions"] is not None:
-                            item["ctc_prediction"] = result["ctc_predictions"][i]
-                        all_results.append(item)
-            # sort results by ID
-            all_results = sorted(all_results, key=lambda x: x["id"])
-            # Optionally save to file
-            if output_file is not None:
-                import json
-                import csv
-                import os
-                
-                # Determine output directory and base name
-                output_dir = os.path.dirname(output_file) if os.path.dirname(output_file) else "."
-                base_name = os.path.splitext(os.path.basename(output_file))[0]
-                
-                # Save LLM predictions to CSV
-                llm_csv_path = os.path.join(output_dir, f"{base_name}_LLM.csv")
-                with open(llm_csv_path, "w", encoding="utf-8", newline="") as f:
-                    writer = csv.writer(f)
-                    writer.writerow(["ID", "Labels"])
-                    for item in all_results:
-                        # Get file stem (filename without path and extension)
-                        file_stem = os.path.splitext(os.path.basename(str(item["id"])))[0]
-                        writer.writerow([file_stem, item["llm_prediction"]])
-                print(f"LLM predictions saved to {llm_csv_path}")
-                
-                # Save CTC predictions to CSV (if available)
-                if all_results and "ctc_prediction" in all_results[0]:
-                    ctc_csv_path = os.path.join(output_dir, f"{base_name}_CTC.csv")
-                    with open(ctc_csv_path, "w", encoding="utf-8", newline="") as f:
-                        writer = csv.writer(f)
-                        writer.writerow(["ID", "Labels"])
-                        for item in all_results:
-                            file_stem = os.path.splitext(os.path.basename(str(item["id"])))[0]
-                            writer.writerow([file_stem, item["ctc_prediction"]])
-                    print(f"CTC predictions saved to {ctc_csv_path}")
-                
-                # Also save JSONL for full details
-                jsonl_path = os.path.join(output_dir, f"{base_name}.jsonl")
-                with open(jsonl_path, "w", encoding="utf-8") as f:
-                    for item in all_results:
-                        f.write(json.dumps(item, ensure_ascii=False) + "\n")
-                print(f"Full results saved to {jsonl_path}")
-            
-            return all_results
-    
     def on_stage_start(self, stage, epoch):
         "Gets called when a stage (either training, validation, test) starts."
         self.ctc_metrics = self.hparams.ctc_stats()
@@ -1216,6 +1482,7 @@ class SSL_LLM_origin_ver2(sb.Brain):
                         self.hparams.mpd_seq_file,
                     )
                     
+             
     def check_gradients(self, loss):
         """Check if gradients are finite"""
         if not torch.isfinite(loss):
@@ -1399,28 +1666,15 @@ class SSL_LLM_origin_ver2(sb.Brain):
         # Initialize optimizers (happens during training only)
 
         self.init_optimizers()
-        
-        # Wrap PeftModels in checkpointer to only save adapters
-        # if self.checkpointer is not None and PeftModel is not None:
-        #     # We iterate over keys to find PeftModels and wrap them
-        #     keys_to_wrap = []
-        #     for name, obj in self.checkpointer.recoverables.items():
-        #         # Handle DDP wrapped objects
-        #         real_obj = obj
-        #         if hasattr(obj, "module"):
-        #             real_obj = obj.module
-                
-        #         if isinstance(real_obj, PeftModel):
-        #             keys_to_wrap.append(name)
-            
-        #     for name in keys_to_wrap:
-        #         print(f"[Checkpointer] Wrapping '{name}' with PeftAdapterRecoverable to save ONLY adapters.")
-        #         self.checkpointer.recoverables[name] = PeftAdapterRecoverable(self.checkpointer.recoverables[name])
+
+        # ===== Setup Efficient LLM Checkpointing (Save Adapters Only) =====
+        # This prevents saving the entire LLM (~8GB+) each epoch
+        # Instead, only adapter weights (~10-100MB) are saved
+        self._setup_llm_adapter_checkpointing()
 
         if self.checkpointer is not None:
             self.checkpointer.recover_if_possible(min_key="LLM_PER")
         
-        # Only Init the AudioEncoderPretrainer with pretrained components during training
         if getattr(self.hparams, 'load_pretrained_components', False):
             pretrained_path = getattr(self.hparams, 'pretrained_model_path', '')
             components = getattr(self.hparams, 'components_to_load', ['ssl'])
@@ -1439,7 +1693,8 @@ class SSL_LLM_origin_ver2(sb.Brain):
         else:
             print(f"⚠️  Pretrained model path not found: {pretrained_path}")
             print("   Continuing with random initialization...")
-   
+
+    
     def init_optimizers(self):
         # Collect all trainable parameters
         model_params = list(self.hparams.model.parameters())
@@ -1472,4 +1727,103 @@ class SSL_LLM_origin_ver2(sb.Brain):
             self.checkpointer.add_recoverable("adam_opt", self.adam_optimizer)
             # self.checkpointer.add_recoverable("pretrained_opt", self.pretrained_opt_class)
             self.checkpointer.add_recoverable("tokenizer", self.label_encoder)
+
+    def _setup_llm_adapter_checkpointing(self):
+        """
+        Setup efficient checkpointing for LLM with adapters.
+        
+        This method ensures that:
+        1. Only adapter weights are saved (not entire LLM)
+        2. Base LLM is loaded once from original checkpoint
+        3. Each epoch only saves ~10-100MB instead of ~8GB+
+        
+        Supports:
+        - PeftModel (LoRA, QLoRA, etc. from Hugging Face PEFT)
+        - Custom adapter patterns
+        """
+        if self.checkpointer is None:
+            logger.warning("[Checkpointing] No checkpointer available, skipping adapter setup")
+            return
+        
+        llm_module = getattr(self.modules, 'LLM', None)
+        if llm_module is None:
+            logger.info("[Checkpointing] No LLM module found, skipping adapter-only setup")
+            return
+        
+        # Handle DDP wrapper
+        real_llm = llm_module.module if hasattr(llm_module, 'module') else llm_module
+        
+        # ===== Case 1: LLM is a PeftModel (LoRA/QLoRA/etc.) =====
+        if PeftModel is not None and isinstance(real_llm, PeftModel):
+            logger.info("=" * 60)
+            logger.info("[Checkpointing] 🚀 Detected PeftModel (LoRA/Adapter)")
+            logger.info("[Checkpointing] Will save ONLY adapter weights, NOT entire LLM!")
+            
+            # Get adapter parameter count for logging
+            adapter_params = sum(p.numel() for p in real_llm.parameters() if p.requires_grad)
+            total_params = sum(p.numel() for p in real_llm.parameters())
+            logger.info(f"[Checkpointing] Trainable adapter params: {adapter_params:,} ({adapter_params/1e6:.2f}M)")
+            logger.info(f"[Checkpointing] Total LLM params: {total_params:,} ({total_params/1e9:.2f}B)")
+            logger.info(f"[Checkpointing] Checkpoint size reduction: ~{(total_params-adapter_params)/total_params*100:.1f}%")
+            logger.info("=" * 60)
+            
+            # Remove LLM from recoverables if it exists (we'll add wrapped version)
+            if 'LLM' in self.checkpointer.recoverables:
+                del self.checkpointer.recoverables['LLM']
+            
+            # Add wrapped version that only saves adapters
+            wrapped_llm = PeftAdapterRecoverable(llm_module)
+            self.checkpointer.add_recoverable("LLM_adapters", wrapped_llm)
+            
+            logger.info("[Checkpointing] ✅ Added 'LLM_adapters' to checkpointer (adapter-only)")
+            return
+        
+        # ===== Case 2: Check for custom adapter patterns =====
+        # Look for common adapter layer patterns
+        adapter_patterns = getattr(self.hparams, 'adapter_patterns', ['lora', 'adapter', 'projector'])
+        
+        # Count adapter vs total parameters
+        adapter_param_count = 0
+        total_param_count = 0
+        
+        for name, param in real_llm.named_parameters():
+            total_param_count += param.numel()
+            if any(pattern in name.lower() for pattern in adapter_patterns):
+                adapter_param_count += param.numel()
+        
+        # If we found adapter-like parameters, set up custom saving
+        if adapter_param_count > 0:
+            logger.info("=" * 60)
+            logger.info("[Checkpointing] 🔧 Detected custom adapter layers")
+            logger.info(f"[Checkpointing] Adapter params: {adapter_param_count:,} ({adapter_param_count/1e6:.2f}M)")
+            logger.info(f"[Checkpointing] Total LLM params: {total_param_count:,} ({total_param_count/1e9:.2f}B)")
+            logger.info("=" * 60)
+            
+            # Remove full LLM from recoverables
+            if 'LLM' in self.checkpointer.recoverables:
+                del self.checkpointer.recoverables['LLM']
+            
+            # Add custom adapter-only recoverable
+            wrapped_llm = LLMAdapterOnlyRecoverable(llm_module, adapter_names=adapter_patterns)
+            self.checkpointer.add_recoverable("LLM_adapters", wrapped_llm)
+            
+            logger.info("[Checkpointing] ✅ Added 'LLM_adapters' with custom patterns to checkpointer")
+            return
+        
+        # ===== Case 3: No adapters detected - warn user =====
+        logger.warning("=" * 60)
+        logger.warning("[Checkpointing] ⚠️  No adapter/LoRA layers detected in LLM!")
+        logger.warning("[Checkpointing] The ENTIRE LLM will be saved each checkpoint (~8GB+)")
+        logger.warning("[Checkpointing] Consider using LoRA (peft library) for efficient fine-tuning:")
+        logger.warning("[Checkpointing]   from peft import get_peft_model, LoraConfig")
+        logger.warning("[Checkpointing]   peft_config = LoraConfig(r=16, lora_alpha=32, ...)")
+        logger.warning("[Checkpointing]   model = get_peft_model(model, peft_config)")
+        logger.warning("=" * 60)
+        
+        # Also check all recoverables for PeftModels
+        for name, obj in list(self.checkpointer.recoverables.items()):
+            real_obj = obj.module if hasattr(obj, 'module') else obj
+            if PeftModel is not None and isinstance(real_obj, PeftModel):
+                logger.info(f"[Checkpointing] Found PeftModel in '{name}', wrapping with adapter-only saver")
+                self.checkpointer.recoverables[name] = PeftAdapterRecoverable(obj)
 
