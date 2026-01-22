@@ -1,0 +1,254 @@
+# SSL_LLM Interleaved - based on SSL_LLM_Prompt_ver2.yaml
+# Configuration for interleaved canonical-perceived-error prediction
+
+prefix: "Interleaved_ver2"
+
+lab_enc_file: /home/m64000/work/IF-MDD/exp_l2arctic/wavlm_large_None_PhnMonoSSL_ottc_confEnc_kernal/save/label_encoder.txt
+ctc_loss_type: None
+wandb_project: "l2arctic_interleaved"
+encoder_type: "conformer"
+tags:
+    - SSL_LLM_Interleaved
+    - Interleaved_Sequence
+    - l2arctic
+
+## SSL features Selection
+pretrained_models_path: pretrained_models/
+
+# Pretrained Component Loading
+load_pretrained_components: true
+pretrained_model_path: /home/m64000/work/IF-MDD/pretrained_models/ottc_audioencoder/
+components_to_load: ["ssl", "post_ssl_encoder"]
+freeze_loaded_components: true
+
+perceived_ssl_model: "wavlm_large"
+canonical_ssl_model: Null
+
+# Model dimensions
+ENCODER_DIM: 1024
+LLM_DIM: 4096
+
+# Feature fusion and loss weighting
+feature_fusion: "mono"
+ctc_weight: 0.3
+
+# Interleaved sequence loss weights
+# Canonical phoneme loss weight (position 0, 3, 6, ...)
+canonical_weight: 0.25
+
+# Perceived phoneme loss weight (position 1, 4, 7, ...)
+perceived_weight: 0.25
+
+# Error label loss weight (position 2, 5, 8, ...) - MOST IMPORTANT
+# Error labels: "=" (correct), "S" (substitution), "D" (deletion), "I" (insertion)
+error_weight: 0.5
+
+# Data files
+data_folder_save: "./data"
+train_annotation: !ref <data_folder_save>/train-train.json
+valid_annotation: !ref <data_folder_save>/train-dev.json
+test_annotation: !ref <data_folder_save>/test.json
+train_annotation_extra: !ref <data_folder_save>/train-train_with_extra.json
+use_extra_train_data: False
+
+use_prompt: true
+prompt_type: "text"
+prompt_len: 16
+prompt_init: "normal"
+prompt_dropout: 0.1
+prompt_ids: null
+
+evaluate_key: "CTC_PER"
+max_save_models: 3
+
+# Output folder structure
+output_folder: !ref exp_l2arctic_LLM/<perceived_ssl_model>_<feature_fusion>_<prefix>
+per_file: !ref <output_folder>/per.txt
+mpd_file: !ref <output_folder>/mpd.txt
+save_folder: !ref <output_folder>/save
+train_log: !ref <output_folder>/train_log.txt
+
+training_target: "target"
+
+# Modules
+modules:
+    perceived_ssl: !ref <perceived_ssl>
+    ssl_proj: !ref <ssl_proj>
+    ConformerEncoder: !ref <ConformerEncoder>
+    projector: !ref <projector>
+    LLM: !ref <LLM>
+    ctc_lin: !ref <ctc_lin>
+    lm_weight: !ref <lm_weight>
+
+audio_encoder_modules: !new:torch.nn.Sequential
+    - !ref <perceived_ssl>
+    - !ref <ssl_proj>
+    - !ref <ConformerEncoder>
+
+post_encoder_modules: !new:torch.nn.ModuleList
+    - [!ref <ssl_proj>, !ref <ConformerEncoder>, !ref <ctc_lin>]
+
+# Audio Encoder
+perceived_ssl: !apply:trainer.AutoSSLoader.AutoSSLLoader
+    model_name: !ref <perceived_ssl_model>
+    freeze: !ref <freeze_perceived_ssl>
+    freeze_feature_extractor: !ref <freeze_perceived_feature_extractor>
+    save_path: !ref <pretrained_models_path>
+    output_all_hiddens: False
+
+preceived_ssl_emb_layer: -1
+
+# Projector
+post_encoder_reduction_factor: 1
+
+projector: !new:models.projector.EncoderProjectorCov1d
+    encoder_projector_ds_rate: !ref <post_encoder_reduction_factor>
+    encoder_dim: !ref <dnn_neurons>
+    llm_dim: !ref <LLM_DIM>
+
+# SSL Projection
+ssl_proj: !new:torch.nn.Sequential
+    - !new:speechbrain.lobes.models.VanillaNN.VanillaNN
+        input_shape: [null, null, !ref <ENCODER_DIM>]
+        activation: !ref <activation>
+        dnn_blocks: !ref <dnn_layers>
+        dnn_neurons: !ref <dnn_neurons>
+    - !new:torch.nn.LayerNorm
+        normalized_shape: !ref <dnn_neurons>
+
+# Conformer Encoder
+kernel_size: 7
+attention_type: "RoPEMHA"
+ConformerEncoder: !new:speechbrain.lobes.models.transformer.Conformer.ConformerEncoder
+    num_layers: 2
+    nhead: 8
+    d_ffn: !ref <dnn_neurons>
+    d_model: !ref <dnn_neurons>
+    dropout: 0.1
+    kernel_size: !ref <kernel_size>
+    attention_type: !ref <attention_type>
+
+# CTC linear layer
+ctc_lin: !new:speechbrain.nnet.linear.Linear
+    input_size: !ref <dnn_neurons>
+    n_neurons: !ref <output_neurons>
+
+# LM weight (for OTTC branch)
+lm_weight: !new:speechbrain.nnet.linear.Linear
+    input_size: !ref <dnn_neurons>
+    n_neurons: 1
+
+# LLM Configuration
+LLM_model: "meta-llama/Meta-Llama-3-8B-Instruct"
+
+llm_stats: !name:speechbrain.utils.metric_stats.MetricStats
+    metric: !name:speechbrain.nnet.losses.kldiv_loss
+        reduction: batch
+
+use_lora: True
+rank: 16
+lora_config:
+    r: !ref <rank>
+    alpha: 16
+    dropout: 0.05
+    target_modules: ["q_proj", "v_proj"]
+
+LLM: !apply:trainer.AutoLLMLoader.AutoLLMLoader
+    model_name: !ref <LLM_model>
+    use_lora: !ref <use_lora>
+    lora_config: !ref <lora_config>
+
+LLM_tokenizer: !apply:trainer.AutoLLMLoader.AutoLLMTokenizer
+    model_name: !ref <LLM_model>
+
+# Model parameters
+activation: !name:torch.nn.LeakyReLU
+dnn_layers: 2
+dnn_neurons: 384
+freeze_perceived_ssl: False
+freeze_canonical_ssl: False
+freeze_perceived_feature_extractor: True
+freeze_canonical_feature_extractor: True
+
+log_softmax: !new:speechbrain.nnet.activations.Softmax
+    apply_log: True
+
+ctc_cost: !name:speechbrain.nnet.losses.ctc_loss
+    blank_index: !ref <blank_index>
+
+# Output configuration
+output_neurons: 44
+blank_index: 0
+
+# Statistics
+ctc_stats: !name:speechbrain.utils.metric_stats.MetricStats
+    metric: !name:speechbrain.nnet.losses.ctc_loss
+        blank_index: !ref <blank_index>
+        reduction: batch
+
+per_stats: !name:speechbrain.utils.metric_stats.ErrorRateStats
+
+# Model
+model: !new:torch.nn.ModuleList
+    - [!ref <ssl_proj>, !ref <ConformerEncoder>, !ref <projector>, !ref <ctc_lin>, !ref <LLM>]
+
+trainable_model: !new:torch.nn.ModuleDict
+    ssl_proj: !ref <ssl_proj>
+    ConformerEncoder: !ref <ConformerEncoder>
+    projector: !ref <projector>
+    ctc_lin: !ref <ctc_lin>
+    LLM: !ref <LLM>
+
+# Optimizer
+adam_opt_class: !name:torch.optim.Adam
+    lr: !ref <lr>
+
+# Checkpointer
+checkpointer: !new:speechbrain.utils.checkpoints.Checkpointer
+    checkpoints_dir: !ref <save_folder>
+    recoverables:
+        model: !ref <model>
+        perceived_ssl: !ref <perceived_ssl>
+        counter: !ref <epoch_counter>
+    allow_partial_load: True
+
+# Data augmentation
+augmentation: !new:speechbrain.augment.time_domain.SpeedPerturb
+    orig_freq: !ref <sample_rate>
+    speeds: [95, 100, 105]
+
+# Epoch counter
+epoch_counter: !new:speechbrain.utils.epoch_loop.EpochCounter
+    limit: !ref <number_of_epochs>
+
+# Train logger
+train_logger: !new:speechbrain.utils.train_logger.FileTrainLogger
+    save_file: !ref <train_log>
+
+# Training parameters
+seed: 3047
+__set_seed: !apply:torch.manual_seed [!ref <seed>]
+
+number_of_epochs: 100
+valid_search_interval: 5
+batch_size: 4
+lr: 0.0001
+sorting: ascending
+sample_rate: 16000
+gradient_accumulation: 2
+grad_clip: 1.0
+lr_pretrained: 0.00001
+
+# Precision training
+auto_mix_prec: true
+precision: fp16
+
+# Dataloader options
+train_dataloader_opts:
+    batch_size: !ref <batch_size>
+
+valid_dataloader_opts:
+    batch_size: !ref <batch_size>
+
+test_dataloader_opts:
+    batch_size: 1
