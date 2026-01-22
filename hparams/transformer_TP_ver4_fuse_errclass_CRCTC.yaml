@@ -1,0 +1,76 @@
+# Hyperparameters for Consistency-Regularized CTC (CR-CTC) with Transformer
+# Reference: Implementing CR-CTC from icefall/k2
+
+# ==================== Model Architecture ====================
+model: !new:models.Transformer_TP_fuse_errclass
+    enc_dim: 256
+    enc_layers: 6
+    enc_neurons: 512
+    enc_maxnorm: 35.0
+    activation: !name:torch.nn.GELU
+    dropout: 0.15
+    attn_type: regularMHA
+
+# ==================== Loss Functions ====================
+loss_functions:
+    ctc_loss: !name:speechbrain.nnet.losses.ctc_loss
+    ce_loss: !name:torch.nn.CrossEntropyLoss
+        ignore_index: 0
+
+# ==================== CR-CTC Hyperparameters ====================
+# Enable CR-CTC during training
+use_crctc: True
+
+# Frequency Masking (following icefall/k2 defaults)
+cr_num_freq_masks: 2                    # Number of frequency masking regions
+cr_max_freq_mask_width: 27              # Maximum width for frequency masking
+
+# Time Masking (CR-CTC uses 2.5x augmentation)
+# Regular SpecAugment: 10 time masks, 15% masking ratio
+# CR-CTC: 25 time masks (10*2.5), 37.5% masking ratio (15%*2.5)
+cr_num_time_masks: 25                   # Number of time masking regions (2.5x)
+cr_max_time_mask_width: 100             # Maximum width for time masking
+cr_max_time_mask_ratio: 0.375           # Maximum ratio of frames to mask (2.5x)
+
+# CR Loss weight
+cr_loss_weight: 0.1                     # Weight of consistency regularization loss
+
+# ==================== Optimizer ====================
+optimizer: !name:torch.optim.Adam
+    lr: 0.001
+    betas: [0.9, 0.999]
+    eps: 1e-8
+    weight_decay: 0.0001
+
+# ==================== Learning Rate Scheduler ====================
+lr_scheduler: !new:speechbrain.nnet.schedulers.NoamScheduler
+    d_model: 256
+    n_warmup: 25000
+    n_step: 100
+
+# ==================== Training ====================
+batch_size: 32
+num_epochs: 100
+gradient_accumulation: 1
+auto_mix_prec: False
+loss_reduction: batchmean
+sorting: ascending
+precision: fp32
+
+# ==================== Data Settings ====================
+sample_rate: 16000
+n_mels: 80
+n_fft: 512
+hop_size: 160
+win_length: 512
+
+# ==================== Logging ====================
+train_logger: !new:speechbrain.utils.train_logger.TrainLogger
+    criterion_name: loss
+    
+checkpointer: !new:speechbrain.utils.checkpoints.Checkpointer
+    checkpoints_dir: !ref <save_folder>/checkpoints
+    recoverables:
+        model: !ref <model>
+        optimizer: !ref <optimizer>
+        lr_scheduler: !ref <lr_scheduler>
