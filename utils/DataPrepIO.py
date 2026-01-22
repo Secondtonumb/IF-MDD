@@ -10,8 +10,7 @@ import librosa
 
 
 import torchaudio
-
-
+    
 class BaseDataIOPrep:
     """Base class for data IO preparation."""
     
@@ -102,9 +101,12 @@ class BaseDataIOPrep:
             lab_enc_file = self.hparams['lab_enc_file']
             # copy lab_enc_file to current exp folder
             import shutil
-            shutil.copy(lab_enc_file, os.path.join(save_folder, "label_encoder.txt"))
-            lab_enc_file = os.path.join(save_folder, "label_encoder.txt")
-        
+            try:
+                shutil.copy(lab_enc_file, os.path.join(save_folder, "label_encoder.txt"))
+                lab_enc_file = os.path.join(save_folder, "label_encoder.txt")
+            except Exception as e:
+                print(f"Error copying label encoder file: {e}")
+                import pdb; pdb.set_trace()
         special_labels = {
             "blank_label": self.hparams["blank_index"],
         }
@@ -518,7 +520,6 @@ class LLMDataIOPrep_WordLevel(LLMDataIOPrep):
         sb.dataio.dataset.set_output_keys([valid_data, test_data], output_keys)
 
         return train_data, valid_data, test_data, self.label_encoder
-
 
 class LLMDataIOPrep_ver2(LLMDataIOPrep):
     # Allow mispro label in various types, 0=correct, 1=substitution, 2=deletion, 3=insertion
@@ -1002,7 +1003,6 @@ class PhonemeFrameTimestampDataIOPrep(BaseDataIOPrep):
         sb.dataio.dataset.set_output_keys([valid_data, test_data], output_keys)
         return train_data, valid_data, test_data, self.label_encoder
 
-
 class MFATimestampDataIOPrep(BaseDataIOPrep):
     """Data IO preparation with MFA word-level and phone-level timestamps.
     
@@ -1276,7 +1276,6 @@ class MFATimestampDataIOPrep(BaseDataIOPrep):
         sb.dataio.dataset.set_output_keys([valid_data, test_data], output_keys)
         
         return train_data, valid_data, test_data, self.label_encoder
-
 
 class ComprehensiveDataIOPrep(BaseDataIOPrep):
     """Comprehensive data IO preparation that combines all features from multiple DataPrep classes.
@@ -1613,7 +1612,6 @@ class ComprehensiveDataIOPrep(BaseDataIOPrep):
         sb.dataio.dataset.set_output_keys([valid_data, test_data], output_keys)
         
         return train_data, valid_data, test_data, self.label_encoder
-
 
 class TimestampDataIOPrepforHybridCTCAttn(TimestampDataIOPrep):
     """Data IO preparation with timestamp information and Extend with <bos> <eos>."""
@@ -2050,3 +2048,46 @@ class LLMDataIOPrep_ver3(LLMDataIOPrep):
         sb.dataio.dataset.set_output_keys([valid_data, test_data], output_keys)
 
         return train_data, valid_data, test_data, self.label_encoder
+
+class InferDataIOPrep(BaseDataIOPrep):
+    """Data IO preparation for inference, only loading id and sig."""
+    
+    def prepare(self):
+        """Prepare datasets for inference."""
+        infer_data = self._prepare_datasets()
+        datasets = [infer_data]
+        
+        # Add audio pipeline
+        audio_pipeline = self._create_audio_pipeline()
+        sb.dataio.dataset.add_dynamic_item(datasets, audio_pipeline)
+
+        # Set output keys
+        sb.dataio.dataset.set_output_keys(
+            [infer_data],
+            ["id", "sig"],
+        )
+
+        return infer_data
+    
+    def _prepare_datasets(self):
+        """Prepare train, valid, and test datasets with sorting."""
+        # 1. Declarations:
+        infer_data = sb.dataio.dataset.DynamicItemDataset.from_json(
+            json_path=self.hparams["infer_annotation"],
+            replacements={"data_root": self.data_folder},
+        )
+        # Apply sorting
+        if self.hparams["sorting"] == "ascending":
+            infer_data = infer_data.filtered_sorted(sort_key="duration")
+            self.hparams["train_dataloader_opts"]["shuffle"] = False
+        elif self.hparams["sorting"] == "descending":
+            infer_data = infer_data.filtered_sorted(sort_key="duration", reverse=True)
+            self.hparams["train_dataloader_opts"]["shuffle"] = False
+        elif self.hparams["sorting"] == "random":
+            pass
+        else:
+            raise NotImplementedError("sorting must be random, ascending or descending")
+
+        infer_data = infer_data.filtered_sorted(sort_key="duration")
+        
+        return infer_data
