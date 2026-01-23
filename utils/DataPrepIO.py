@@ -72,11 +72,18 @@ class BaseDataIOPrep:
                 waveform = waveform.mean(dim=0, keepdim=True)
 
             # Apply feature extractor (expecting 1D numpy array)
-            sig = self.hparams["perceived_ssl"].feature_extractor(
-                waveform.squeeze(0).numpy(),  # convert to 1D numpy
-                sampling_rate=target_sr
-            ).input_values[0]
-
+            try:
+                sig = self.hparams["perceived_ssl"].feature_extractor(
+                    waveform.squeeze(0).numpy(),
+                    sampling_rate=target_sr
+                ).input_values[0]
+            except Exception as e:
+                # for whisper
+                try:
+                    sig = waveform.squeeze(0).numpy()
+                except Exception as e:
+                    print(f"Error in Audio_encoder feature extraction: {e}")
+                    import pdb; pdb.set_trace()
             sig = torch.Tensor(sig)
             return sig
         

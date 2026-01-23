@@ -16,6 +16,10 @@ try:
 except ImportError:
     PeftModel = None
 
+import sys
+sys.path.append("/work/gm64/m64000/IF-MDD")
+from debug_input_embedding import InputEmbeddingDebugger
+
 class PeftAdapterRecoverable:
     """Wrapper to save ONLY the adapter weights of a PeftModel in SpeechBrain checkpoints"""
     def __init__(self, model):
@@ -93,7 +97,12 @@ class SSL_LLM_MultiTarget_ver1(sb.Brain):
         # 创建phoneme token掩码
         self.phoneme_bias = None
         self.setup_phoneme_mask()
-
+        self.debugger = InputEmbeddingDebugger(
+            brain=self,
+            tokenizer=self.hparams.LLM_tokenizer,
+            output_dir=self.hparams.save_folder + "/debug_outputs"
+        )
+        
     def setup_phoneme_mask(self):
         """创建一个掩码，只允许生成音素相关的token"""
         if getattr(self, "phoneme_bias", None) is not None:
@@ -155,11 +164,22 @@ class SSL_LLM_MultiTarget_ver1(sb.Brain):
                 chat_structure = [
                     {
                         "role": "system", 
-                        "content": "You are a phoneme transcriber."
+                        "content": """You are a arabic expert,
+                                      you know quran and you know tajweed 
+                                      and you can tell people what they should say and what they acually said."""
                     },
                     {
                         "role": "user", 
-                        "content": f"{PLACEHOLDER}"
+                        "content": f"""{PLACEHOLDER}
+                                    Transcribe this audio into words,
+                                    provide its canonical phoneme sequence,
+                                    and target phoneme sequence, split them by newlines.
+                                    Don't add any extra text other than the three sequences.
+                                    """
+                        # "content": f"""{PLACEHOLDER} Transcribe this into arabic words and the provide it's canonical phoneme and target phoneme sequence.
+                        #             Split the word, canonical phoneme and target phoneme sequences with newlines only.
+                        #             Don't add any extra text other than the three sequences.
+                        #             """
                     }
                 ]
 
@@ -177,12 +197,12 @@ class SSL_LLM_MultiTarget_ver1(sb.Brain):
                 prefix_tokens = tok(prefix_str, return_tensors="pt", add_special_tokens=False).to(self.device)
                 suffix_tokens = tok(suffix_str, return_tensors="pt", add_special_tokens=False).to(self.device)
                 
-                prefix_ids = prefix_tokens["input_ids"].squeeze(0)
-                suffix_ids = suffix_tokens["input_ids"].squeeze(0)
+                self.prefix_ids = prefix_tokens["input_ids"].squeeze(0)
+                self.suffix_ids = suffix_tokens["input_ids"].squeeze(0)
 
                 with torch.no_grad():
-                    self.prompt_prefix_embed = embed_fn(prefix_ids)
-                    self.prompt_suffix_embed = embed_fn(suffix_ids)
+                    self.prompt_prefix_embed = embed_fn(self.prefix_ids)
+                    self.prompt_suffix_embed = embed_fn(self.suffix_ids)
                 
                 self.prompt_embed = torch.cat([self.prompt_prefix_embed, self.prompt_suffix_embed], dim=0)
                 print(f"[Lazy Init] Generated Llama 3 Prompt via Template.")
@@ -313,6 +333,116 @@ class SSL_LLM_MultiTarget_ver1(sb.Brain):
         
         return inputs_embeds
 
+    def _build_compact_token_ids(self, wrd_ids, wrd_mask, phn_can_ids, phn_can_mask, 
+                                  phn_tgt_ids, phn_tgt_mask, SEP_TGT_ID, EOS_ID, PAD_ID, device):
+        """Build compact multi-target token sequence without internal padding.
+        
+        Transforms padded sequences into compact format: [wrd_actual][SEP_TGT][can_actual][SEP_TGT][tgt_actual][EOS]
+        
+        Args:
+            wrd_ids: [B, L_wrd] - word token IDs (with padding)
+            wrd_mask: [B, L_wrd] - word attention mask
+            phn_can_ids: [B, L_can] - canonical phoneme token IDs (with padding)
+            phn_can_mask: [B, L_can] - canonical attention mask
+            phn_tgt_ids: [B, L_tgt] - target phoneme token IDs (with padding)
+            phn_tgt_mask: [B, L_tgt] - target attention mask
+            SEP_TGT_ID: int - separator token ID between targets
+            EOS_ID: int - end of sequence token ID
+            PAD_ID: int - padding token ID
+            device: torch.device
+            
+        Returns:
+            compact_ids: [B, max_text_len] - compact token IDs with padding only at end
+            compact_pos_ranges: dict - position ranges for each target in compact sequence
+                {
+                    'wrd': (wrd_start, wrd_end, actual_lens),  # [B] actual lengths
+                    'can': (can_start, can_end, actual_lens),
+                    'tgt': (tgt_start, tgt_end, actual_lens),
+                    'text_lens': [B] - actual text length per sample (excluding padding)
+                }
+        """
+        B = wrd_ids.size(0)
+        
+        # Extract actual token counts per sample
+        num_wrd = wrd_mask.sum(dim=1).long()  # [B]
+        num_can = phn_can_mask.sum(dim=1).long()  # [B]
+        num_tgt = phn_tgt_mask.sum(dim=1).long()  # [B]
+        
+        # Calculate compact text length per sample
+        # Format: [wrd_actual][SEP_TGT][can_actual][SEP_TGT][tgt_actual][EOS]
+        # Length: num_wrd + 1 + num_can + 1 + num_tgt + 1
+        text_lens = num_wrd + num_can + num_tgt + 3  # [B]
+        max_text_len = text_lens.max().item()
+        
+        # Initialize compact sequence with padding
+        compact_ids = torch.full((B, max_text_len), PAD_ID, dtype=torch.long, device=device)
+        
+        # Build compact sequences per sample
+        wrd_start_list = []
+        wrd_end_list = []
+        can_start_list = []
+        can_end_list = []
+        tgt_start_list = []
+        tgt_end_list = []
+        
+        for b in range(B):
+            n_wrd = num_wrd[b].item()
+            n_can = num_can[b].item()
+            n_tgt = num_tgt[b].item()
+            
+            pos = 0
+            
+            # Word tokens
+            wrd_start = pos
+            if n_wrd > 0:
+                compact_ids[b, pos:pos + n_wrd] = wrd_ids[b, :n_wrd]
+                pos += n_wrd
+            wrd_end = pos
+            wrd_start_list.append(wrd_start)
+            wrd_end_list.append(wrd_end)
+            
+            # SEP_TGT separator
+            compact_ids[b, pos] = SEP_TGT_ID
+            pos += 1
+            
+            # Canonical phoneme tokens
+            can_start = pos
+            if n_can > 0:
+                compact_ids[b, pos:pos + n_can] = phn_can_ids[b, :n_can]
+                pos += n_can
+            can_end = pos
+            can_start_list.append(can_start)
+            can_end_list.append(can_end)
+            
+            # SEP_TGT separator
+            compact_ids[b, pos] = SEP_TGT_ID
+            pos += 1
+            
+            # Target phoneme tokens
+            tgt_start = pos
+            if n_tgt > 0:
+                compact_ids[b, pos:pos + n_tgt] = phn_tgt_ids[b, :n_tgt]
+                pos += n_tgt
+            tgt_end = pos
+            tgt_start_list.append(tgt_start)
+            tgt_end_list.append(tgt_end)
+            
+            # EOS token
+            compact_ids[b, pos] = EOS_ID
+            pos += 1
+            
+            # Remaining positions are already PAD_ID
+        
+        # Build position ranges dict
+        compact_pos_ranges = {
+            'wrd': (wrd_start_list, wrd_end_list, num_wrd),
+            'can': (can_start_list, can_end_list, num_can),
+            'tgt': (tgt_start_list, tgt_end_list, num_tgt),
+            'text_lens': text_lens
+        }
+        
+        return compact_ids, compact_pos_ranges
+
     def compute_forward(self, batch, stage):
         """Given an input batch it computes the model forward pass.
         
@@ -330,6 +460,16 @@ class SSL_LLM_MultiTarget_ver1(sb.Brain):
         batch = batch.to(self.device)
         wavs, wav_lens = batch.sig
         
+        
+                # Decode References
+        if getattr(self.hparams, "training_target") == "target":
+            phn_list_training_target = batch.phn_list_target
+        elif getattr(self.hparams, "training_target") == "perceived":
+            phn_list_training_target = batch.phn_list_perceived
+        else:
+            logger.warning(f"Unknown training_target: {getattr(self.hparams, 'training_target')}, defaulting to 'target'")
+            phn_list_training_target = batch.phn_list_target
+            
         if stage == sb.Stage.TRAIN and hasattr(self.hparams, "augmentation"):
             wavs = self.hparams.augmentation(wavs)
 
@@ -345,7 +485,8 @@ class SSL_LLM_MultiTarget_ver1(sb.Brain):
         # CTC branch
         ctc_logits = self.modules.ctc_lin(Z)
         p_ctc = self.hparams.log_softmax(ctc_logits)
-
+        
+        # LLM embeddings
         if hasattr(self.modules, "projector") and self.modules.projector is not None:
             Z = self.modules.projector(Z)
         
@@ -356,7 +497,7 @@ class SSL_LLM_MultiTarget_ver1(sb.Brain):
         
         # ===== Tokenize multi-target sequences =====
         # Target phonemes (required)
-        phn_tgt_seq = phn_list_to_seq(batch.phn_list_target)
+        phn_tgt_seq = phn_list_to_seq(phn_list_training_target)
         phn_tgt_tokens = tok(phn_tgt_seq, return_tensors="pt", padding=True, add_special_tokens=False).to(device)
         phn_tgt_ids = phn_tgt_tokens["input_ids"]
         phn_tgt_mask = phn_tgt_tokens["attention_mask"]
@@ -370,8 +511,8 @@ class SSL_LLM_MultiTarget_ver1(sb.Brain):
         L_can = phn_can_ids.size(1)
         
         # Words (required)
-        wrd_seq = phn_list_to_seq(batch.wrd)
-        wrd_tokens = tok(wrd_seq, return_tensors="pt", padding=True, add_special_tokens=False).to(device)
+        # wrd_seq = phn_list_to_seq(batch.wrd)
+        wrd_tokens = tok(batch.wrd, return_tensors="pt", padding=True, add_special_tokens=False).to(device)
         wrd_ids = wrd_tokens["input_ids"]
         wrd_mask = wrd_tokens["attention_mask"]
         L_wrd = wrd_ids.size(1)
@@ -418,37 +559,55 @@ class SSL_LLM_MultiTarget_ver1(sb.Brain):
             prompt_embed = None
             prompt_embed_batch = None
         
-        # ===== Build multi-target embedding sequence =====
-        # Sequence: [SEP] [speech] [BOS] [words] [canonical] [target] [EOS]
+        # ===== Build compact multi-target token sequence =====
+        # Build compact sequence: [wrd_actual][SEP_TGT][can_actual][SEP_TGT][tgt_actual][EOS]
+        # This eliminates internal padding
+        # import pdb; pdb.set_trace()
+        compact_ids, compact_pos_ranges = self._build_compact_token_ids(
+            wrd_ids=wrd_ids,
+            wrd_mask=wrd_mask,
+            phn_can_ids=phn_can_ids,
+            phn_can_mask=phn_can_mask,
+            phn_tgt_ids=phn_tgt_ids,
+            phn_tgt_mask=phn_tgt_mask,
+            SEP_TGT_ID=SEP_TGT_ID,
+            EOS_ID=EOS_ID,
+            PAD_ID=PAD_ID,
+            device=device
+        )
+        # import pdb; pdb.set_trace()
+        # Embed compact text sequence
+        compact_text_embed = embed_fn(compact_ids)  # [B, max_text_len, H]
         
-        # Embed all token sequences
-        wrd_embed = embed_fn(wrd_ids)  # [B, L_wrd, H]
-        phn_can_embed = embed_fn(phn_can_ids)  # [B, L_can, H]
-        phn_tgt_embed = embed_fn(phn_tgt_ids)  # [B, L_tgt, H]
-        # Embed special tokens
+        # Embed special tokens for speech boundary
         SEP_embed = embed_fn(SEP)
         BOS_embed = embed_fn(BOS)
-        EOS_embed = embed_fn(EOS)
-        SEP_TGT_embed = embed_fn(SEP_TGT)  # [B, 1, H]
         
-        # Use helper function to build embedding sequence
+        # Build final input embeddings: [SEP/Prompt] [speech] [BOS] [compact_text]
         has_split_prompt = use_prompt and hasattr(self, "prompt_prefix_embed") and hasattr(self, "prompt_suffix_embed")
         
-        inputs_embeds = self._build_multi_target_sequence(
-            B=B,
-            Z=Z,
-            Ts=Ts,
-            prompt_len=prompt_len,
-            has_split_prompt=has_split_prompt,
-            prompt_embed_batch=prompt_embed_batch,
-            wrd_embed=wrd_embed,
-            phn_can_embed=phn_can_embed,
-            phn_tgt_embed=phn_tgt_embed,
-            SEP_embed=SEP_embed,
-            BOS_embed=BOS_embed,
-            EOS_embed=EOS_embed,
-            SEP_TGT_embed=SEP_TGT_embed,
-        )
+        if has_split_prompt:
+            inputs_embeds = torch.cat([
+                self.prompt_prefix_embed.unsqueeze(0).expand(B, -1, -1),
+                Z,
+                self.prompt_suffix_embed.unsqueeze(0).expand(B, -1, -1),
+                compact_text_embed
+            ], dim=1)
+        elif prompt_embed_batch is not None:
+            inputs_embeds = torch.cat([
+                prompt_embed_batch,
+                SEP_embed,
+                Z,
+                BOS_embed,
+                compact_text_embed
+            ], dim=1)
+        else:
+            inputs_embeds = torch.cat([
+                SEP_embed,
+                Z,
+                BOS_embed,
+                compact_text_embed
+            ], dim=1)
         
         # Align dtype with LLM weights
         llm_dtype = embed_fn.weight.dtype
@@ -459,11 +618,9 @@ class SSL_LLM_MultiTarget_ver1(sb.Brain):
         seq_len = inputs_embeds.size(1)
         
         if stage == sb.Stage.TRAIN:
-            attention_mask = torch.ones(B, seq_len, dtype=torch.long, device=device)
-            
+            # Calculate text start position in full sequence
             if has_split_prompt:
                 text_start = self.prompt_prefix_embed.size(0) + Ts + self.prompt_suffix_embed.size(0)
-                bos_pos = text_start - 1
             else:
                 sep_pos = prompt_len
                 speech_start = sep_pos + 1
@@ -471,136 +628,89 @@ class SSL_LLM_MultiTarget_ver1(sb.Brain):
                 bos_pos = speech_end
                 text_start = bos_pos + 1
             
-            # Build position ranges for each target (accounting for SEP_TGT separators)
-            # Sequence: [SEP] [speech] [BOS] [words] [SEP_TGT] [canonical] [SEP_TGT] [target] [EOS]
-            wrd_start = text_start
-            wrd_end = wrd_start + L_wrd
-            sep_tgt_1_pos = wrd_end  # First SEP_TGT after words
-            can_start = wrd_end + 1  # Canonical starts after first SEP_TGT
-            can_end = can_start + L_can
-            sep_tgt_2_pos = can_end  # Second SEP_TGT after canonical
-            tgt_start = can_end + 1  # Target starts after second SEP_TGT
-            tgt_end = tgt_start + L_tgt
-            eos_pos = tgt_end
+            # Build attention mask: mask only end padding
+            attention_mask = torch.ones(B, seq_len, dtype=torch.long, device=device)
+            text_lens = compact_pos_ranges['text_lens']  # [B]
             
-            # Mask out padding in each sequence segment
-            # Compact format: [BOS] [words L_wrd] [SEP_TGT] [canonical L_can] [SEP_TGT] [target L_tgt] [padding] [EOS]
             for b in range(B):
-                num_wrd = int(wrd_mask[b].sum().item())
-                num_can = int(phn_can_mask[b].sum().item())
-                num_tgt = int(phn_tgt_mask[b].sum().item())
-                
-                # Mask padding in target sequence (after actual tokens, before EOS)
-                if num_tgt < L_tgt:
-                    # Target padding: [tgt_start + num_tgt, tgt_end)
-                    attention_mask[b, tgt_start + num_tgt:tgt_end] = 0
-                
-                # Mask padding in canonical sequence (after actual tokens, before SEP_TGT_2)
-                if num_can < L_can:
-                    # Canonical padding: [can_start + num_can, can_end)
-                    attention_mask[b, can_start + num_can:can_end] = 0
-                
-                # Mask padding in word sequence (after actual tokens, before SEP_TGT_1)
-                if num_wrd < L_wrd:
-                    # Word padding: [wrd_start + num_wrd, wrd_end)
-                    attention_mask[b, wrd_start + num_wrd:wrd_end] = 0
+                text_len = text_lens[b].item()
+                # Mask padding region: [text_start + text_len, seq_len)
+                if text_start + text_len < seq_len:
+                    attention_mask[b, text_start + text_len:] = 0
             
-            # Build labels for multi-target (left-shifted for causal LM)
-            # Sequence in embeddings: [SEP] [speech] [BOS] [words L_wrd] [SEP_TGT] [canonical L_can] [SEP_TGT] [target L_tgt] [EOS]
-            # Position i predicts token at position i+1
-            # Labels mapping: position i → token that should appear at position i+1
+            # Build labels for compact multi-target sequence (left-shifted for causal LM)
+            # Compact sequence: [wrd][SEP_TGT][can][SEP_TGT][tgt][EOS][PAD...]
+            # Position i in embeddings predicts token at position i+1 in sequence
+            # BOS predicts compact_ids[0], compact_ids[i] → compact_ids[i+1]
             ignore_idx = -100
             labels = torch.full((B, seq_len), ignore_idx, dtype=torch.long, device=device)
             
+            # Extract position info from compact_pos_ranges
+            wrd_starts, wrd_ends, num_wrds = compact_pos_ranges['wrd']
+            can_starts, can_ends, num_cans = compact_pos_ranges['can']
+            tgt_starts, tgt_ends, num_tgts = compact_pos_ranges['tgt']
+            text_lens = compact_pos_ranges['text_lens']  # [B]
+            
             for b in range(B):
-                num_wrd = int(wrd_mask[b].sum().item())
-                num_can = int(phn_can_mask[b].sum().item())
-                num_tgt = int(phn_tgt_mask[b].sum().item())
+                text_len = text_lens[b].item()
                 
-                if num_wrd > 0:
-                    # BOS → word[0], word[0] → word[1], ..., word[num_wrd-2] → word[num_wrd-1], word[num_wrd-1] → SEP_TGT
-                    labels[b, bos_pos:bos_pos + num_wrd] = wrd_ids[b, :num_wrd]
-                    
-                    # Last word position predicts SEP_TGT (if more targets follow)
-                    if num_can > 0 or num_tgt > 0:
-                        labels[b, bos_pos + num_wrd - 1] = SEP_TGT_ID
+                # BOS position predicts first token in compact sequence
+                if has_split_prompt:
+                    bos_offset = self.prompt_prefix_embed.size(0) + Ts + self.prompt_suffix_embed.size(0) - 1
+                else:
+                    bos_offset = prompt_len + 1 + Ts
                 
-                if num_can > 0:
-                    # Canonical chain
-                    if num_wrd == 0:
-                        # If no words, BOS directly predicts canonical
-                        labels[b, bos_pos:bos_pos + num_can] = phn_can_ids[b, :num_can]
-                    else:
-                        # SEP_TGT position → can[0], can[0] → can[1], ..., can[num_can-1] → SEP_TGT (or EOS if no target)
-                        labels[b, sep_tgt_1_pos:sep_tgt_1_pos + num_can] = phn_can_ids[b, :num_can]
-                    
-                    # Last canonical predicts second SEP_TGT (if target exists) or EOS (if no target)
-                    if num_tgt > 0:
-                        if num_wrd == 0:
-                            labels[b, bos_pos + num_can - 1] = SEP_TGT_ID
-                        else:
-                            labels[b, sep_tgt_1_pos + num_can - 1] = SEP_TGT_ID
-                    else:
-                        # No target: last canonical predicts EOS
-                        if num_wrd == 0:
-                            labels[b, bos_pos + num_can - 1] = EOS_ID
-                        else:
-                            labels[b, sep_tgt_1_pos + num_can - 1] = EOS_ID
-                
-                if num_tgt > 0:
-                    # Target chain
-                    if num_can == 0 and num_wrd == 0:
-                        # If no words and no canonical, BOS directly predicts target
-                        labels[b, bos_pos:bos_pos + num_tgt] = phn_tgt_ids[b, :num_tgt]
-                    elif num_can == 0:
-                        # If no canonical, words chain directly to target
-                        labels[b, sep_tgt_1_pos:sep_tgt_1_pos + num_tgt] = phn_tgt_ids[b, :num_tgt]
-                    else:
-                        # SEP_TGT[2] position → tgt[0], tgt[i] → tgt[i+1], tgt[num_tgt-1] → EOS
-                        labels[b, sep_tgt_2_pos:sep_tgt_2_pos + num_tgt] = phn_tgt_ids[b, :num_tgt]
-                    
-                    # Last target position predicts EOS
-                    if num_tgt > 0:
-                        labels[b, sep_tgt_2_pos + num_tgt] = EOS_ID
+                # Left-shift labels: position i predicts compact_ids[b, i-text_start+1]
+                # BOS → compact_ids[0], text_start → compact_ids[1], ..., text_start+text_len-2 → compact_ids[text_len-1]
+                labels[b, bos_offset:bos_offset + text_len] = compact_ids[b, :text_len]
+            
+            # import pdb; pdb.set_trace()
+            labels_noshift = torch.full((B, seq_len), ignore_idx, dtype=torch.long, device=device)
+            for b in range(B):
+                num_predict = int(num_wrds[b] + num_cans[b] + num_tgts[b])
+                bos_pos = bos_offset
+                if num_predict > 0:
+                    labels_noshift[b, bos_pos] = BOS_ID
+                    labels_noshift[b, text_start : text_start + num_predict] = compact_ids[b, :num_predict]
+                    labels_noshift[b, text_start + num_predict] = EOS_ID
             
             # Run forward pass
             llm_out = self.modules.LLM(
                 inputs_embeds=inputs_embeds,
                 attention_mask=attention_mask,
-                labels=labels,
+                labels=labels_noshift,
                 output_hidden_states=False,
                 return_dict=True,
             )
             
             ce_logits = llm_out.logits
+            loss = llm_out.loss
+            # batch count %100 ==0, get debug loss
+        
+            logger.info(f"LLM Loss: {loss.item():.4f}")
+            
+            # self.debugger.full_diagnosis(batch, stage)
+            # import pdb; pdb.set_trace()
             
             # Debug: verify labels and positions (only run once)
             if not hasattr(self, '_label_check_done'):
                 b_debug = 0  # First batch
-                num_wrd_debug = int(wrd_mask[b_debug].sum().item())
-                num_can_debug = int(phn_can_mask[b_debug].sum().item())
-                num_tgt_debug = int(phn_tgt_mask[b_debug].sum().item())
+                text_len_debug = text_lens[b_debug].item()
+                wrd_start_debug = wrd_starts[b_debug]
+                wrd_end_debug = wrd_ends[b_debug]
+                can_start_debug = can_starts[b_debug]
+                can_end_debug = can_ends[b_debug]
+                tgt_start_debug = tgt_starts[b_debug]
+                tgt_end_debug = tgt_ends[b_debug]
                 
-                print(f"[DEBUG] TRAIN Label Structure:")
-                print(f"  Positions: bos={bos_pos}, wrd_end={wrd_end}, sep_tgt_1={sep_tgt_1_pos}, can_end={can_end}, sep_tgt_2={sep_tgt_2_pos}, tgt_end={tgt_end}")
-                print(f"  Counts: num_wrd={num_wrd_debug}, num_can={num_can_debug}, num_tgt={num_tgt_debug}")
+                print(f"[DEBUG] TRAIN Compact Sequence Structure:")
+                print(f"  Text length: {text_len_debug}")
+                print(f"  Compact positions - WRD:[{wrd_start_debug},{wrd_end_debug}), CAN:[{can_start_debug},{can_end_debug}), TGT:[{tgt_start_debug},{tgt_end_debug})")
+                print(f"  Compact IDs sample: {compact_ids[b_debug, :min(20, text_len_debug)].tolist()}")
                 
-                # Check key label positions
-                if num_wrd_debug > 0:
-                    wrd_labels = labels[b_debug, bos_pos:bos_pos + num_wrd_debug]
-                    wrd_label_values = wrd_labels.tolist()
-                    print(f"  Word labels (bos_pos:{bos_pos}): {wrd_label_values}")
-                    print(f"    → Last word label (should predict SEP_TGT={SEP_TGT_ID}): {labels[b_debug, bos_pos + num_wrd_debug - 1].item()}")
-                
-                if num_can_debug > 0 and num_wrd_debug > 0:
-                    can_labels = labels[b_debug, sep_tgt_1_pos:sep_tgt_1_pos + num_can_debug]
-                    print(f"  Can labels (sep_tgt_1_pos:{sep_tgt_1_pos}): first few = {can_labels[:min(3, len(can_labels))].tolist()}")
-                    print(f"    → Last can label (should predict SEP_TGT={SEP_TGT_ID}): {labels[b_debug, sep_tgt_1_pos + num_can_debug - 1].item()}")
-                
-                if num_tgt_debug > 0 and num_can_debug > 0:
-                    tgt_labels = labels[b_debug, sep_tgt_2_pos:sep_tgt_2_pos + num_tgt_debug]
-                    print(f"  Tgt labels (sep_tgt_2_pos:{sep_tgt_2_pos}): first few = {tgt_labels[:min(3, len(tgt_labels))].tolist()}")
-                    print(f"    → Last tgt label (should predict EOS={EOS_ID}): {labels[b_debug, sep_tgt_2_pos + num_tgt_debug].item()}")
+                # Verify no internal padding
+                compact_text = self.hparams.LLM_tokenizer.decode(compact_ids[b_debug, :text_len_debug], skip_special_tokens=False)
+                print(f"  Decoded compact text: {compact_text[:200]}...")
                 
                 self._label_check_done = True
             
@@ -608,25 +718,21 @@ class SSL_LLM_MultiTarget_ver1(sb.Brain):
             if not hasattr(self, '_causal_check_done'):
                 print(f"[INFO] MultiTarget Model - LLM type: {type(self.modules.LLM).__name__}")
                 print(f"[INFO] Input shape: {inputs_embeds.shape}, Logits shape: {ce_logits.shape}")
-                print(f"[INFO] Position ranges (with SEP_TGT) - WRD:[{wrd_start},{wrd_end}), SEP_TGT1:{sep_tgt_1_pos}, CAN:[{can_start},{can_end}), SEP_TGT2:{sep_tgt_2_pos}, TGT:[{tgt_start},{tgt_end})")
+                print(f"[INFO] Compact format eliminates internal padding")
                 self._causal_check_done = True
 
             return p_ctc, ce_logits, {
                 "labels": labels,
-                "position_ranges": {
-                    "wrd": (wrd_start, wrd_end, wrd_mask),
-                    "can": (can_start, can_end, phn_can_mask),
-                    "tgt": (tgt_start, tgt_end, phn_tgt_mask),
-                    "bos": bos_pos
-                }
+                "compact_pos_ranges": compact_pos_ranges,
+                "text_start": text_start,
+                "compact_ids": compact_ids
             }, wav_lens
         
         else:
             # ===== Validation/Test Stage =====
             if stage == sb.Stage.VALID:
-                attention_mask = torch.ones(B, seq_len, dtype=torch.long, device=device)
-                
-                if use_prompt and hasattr(self, "prompt_prefix_embed") and hasattr(self, "prompt_suffix_embed"):
+                # Calculate text start position in full sequence
+                if has_split_prompt:
                     text_start = self.prompt_prefix_embed.size(0) + Ts + self.prompt_suffix_embed.size(0)
                 else:
                     sep_pos = prompt_len
@@ -635,21 +741,17 @@ class SSL_LLM_MultiTarget_ver1(sb.Brain):
                     bos_pos = speech_end
                     text_start = bos_pos + 1
                 
-                # Calculate position ranges (with SEP_TGT separators)
-                wrd_start = text_start
-                wrd_end = wrd_start + L_wrd
-                sep_tgt_1_pos = wrd_end
-                can_start = wrd_end + 1
-                can_end = can_start + L_can
-                sep_tgt_2_pos = can_end
-                tgt_start = can_end + 1
-                tgt_end = tgt_start + L_tgt
+                # Build attention mask: mask only end padding
+                attention_mask = torch.ones(B, seq_len, dtype=torch.long, device=device)
+                text_lens = compact_pos_ranges['text_lens']  # [B]
                 
                 for b in range(B):
-                    num_tgt = int(phn_tgt_mask[b].sum().item())
-                    if num_tgt < L_tgt:
-                        attention_mask[b, tgt_start + num_tgt + 1:] = 0
+                    text_len = text_lens[b].item()
+                    # Mask padding region: [text_start + text_len, seq_len)
+                    if text_start + text_len < seq_len:
+                        attention_mask[b, text_start + text_len:] = 0
                 
+                # Run forward pass
                 llm_out = self.modules.LLM(
                     inputs_embeds=inputs_embeds,
                     attention_mask=attention_mask,
@@ -658,82 +760,27 @@ class SSL_LLM_MultiTarget_ver1(sb.Brain):
                 )
                 ce_logits = llm_out.logits
                 
-                # Build labels same as training (compact format with chain structure)
+                # Build labels same as TRAIN (left-shifted for compact sequence)
                 ignore_idx = -100
                 labels = torch.full((B, seq_len), ignore_idx, dtype=torch.long, device=device)
                 
-                if use_prompt and hasattr(self, "prompt_prefix_embed") and hasattr(self, "prompt_suffix_embed"):
-                    text_start = self.prompt_prefix_embed.size(0) + Ts + self.prompt_suffix_embed.size(0)
-                    bos_pos = text_start - 1
-                else:
-                    sep_pos = prompt_len
-                    bos_pos = sep_pos + 1 + Ts
-                    text_start = bos_pos + 1
-                
-                wrd_start = text_start
-                wrd_end = wrd_start + L_wrd
-                sep_tgt_1_pos = wrd_end
-                can_start = wrd_end + 1
-                can_end = can_start + L_can
-                sep_tgt_2_pos = can_end
-                tgt_start = can_end + 1
-                tgt_end = tgt_start + L_tgt
-                
-                # Build labels with supervised SEP_TGT learning (same as TRAIN stage)
                 for b in range(B):
-                    num_wrd = int(wrd_mask[b].sum().item())
-                    num_can = int(phn_can_mask[b].sum().item())
-                    num_tgt = int(phn_tgt_mask[b].sum().item())
+                    text_len = text_lens[b].item()
                     
-                    if num_wrd > 0:
-                        # Left-shifted: BOS predicts word[0], word[i] predicts word[i+1]
-                        labels[b, bos_pos:bos_pos + num_wrd] = wrd_ids[b, :num_wrd]
-                        
-                        # Last word predicts first SEP_TGT (if more targets follow)
-                        if num_can > 0 or num_tgt > 0:
-                            labels[b, bos_pos + num_wrd - 1] = SEP_TGT_ID
+                    # BOS position predicts first token in compact sequence
+                    if has_split_prompt:
+                        bos_offset = self.prompt_prefix_embed.size(0) + Ts + self.prompt_suffix_embed.size(0) - 1
+                    else:
+                        bos_offset = prompt_len + 1 + Ts
                     
-                    if num_can > 0:
-                        if num_wrd == 0:
-                            # No words: BOS directly predicts canonical
-                            labels[b, bos_pos:bos_pos + num_can] = phn_can_ids[b, :num_can]
-                        else:
-                            # SEP_TGT[1] predicts can[0], can[i] predicts can[i+1]
-                            labels[b, sep_tgt_1_pos:sep_tgt_1_pos + num_can] = phn_can_ids[b, :num_can]
-                        
-                        # Last canonical predicts second SEP_TGT (if target exists) or EOS
-                        if num_tgt > 0:
-                            if num_wrd == 0:
-                                labels[b, bos_pos + num_can - 1] = SEP_TGT_ID
-                            else:
-                                labels[b, sep_tgt_1_pos + num_can - 1] = SEP_TGT_ID
-                        else:
-                            # No target: last canonical predicts EOS
-                            if num_wrd == 0:
-                                labels[b, bos_pos + num_can - 1] = self.EOS_ID
-                            else:
-                                labels[b, sep_tgt_1_pos + num_can - 1] = self.EOS_ID
-                    
-                    if num_tgt > 0:
-                        if num_can == 0 and num_wrd == 0:
-                            labels[b, bos_pos:bos_pos + num_tgt] = phn_tgt_ids[b, :num_tgt]
-                        elif num_can == 0:
-                            labels[b, sep_tgt_1_pos:sep_tgt_1_pos + num_tgt] = phn_tgt_ids[b, :num_tgt]
-                        else:
-                            # SEP_TGT[2] predicts tgt[0], tgt[i] predicts tgt[i+1]
-                            labels[b, sep_tgt_2_pos:sep_tgt_2_pos + num_tgt] = phn_tgt_ids[b, :num_tgt]
-                        
-                        # Last target predicts EOS
-                        labels[b, sep_tgt_2_pos + num_tgt] = self.EOS_ID
+                    # Left-shift labels
+                    labels[b, bos_offset:bos_offset + text_len] = compact_ids[b, :text_len]
                 
                 return p_ctc, ce_logits, {
                     "labels": labels,
-                    "position_ranges": {
-                        "wrd": (wrd_start, wrd_end, wrd_mask),
-                        "can": (can_start, can_end, phn_can_mask),
-                        "tgt": (tgt_start, tgt_end, phn_tgt_mask),
-                        "bos": bos_pos
-                    }
+                    "compact_pos_ranges": compact_pos_ranges,
+                    "text_start": text_start,
+                    "compact_ids": compact_ids
                 }, wav_lens
             
             elif stage == sb.Stage.TEST:
@@ -760,22 +807,68 @@ class SSL_LLM_MultiTarget_ver1(sb.Brain):
                 # Get target_to_generate from hparams (default: all three)
                 target_to_generate = getattr(self.hparams, "target_to_generate", ["word", "canonical", "target"])
                 
-                # Calculate max_new_tokens accounting for full chain structure:
-                # [word_tokens] [SEP_TGT] [can_tokens] [SEP_TGT] [tgt_tokens] [EOS]
-                # Need: L_wrd + 1 + L_can + 1 + L_tgt + 1 = total tokens to generate
+                # Calculate max_new_tokens using realistic estimates (not padded batch max)
+                # CRITICAL FIX: L_wrd, L_can, L_tgt are BATCH MAX with padding, not actual lengths!
+                # Use conservative estimates based on typical sequence lengths
+                
+                # Estimate actual lengths from batch data
+                if hasattr(batch, 'phn_list_target') and len(phn_list_training_target) > 0:
+                    # Average phoneme count in batch
+                    avg_phn_len = int(sum(len(p) for p in phn_list_training_target) / len(phn_list_training_target))
+                else:
+                    avg_phn_len = 30  # Conservative default
+                
+                # Conservative estimate for Arabic words (typically 3-8 tokens per word)
+                avg_wrd_len = 25  # Allows for ~3-5 Arabic words
+                
                 num_targets_active = sum([1 for t in ["word", "canonical", "target"] if t in target_to_generate])
                 num_sep_tgt = max(0, num_targets_active - 1)  # Separators between targets
                 num_eos = 1  # Final EOS token
                 
                 max_gen_len = (
-                    (L_wrd if "word" in target_to_generate else 0) +
-                    (L_can if "canonical" in target_to_generate else 0) +
-                    (L_tgt if "target" in target_to_generate else 0) +
+                    (avg_wrd_len if "word" in target_to_generate else 0) +
+                    (avg_phn_len if "canonical" in target_to_generate else 0) +
+                    (avg_phn_len if "target" in target_to_generate else 0) +
                     num_sep_tgt +
                     num_eos +
-                    5  # Small safety margin for variations
+                    15  # Safety margin
                 )
                 
+                # Cap at reasonable limit to prevent runaway generation
+                max_gen_len = min(max_gen_len, 150)
+                
+                # Add stopping criteria: stop when we see EOS or enough SEP_TGT tokens
+                from transformers import StoppingCriteria, StoppingCriteriaList
+                
+                class MultiTargetStoppingCriteria(StoppingCriteria):
+                    """Stop generation when EOS or sufficient SEP_TGT tokens are generated."""
+                    def __init__(self, sep_tgt_id, eos_id, max_sep_count=2):
+                        self.sep_tgt_id = sep_tgt_id
+                        self.eos_id = eos_id
+                        self.max_sep_count = max_sep_count
+                    
+                    def __call__(self, input_ids, scores, **kwargs):
+                        # Stop if EOS is generated in any sequence
+                        if (input_ids[:, -1] == self.eos_id).any():
+                            return True
+                        
+                        # Count SEP_TGT occurrences (stop after generating enough separators)
+                        for seq in input_ids:
+                            sep_count = (seq == self.sep_tgt_id).sum().item()
+                            if sep_count >= self.max_sep_count:
+                                return True
+                        return False
+                
+                # stopping_criteria = StoppingCriteriaList([
+                #     MultiTargetStoppingCriteria(
+                #         sep_tgt_id=SEP_TGT_ID,
+                #         eos_id=EOS_ID,
+                #         max_sep_count=num_sep_tgt + 1  # Allow one extra for safety
+                #     )
+                # ])
+                
+                # Generate with improved parameters
+                # import pdb; pdb.set_trace()
                 gen_out = self.modules.LLM.generate(
                     inputs_embeds=inputs_embeds_inference,
                     attention_mask=attention_mask_inference,
@@ -783,21 +876,33 @@ class SSL_LLM_MultiTarget_ver1(sb.Brain):
                     pad_token_id=PAD_ID,
                     eos_token_id=EOS_ID,
                     bos_token_id=BOS_ID,
-                    do_sample=False,
+                    do_sample=False,  
                     use_cache=True,
                     num_beams=1,
                     max_new_tokens=max_gen_len,
-                    temperature=0.1,
+                    
+                    early_stopping=True,
                     repetition_penalty=1.0,  
-                    length_penalty=1.0,      
-                    early_stopping=True,     
                 )
-
+                # pdb.set_trace()
                 gen_tokens = gen_out
+                
+                # Debug: log first generated sequence (only once)
+                if not hasattr(self, '_gen_debug_done'):
+                    try:
+                        decoded = self.hparams.LLM_tokenizer.decode(gen_tokens[0], skip_special_tokens=False)
+                        print(f"\n[TEST DEBUG] Generated sequence sample:")
+                        print(f"  Length: {len(gen_tokens[0])} tokens")
+                        print(f"  First 50 token IDs: {gen_tokens[0, :50].tolist()}")
+                        print(f"  Decoded (first 200 chars): {decoded[:200]}...")
+                        print(f"  Max allowed length: {max_gen_len}")
+                    except Exception as e:
+                        print(f"[TEST DEBUG] Error decoding: {e}")
+                    self._gen_debug_done = True
                 
                 return p_ctc, None, {
                     "generated_ids": gen_tokens,
-                    "target_phonemes": batch.phn_list_target,
+                    "target_phonemes": phn_list_training_target,
                     "canonical_phonemes": batch.phn_list_canonical,
                     "words": batch.wrd,
                     "target_to_generate": target_to_generate
@@ -829,35 +934,85 @@ class SSL_LLM_MultiTarget_ver1(sb.Brain):
         if stage != sb.Stage.TEST:
             if ce_logits is not None and isinstance(ce_targets, dict) and "labels" in ce_targets:
                 labels = ce_targets["labels"]
-                pos_ranges = ce_targets.get("position_ranges", {})
+                compact_pos_ranges = ce_targets.get("compact_pos_ranges", {})
+                text_start = ce_targets.get("text_start", 0)
+                compact_ids = ce_targets.get("compact_ids", None)
                 
-                if labels is not None and pos_ranges:
+                if labels is not None and compact_pos_ranges:
                     B, seq_len, vocab_size = ce_logits.shape
                     ignore_idx = -100
-                    ce_loss_fn = nn.CrossEntropyLoss(ignore_index=ignore_idx)
+                    ce_loss_fn = nn.CrossEntropyLoss(ignore_index=ignore_idx, reduction='none')
                     
-                    # Extract position ranges
-                    wrd_start, wrd_end, wrd_mask = pos_ranges.get("wrd", (0, 0, None))
-                    can_start, can_end, can_mask = pos_ranges.get("can", (0, 0, None))
-                    tgt_start, tgt_end, tgt_mask = pos_ranges.get("tgt", (0, 0, None))
+                    # Extract compact position ranges
+                    wrd_starts, wrd_ends, num_wrds = compact_pos_ranges.get('wrd', ([], [], None))
+                    can_starts, can_ends, num_cans = compact_pos_ranges.get('can', ([], [], None))
+                    tgt_starts, tgt_ends, num_tgts = compact_pos_ranges.get('tgt', ([], [], None))
+                    text_lens = compact_pos_ranges.get('text_lens', None)
                     
-                    # Compute loss for each target
-                    if wrd_start < wrd_end:
-                        wrd_logits = ce_logits[:, wrd_start:wrd_end, :].reshape(-1, vocab_size)
-                        wrd_labels = labels[:, wrd_start:wrd_end].reshape(-1)
-                        loss_wrd = ce_loss_fn(wrd_logits, wrd_labels)
+                    # Compute loss for each target with position-based weighting
+                    # For each sample, extract its segment from compact sequence and compute loss
                     
-                    if can_start < can_end:
-                        can_logits = ce_logits[:, can_start:can_end, :].reshape(-1, vocab_size)
-                        can_labels = labels[:, can_start:can_end].reshape(-1)
-                        loss_can = ce_loss_fn(can_logits, can_labels)
+                    # Word segment loss
+                    wrd_losses = []
+                    for b in range(B):
+                        wrd_start = text_start + wrd_starts[b]
+                        wrd_end = text_start + wrd_ends[b]
+                        if wrd_start < wrd_end and wrd_end <= seq_len:
+                            wrd_logits_b = ce_logits[b, wrd_start:wrd_end, :]  # [wrd_len, vocab]
+                            wrd_labels_b = labels[b, wrd_start:wrd_end]  # [wrd_len]
+                            wrd_loss_b = ce_loss_fn(wrd_logits_b, wrd_labels_b)  # [wrd_len]
+                            
+                            # Apply position weights: 1.5x baseline, 5x for last position (SEP_TGT)
+                            wrd_weights_b = torch.ones_like(wrd_loss_b) * 1.5
+                            if len(wrd_weights_b) > 0:
+                                wrd_weights_b[-1] = 5.0  # SEP_TGT prediction
+                            wrd_loss_b = (wrd_loss_b * wrd_weights_b).mean()
+                            wrd_losses.append(wrd_loss_b)
                     
-                    if tgt_start < tgt_end:
-                        tgt_logits = ce_logits[:, tgt_start:tgt_end, :].reshape(-1, vocab_size)
-                        tgt_labels = labels[:, tgt_start:tgt_end].reshape(-1)
-                        loss_tgt = ce_loss_fn(tgt_logits, tgt_labels)
+                    if wrd_losses:
+                        loss_wrd = torch.stack(wrd_losses).mean()
                     
-                    # Combined loss (equal weights: 1:1:1)
+                    # Canonical phoneme segment loss
+                    can_losses = []
+                    for b in range(B):
+                        can_start = text_start + can_starts[b]
+                        can_end = text_start + can_ends[b]
+                        if can_start < can_end and can_end <= seq_len:
+                            can_logits_b = ce_logits[b, can_start:can_end, :]
+                            can_labels_b = labels[b, can_start:can_end]
+                            can_loss_b = ce_loss_fn(can_logits_b, can_labels_b)
+                            
+                            # Apply position weights: 1.5x baseline, 5x for last position (SEP_TGT)
+                            can_weights_b = torch.ones_like(can_loss_b) * 1.5
+                            if len(can_weights_b) > 0:
+                                can_weights_b[-1] = 5.0  # SEP_TGT prediction
+                            can_loss_b = (can_loss_b * can_weights_b).mean()
+                            can_losses.append(can_loss_b)
+                    
+                    if can_losses:
+                        loss_can = torch.stack(can_losses).mean()
+                    
+                    # Target phoneme segment loss
+                    tgt_losses = []
+                    for b in range(B):
+                        tgt_start = text_start + tgt_starts[b]
+                        tgt_end = text_start + tgt_ends[b]
+                        if tgt_start < tgt_end and tgt_end <= seq_len:
+                            tgt_logits_b = ce_logits[b, tgt_start:tgt_end, :]
+                            tgt_labels_b = labels[b, tgt_start:tgt_end]
+                            tgt_loss_b = ce_loss_fn(tgt_logits_b, tgt_labels_b)
+                            
+                            # Apply position weights: 1.5x baseline, 5x for last position (EOS)
+                            tgt_weights_b = torch.ones_like(tgt_loss_b) * 1.5
+                            if len(tgt_weights_b) > 0:
+                                tgt_weights_b[-1] = 5.0  # EOS prediction
+                            tgt_loss_b = (tgt_loss_b * tgt_weights_b).mean()
+                            tgt_losses.append(tgt_loss_b)
+                    
+                    if tgt_losses:
+                        loss_tgt = torch.stack(tgt_losses).mean()
+                    
+                    # Combined loss
                     loss_ce = (loss_wrd + loss_can + loss_tgt) / 3.0
 
         # --- 2. Compute Metrics (VALID & TEST) ---
@@ -890,10 +1045,20 @@ class SSL_LLM_MultiTarget_ver1(sb.Brain):
                 except:
                     canonical = None
                     perceived = None
+                    
+                if getattr(self.hparams, "training_target") == "target":
+                    phn_list_training_target = batch.phn_list_target
+                elif getattr(self.hparams, "training_target") == "perceived":
+                    phn_list_training_target = batch.phn_list_perceived
+                else:
+                    logger.warning(f"Unknown training_target: {getattr(self.hparams, 'training_target')}, defaulting to 'target'")
+                    phn_list_training_target = batch.phn_list_target
 
                 if ce_logits is not None and isinstance(ce_targets, dict) and "labels" in ce_targets:
                     labels = ce_targets["labels"]
-                    pos_ranges = ce_targets.get("position_ranges", {})
+                    compact_pos_ranges = ce_targets.get("compact_pos_ranges", {})
+                    text_start = ce_targets.get("text_start", 0)
+                    compact_ids = ce_targets.get("compact_ids", None)
                     
                     llm_predictions = ce_logits.argmax(dim=-1)
                     p_llm = F.log_softmax(ce_logits, dim=-1)
@@ -901,9 +1066,10 @@ class SSL_LLM_MultiTarget_ver1(sb.Brain):
                     valid_mask = (labels != -100)
                     B = labels.size(0)
                     
-                    wrd_start, wrd_end, _ = pos_ranges.get("wrd", (0, 0, None))
-                    can_start, can_end, _ = pos_ranges.get("can", (0, 0, None))
-                    tgt_start, tgt_end, _ = pos_ranges.get("tgt", (0, 0, None))
+                    # Extract compact position info
+                    wrd_starts, wrd_ends, num_wrds = compact_pos_ranges.get('wrd', ([], [], None))
+                    can_starts, can_ends, num_cans = compact_pos_ranges.get('can', ([], [], None))
+                    tgt_starts, tgt_ends, num_tgts = compact_pos_ranges.get('tgt', ([], [], None))
                     
                     for b in range(B):
                         valid_pos = valid_mask[b]
@@ -916,30 +1082,38 @@ class SSL_LLM_MultiTarget_ver1(sb.Brain):
                                 length=torch.tensor([num_valid], device=labels.device)
                             )
                             
-                            # PER for each target
-                            pred_tokens = llm_predictions[b, valid_pos]
-                            valid_labels = labels[b, valid_pos]
+                            # Extract per-target predictions from compact sequence
+                            wrd_start = text_start + wrd_starts[b]
+                            wrd_end = text_start + wrd_ends[b]
+                            can_start = text_start + can_starts[b]
+                            can_end = text_start + can_ends[b]
+                            tgt_start = text_start + tgt_starts[b]
+                            tgt_end = text_start + tgt_ends[b]
                             
-                            pred_text = self.hparams.LLM_tokenizer.decode(pred_tokens, skip_special_tokens=True)
-                            target_text = self.hparams.LLM_tokenizer.decode(valid_labels, skip_special_tokens=True)
-                            
-                            # Store per-target metrics
-                            if wrd_start < wrd_end:
+                            # Word prediction
+                            if wrd_start < wrd_end and wrd_end <= seq_len:
+                                wrd_pred_ids = llm_predictions[b, wrd_start:wrd_end]
                                 wrd_pred = self.hparams.LLM_tokenizer.decode(
-                                    llm_predictions[b, wrd_start:min(wrd_end, seq_len)], skip_special_tokens=True
-                                )
+                                    wrd_pred_ids, skip_special_tokens=True
+                                ).strip()
+                                
+                                # Word metrics: compare decoded Arabic text
+                                # target is already a string from batch.wrd[b]
+                                # TODO
                                 self.wrd_per_metrics.append(
                                     ids=[ids[b]],
-                                    predict=[wrd_pred.split()],
-                                    target=[batch.wrd[b]],
+                                    predict=[wrd_pred],  # Convert to list of strings
+                                    target=[batch.wrd[b]],  # Convert to list of strings
                                     predict_len=None,
                                     target_len=None,
-                                    ind2lab=lambda x: x
+                                    ind2lab=lambda x: x  # Identity function for string comparison
                                 )
                             
-                            if can_start < can_end:
+                            # Canonical phoneme prediction
+                            if can_start < can_end and can_end <= seq_len:
+                                can_pred_ids = llm_predictions[b, can_start:can_end]
                                 can_pred = self.hparams.LLM_tokenizer.decode(
-                                    llm_predictions[b, can_start:min(can_end, seq_len)], skip_special_tokens=True
+                                    can_pred_ids, skip_special_tokens=True
                                 )
                                 self.can_per_metrics.append(
                                     ids=[ids[b]],
@@ -950,40 +1124,47 @@ class SSL_LLM_MultiTarget_ver1(sb.Brain):
                                     ind2lab=lambda x: x
                                 )
                             
-                            if tgt_start < tgt_end:
+                            # Target phoneme prediction
+                            if tgt_start < tgt_end and tgt_end <= seq_len:
+                                tgt_pred_ids = llm_predictions[b, tgt_start:tgt_end]
                                 tgt_pred = self.hparams.LLM_tokenizer.decode(
-                                    llm_predictions[b, tgt_start:min(tgt_end, seq_len)], skip_special_tokens=True
+                                    tgt_pred_ids, skip_special_tokens=True
                                 )
                                 self.tgt_per_metrics.append(
                                     ids=[ids[b]],
                                     predict=[tgt_pred.split()],
-                                    target=[batch.phn_list_target[b]],
+                                    target=[phn_list_training_target[b]],
                                     predict_len=None,
                                     target_len=None,
                                     ind2lab=lambda x: x
                                 )
                             
-                            # Overall PER
-                            self.llm_per_metrics.append(
-                                ids=[ids[b]],
-                                predict=[pred_text.split()],
-                                target=[target_text.split()],
-                                predict_len=None,
-                                target_len=None,
-                                ind2lab=lambda x: x
-                            )
-                            
-                            # MPD F1
-                            self.mpd_f1_metrics.append(
-                                ids=[ids[b]],
-                                predict=[pred_text.split()],
-                                canonical=[canonical[b]] if canonical else [""],
-                                perceived=[perceived[b]] if perceived else [""],
-                                predict_len=None,
-                                canonical_len=None,
-                                perceived_len=None,
-                                ind2lab=lambda x: x
-                            )
+                            # Overall PER and MPD F1 (use target phonemes)
+                            if tgt_start < tgt_end and tgt_end <= seq_len:
+                                tgt_pred_ids = llm_predictions[b, tgt_start:tgt_end]
+                                tgt_pred = self.hparams.LLM_tokenizer.decode(
+                                    tgt_pred_ids, skip_special_tokens=True
+                                )
+                                
+                                self.llm_per_metrics.append(
+                                    ids=[ids[b]],
+                                    predict=[tgt_pred.split()],
+                                    target=[" ".join(phn_list_training_target[b]).split()],
+                                    predict_len=None,
+                                    target_len=None,
+                                    ind2lab=lambda x: x
+                                )
+                                
+                                self.mpd_f1_metrics.append(
+                                    ids=[ids[b]],
+                                    predict=[tgt_pred.split()],
+                                    canonical=[canonical[b]] if canonical else [""],
+                                    perceived=[perceived[b]] if perceived else [""],
+                                    predict_len=None,
+                                    canonical_len=None,
+                                    perceived_len=None,
+                                    ind2lab=lambda x: x
+                                )
 
             elif stage == sb.Stage.TEST:
                 # Autoregressive Generation Evaluation
@@ -1040,16 +1221,29 @@ class SSL_LLM_MultiTarget_ver1(sb.Brain):
                             hyps_tgt.append("")
                     
                     # Decode References
-                    refs_tgt = phn_list_to_seq(batch.phn_list_target)
+                    if getattr(self.hparams, "training_target") == "target":
+                        phn_list_training_target = batch.phn_list_target
+                    elif getattr(self.hparams, "training_target") == "perceived":
+                        phn_list_training_target = batch.phn_list_perceived
+                    else:
+                        logger.warning(f"Unknown training_target: {getattr(self.hparams, 'training_target')}, defaulting to 'target'")
+                        phn_list_training_target = batch.phn_list_target
+                        
+                    refs_tgt = phn_list_to_seq(phn_list_training_target)
                     refs_can = phn_list_to_seq(batch.phn_list_canonical)
-                    refs_wrd = phn_list_to_seq(batch.wrd)
+                    # refs_wrd: Keep as Arabic text (from batch.wrd directly)
+                    refs_wrd = batch.wrd  # List of Arabic words
                     
                     # Compute per-target PER scores
                     if "word" in target_to_generate:
+                        # For words: refs_wrd is list of Arabic texts, convert to list of lists
+                        refs_wrd_list = [[w] if isinstance(w, str) else w for w in refs_wrd]
+                        # pdb.set_trace()
+                        # TODO
                         self.wrd_per_metrics.append(
                             ids=ids,
                             predict=[hyp.split() for hyp in hyps_wrd],
-                            target=[ref.split() for ref in refs_wrd],
+                            target=refs_wrd_list,
                             predict_len=None,
                             target_len=None,
                             ind2lab=lambda x: x
@@ -1742,7 +1936,6 @@ class SSL_LLM_MultiTarget_ver1(sb.Brain):
                 self.hparams.AudioEncoderPretrainer.collect_files(default_source=self.hparams.pretrained_model_path)
                 self.hparams.AudioEncoderPretrainer.load_collected()
                 print("✅ Successfully loaded pretrained components.")
-                # pdb.set_trace()
             except Exception as e:
                 print(f"❌ Failed to load pretrained components: {e}")
                 print("   Continuing with random initialization...")

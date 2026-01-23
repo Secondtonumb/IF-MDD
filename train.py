@@ -25,6 +25,8 @@ import json
 import wandb
 import time
 import torchaudio
+import threading
+from datetime import datetime
 
 # from models.phn_mono_ssl_model import PhnMonoSSLModel, PhnMonoSSLModel_DualCTCHead, PhnMonoSSLModel_RVQforBoth
 # from models.phn_mono_ssl_model import PhnMonoSSLModel_CRCTC
@@ -35,15 +37,23 @@ from models.Transformer_TP import TransformerMDD_TP
 from models.Transformer_TP_fuse_errclass import TransformerMDD_TP_encdec_errclass
 from models.Transformer_TP_fuse_errclass_ConPCO import TransformerMDD_TP_encdec_errclass_ConPCO
 from models.Trans_IFMDD_ConPCO import Trans_IFMDD_ConPCO
+from models.Trans_IFMDD_ConPCO_ver2 import Trans_IFMDD_ConPCO_ver2
+
 # from models.SSL_LLM import SSL_LLM
 from models.SSL_LLM_origin import SSL_LLM_origin
 from models.SSL_LLM_origin_ver2 import SSL_LLM_origin_ver2
-from models.SSL_LLM_origin_ver2_expand_tok import SSL_LLM_origin_ver2_expand_tok
+from models.SSL_LLM_origin_ver2_with_cano import SSL_LLM_origin_ver2_with_cano
+from models.SSL_LLM_MultiTarget_ver1 import SSL_LLM_MultiTarget_ver1
+
+# from models.SSL_LLM_origin_ver2_expand_tok import SSL_LLM_origin_ver2_expand_tok
 
 from utils.DataPrepIO import LLMDataIOPrep, LLMDataIOPrep_ver2, LLMDataIOPrep_ver3, InferDataIOPrep
 
+sys.path.append("/work/gm64/m64000/IF-MDD")
+
 sys.path.append("./trainer")
 logger = logging.getLogger(__name__)
+
 
 # Define training procedure
 # Mono ASR model
@@ -52,8 +62,8 @@ if __name__ == "__main__":
     # Add custom argument parser for mode selection FIRST
     parser = argparse.ArgumentParser(description='MDD Training/Evaluation Script', add_help=False)
     parser.add_argument('--mode', type=str, default='train+eval', 
-                       choices=['train', 'eval', 'train+eval', 'infer'],
-                       help='Execution mode: train only, eval only, or both (default: train+eval)')
+                       choices=['train', 'eval', 'train+eval', 'infer', 'valid'],
+                       help='Execution mode: train only, eval only, both, infer, or valid only (default: train+eval)')
     
     # Parse only the --mode argument, leave the rest for speechbrain
     args, remaining_argv = parser.parse_known_args()
@@ -97,14 +107,22 @@ if __name__ == "__main__":
         asr_brain_class = TransformerMDD_TP_encdec_errclass_ConPCO
     elif hparams["feature_fusion"] == "Trans_IFMDD_ConPCO":
         asr_brain_class = Trans_IFMDD_ConPCO
+    elif hparams["feature_fusion"] == "Trans_IFMDD_ConPCO_ver2":
+        asr_brain_class = Trans_IFMDD_ConPCO_ver2
+    elif hparams["feature_fusion"] == "SSL_LLM_MultiTarget_ver1":
+        asr_brain_class = SSL_LLM_MultiTarget_ver1
+    
+        
     # elif hparams["feature_fusion"] == "SSL_LLM":
     #     asr_brain_class = SSL_LLM
     elif hparams["feature_fusion"] == "SSL_LLM_origin":
         asr_brain_class = SSL_LLM_origin
     elif hparams["feature_fusion"] == "SSL_LLM_origin_ver2":
         asr_brain_class = SSL_LLM_origin_ver2
-    elif hparams["feature_fusion"] == "SSL_LLM_origin_ver2_expand_tok":
-        asr_brain_class = SSL_LLM_origin_ver2_expand_tok
+    elif hparams["feature_fusion"] == "SSL_LLM_origin_ver2_with_cano":
+        asr_brain_class = SSL_LLM_origin_ver2_with_cano
+    # elif hparams["feature_fusion"] == "SSL_LLM_origin_ver2_expand_tok":
+    #     asr_brain_class = SSL_LLM_origin_ver2_expand_tok
     # if asr_brain_class == SSL_LLM:
 #         DataPrep  = LLMDataIOPrep_ver3(hparams)
     if asr_brain_class == TransformerMDD_TP_encdec_errclass:
@@ -160,12 +178,15 @@ if __name__ == "__main__":
     )
     
     # limit train_data for quick debugging
-    # train_record = train_data.data_ids[:2048]  # Select first 2048 for debugging
-    # valid_record = valid_data.data_ids[:]  # Select first 128 for debugging
+    # train_record = train_data.data_ids[:128]  # Select first 2048 for debugging
+    # valid_record = valid_data.data_ids[:16]  # Select first 128 for debugging
     # train_data = train_data.filtered_sorted(key_test={"id": lambda x: x in train_record},)
     # valid_data = valid_data.filtered_sorted(key_test={"id": lambda x: x in valid_record},)
-    # test_record = test_data.data_ids[:10]
+    # test_record = test_data.data_ids[:16]
     # test_data = test_data.filtered_sorted(key_test={"id": lambda x: x in test_record},)
+    
+    
+    # Debug
     
     # Training/validation loop
     if args.mode in ['train', 'train+eval']:
@@ -180,6 +201,27 @@ if __name__ == "__main__":
         except StopIteration:
             logger.info("Training stopped early due to no improvement.")
             # Don't return here, continue to evaluation if mode includes eval
+    
+    # Validation only - run on valid_data
+    if args.mode == 'valid':
+        if hparams.get("evaluate_key", True):
+            key = hparams["evaluate_key"]
+            logger.info(f"Starting validation-only mode with key: {key}")
+            
+            if key == "mpd_f1" or key == "mpd_f1_seq":
+                asr_brain.evaluate(
+                    valid_data,
+                    test_loader_kwargs=hparams["valid_dataloader_opts"],
+                    max_key=key
+                )
+            elif key == "PER" or key == "PER_seq" or key == "CTC_PER" or key == "LLM_PER":
+                asr_brain.evaluate(
+                    valid_data,
+                    test_loader_kwargs=hparams["valid_dataloader_opts"],
+                    min_key=key,
+                )
+        else:
+            logger.warning("evaluate_key not set in hparams, skipping validation")
     
     # Test - run evaluation based on mode
     if args.mode in ['eval', 'train+eval']:

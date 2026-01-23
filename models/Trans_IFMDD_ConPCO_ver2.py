@@ -38,7 +38,7 @@ import numpy as np
 from utils.layers.utils import make_pad_mask
 from utils.plot.plot_attn import plot_attention
 
-class Trans_IFMDD_ConPCO(sb.Brain):
+class Trans_IFMDD_ConPCO_ver2(sb.Brain):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # self.        super().__init__(*args, **kwargs)
@@ -445,8 +445,9 @@ class Trans_IFMDD_ConPCO(sb.Brain):
         self.conpco_metrics = self.hparams.conpco_stats()
         
         
-        if hasattr(self.hparams, "augmentation"):
-            self.modules.perceived_ssl.model.config.apply_spec_augment = True
+        if stage == sb.Stage.TRAIN:
+            if hasattr(self.hparams, "augmentation"):
+                self.modules.perceived_ssl.model.config.apply_spec_augment = True
 
         if stage != sb.Stage.TRAIN:
             self.per_metrics = self.hparams.per_stats()
@@ -509,6 +510,7 @@ class Trans_IFMDD_ConPCO(sb.Brain):
         wavs, wav_lens = batch.sig
         
         # Extract SSL features
+
         feats = self.modules.perceived_ssl(wavs)  # [B, T_s, ENC_DIM]
         if len(feats.shape) == 4: 
             feats = feats[self.hparams.preceived_ssl_emb_layer]
@@ -551,6 +553,7 @@ class Trans_IFMDD_ConPCO(sb.Brain):
             
             # Forward through TransASR encoder+decoder
             allow_ASR_hidden = getattr(self.hparams, "output_ASR_hidden_state", False)
+            
             outs = self.modules.TransASR(
                     src=feats,
                     tgt=targets_bos,
@@ -576,9 +579,8 @@ class Trans_IFMDD_ConPCO(sb.Brain):
                     import torch.nn.functional as F
                     # factor = self.hparams.post_encoder_reduction_factor
                     # B, T, D = memory.shape
-                    memory_t = memory.transpose(1, 2)  # [B, D, T]
-                    memory_t = self.modules.mem_proj_cnn_post_enc(memory_t)
-                    memory = memory_t.transpose(1, 2)  # [B, T//factor, D]
+    
+                    memory = self.modules.mem_proj_cnn_post_enc(memory)
                 
                 fuse_feat, _,  fuse_attn = self.modules.fuse_net(
                     tgt=Cano_emb,
@@ -672,9 +674,7 @@ class Trans_IFMDD_ConPCO(sb.Brain):
                         memory = self.modules.mem_proj(memory)  # [B, T_s, D]
                         
                         if self.hparams.post_encoder_reduction_factor >= 1:
-                            memory_t = memory.transpose(1, 2)  # [B, D, T]
-                            memory_t = self.modules.mem_proj_cnn_post_enc(memory_t)
-                            memory = memory_t.transpose(1, 2)  # [B, T//factor, D]
+                            memory = self.modules.mem_proj_cnn_post_enc(memory)
                         
                         fuse_feat, _,  fuse_attn = self.modules.fuse_net(
                             tgt=Cano_emb,
@@ -720,10 +720,12 @@ class Trans_IFMDD_ConPCO(sb.Brain):
                     h_seq_feat = self.modules.d_out(dec_out)  # [B, T_p+1, C]
                     p_seq_logits = self.hparams.log_softmax(h_seq_feat)
 
-                    # ==================== Validation: Get greedy hypothesis from logits ====================
+                    # ==================== Validation: Get greedy hypothesis ====================
+                    # hyps, top_lengths, top_scores, top_log_probs = self.hparams.valid_search(
+                    #         enc_out.detach(), wav_lens
+                    #     )
                     hyps = p_seq_logits.argmax(dim=-1)  # [B, T_p+1]
-                    from speechbrain.utils.data_utils import undo_padding
-                    hyps = undo_padding(hyps, target_lens_bos)
+
                     attn_map = None
                     
                     # ==================== Validation: Optional attention visualization ====================
@@ -800,9 +802,10 @@ class Trans_IFMDD_ConPCO(sb.Brain):
                             memory = self.modules.mem_proj(memory)  # [B, T_s, D]
                             
                             if self.hparams.post_encoder_reduction_factor >= 1:
-                                memory_t = memory.transpose(1, 2)  # [B, D, T]
-                                memory_t = self.modules.mem_proj_cnn_post_enc(memory_t)
-                                memory = memory_t.transpose(1, 2)  # [B, T//factor, D]
+                                
+                                # transpose applied inside mem_proj_cnn_post_enc
+                                memory = self.modules.mem_proj_cnn_post_enc(memory)
+                                
                             
                             fuse_feat, _,  fuse_attn = self.modules.fuse_net(
                                 tgt=Cano_emb,
@@ -849,10 +852,13 @@ class Trans_IFMDD_ConPCO(sb.Brain):
                         p_seq_logits = self.hparams.log_softmax(h_seq_feat)
 
                         # ==================== TEST: Get greedy hypothesis from logits ====================
-                        hyps = p_seq_logits.argmax(dim=-1)  # [B, T_p+1]
-                        from speechbrain.utils.data_utils import undo_padding
-                        hyps = undo_padding(hyps, target_lens_bos)
-                        attn_map = None
+                        # hyps = p_seq_logits.argmax(dim=-1)  # [B, T_p+1]
+                        hyps, top_lengths, top_scores, top_log_probs = self.hparams.test_search(
+                            enc_out.detach(), wav_lens
+                        )
+                        # from speechbrain.utils.data_utils import undo_padding
+                        # hyps = undo_padding(hyps, target_lens_bos)
+                        # attn_map = None
                         
                         top_log_probs = None
                         top_lengths = None
@@ -986,7 +992,6 @@ class Trans_IFMDD_ConPCO(sb.Brain):
 
         # Caculate the loss for CTC and seq2seq outputs
         # loss_ctc = self.hparams.ctc_cost(p_ctc_feat, targets, wav_lens, target_lens
-        
         if self.hparams.ctc_head_target == "perceived":
             loss_ctc = self.hparams.ctc_cost(p_ctc_feat, targets, wav_lens, target_lens)
         elif self.hparams.ctc_head_target == "canonical":
@@ -1037,7 +1042,10 @@ class Trans_IFMDD_ConPCO(sb.Brain):
         # default ignore index = -1
         # audio = dec_out, text = Cano_emb, phn_label = mispro_label, phns = canonicals
         
-        tgt_emb = self.modules.TransASR.custom_tgt_module(targets_eos)
+        if self.hparams.decoder_target == "target":
+            tgt_emb = self.modules.TransASR.custom_tgt_module(targets_eos)
+        else:
+            tgt_emb = self.modules.TransASR.custom_tgt_module(perceiveds_eos)
         # add tgt_pos_emb
         if (
             self.modules.TransASR.attention_type == "RelPosMHAXL"
@@ -1120,7 +1128,7 @@ class Trans_IFMDD_ConPCO(sb.Brain):
                 #     show_phoneme_centroid=self.hparams.conPCO_plot_show_phoneme_centroid,
                 #     show_phoneme_scatter=self.hparams.conPCO_plot_show_phoneme_scatter,
                 # )
-                pdb.set_trace()
+                # pdb.set_trace()
                 fig, ax, fig_zoom, ax_zoom = plot_phoneme_centroids_with_instances(
                     audio_feats=audio_feats_for_pco.detach().float().cpu(), 
                     phoneme_feats=tgt_emb_for_pco.detach().float().cpu(), 
@@ -1163,9 +1171,11 @@ class Trans_IFMDD_ConPCO(sb.Brain):
                 ):
                     # Record losses for posterit
                     # Traditional CTC greedy decoding
+                
                 sequence = sb.decoders.ctc_greedy_decode(
                     p_ctc_feat, wav_lens, blank_id=self.hparams.blank_index
                 )
+
                 sequence_decoder_out = hyps  # [B, T_p+1]
 
                 if self.hparams.eval_with_silence == False:
@@ -1227,6 +1237,7 @@ class Trans_IFMDD_ConPCO(sb.Brain):
                 filtered_seq_ref = None
                 filtered_seq_ref_lens = None
                 if self.hparams.eval_with_silence == False:
+                    import pdb; pdb.set_trace()
                     sil_inx = self.label_encoder.lab2ind.get("sil", None)
                     if sil_inx is not None:
                         # CTC 参考
@@ -1284,31 +1295,6 @@ class Trans_IFMDD_ConPCO(sb.Brain):
                     self.seq_metrics.append(ids, log_probabilities=p_dec_out, targets=targets_eos, length=target_lens_eos)
                 self.mispro_metrics.append(ids, h_mispro_bin, mispro_label_bin, mispro_label_lens)
                 self.mispro_metrics_cls.append(ids, p_mispro_cls_logits, mispro_label, mispro_label_lens)
-                
-                # pdb.set_trace()
-                # import speechbrain.utils.metric_stats #  MultiqMetricStats
-                
-                # self.conpco_metrics.append(
-                #                             features=dec_out, 
-                #                             features_text=self.modules.TransASR.custom_tgt_module(targets_eos), 
-                #                             gt=dummy_gt, 
-                #                             phn_id=targets_eos,
-                #                             )
-                # x = speechbrain.utils.metric_stats.MultiMetricStats(metric=self.hparams.conpco_cost, batch_eval=False)
-                # x.append(
-                #     ids,
-                #     features=dec_out, 
-                #     features_text=self.modules.TransASR.custom_tgt_module(targets_eos), 
-                #     gt=dummy_gt, 
-                #     phn_id=targets_eos,
-                # )
-                
-                # xpdb.set_trace()
-                # TODO: Guided Attention metrics
-                # self.ga_metrics.append(ids, attention=fuse_attn, 
-                #                        target_lengths=(mispro_label_lens * mispro_label.shape[1]).int(),
-                #                        input_lengths=(wav_lens * feats.shape[1]).int()
-                #                        )
                 
                 # self.ctc_metrics_fuse.append(ids, sequence_decoder_out, targets, wav_lens, target_lens)
                 # CTC-only results
@@ -1395,7 +1381,7 @@ class Trans_IFMDD_ConPCO(sb.Brain):
                             target_len=target_lens,
                             ind2lab=self.label_encoder.decode_ndim,
                         )
-                
+                import pdb; pdb.set_trace()
                 # MPD metrics
                 self.mpd_metrics.append(
                     ids=ids,

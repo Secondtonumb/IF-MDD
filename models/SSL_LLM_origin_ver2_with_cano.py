@@ -46,7 +46,7 @@ def phn_list_to_seq(batch):
         result.append(" ".join(x for x in phn_list))
     return result
     
-class SSL_LLM_origin_ver2(sb.Brain):
+class SSL_LLM_origin_ver2_with_cano(sb.Brain):
     def __init__(self, *args, patience=20, **kwargs):
         super().__init__(*args, **kwargs)
         self.patience = patience
@@ -144,12 +144,12 @@ class SSL_LLM_origin_ver2(sb.Brain):
                 chat_structure = [
                     {
                         "role": "system", 
-                        "content": "You are a arabic phoneme transcriber."
+                        "content": "You are a phoneme transcriber."
                     },
                     {
                         "role": "user", 
                         # 语音在指令之前
-                        "content": f"{PLACEHOLDER}\nTranscribe the preceding speech into phonemes."
+                        "content": f"{PLACEHOLDER}\nTranscribe the preceding speech into canonical phonemes and perceived phonemes, split them by newlines."
                     }
                 ]
 
@@ -262,24 +262,15 @@ class SSL_LLM_origin_ver2(sb.Brain):
             wavs = self.hparams.augmentation(wavs)
 
         # AudioEncoder + Projector
-        # import pdb; pdb.set_trace()
-        # try:
-        #     wav_feats = self.modules.perceived_ssl(wavs)  # [B, T, 1024]
-        # except:
-        #     # for whisper
-        #     wav_feats = self.modules.perceived_ssl.forward_encoder(wavs) 
-        
-        # # pdb.set_trace()
+        wav_feats = self.modules.perceived_ssl(wavs)  # [B, T, 1024]
         
         # AudioEncoder
-        # import pdb; pdb.set_trace()
         try:
             # with Conformer it give extra
             Z, _ = self.hparams.audio_encoder_modules(wavs)
         except:
             # SSL projection only
             Z = self.hparams.audio_encoder_modules(wavs)
-        # for whisper
         # CTC branch
         ctc_logits = self.modules.ctc_lin(Z)
         p_ctc = self.hparams.log_softmax(ctc_logits)
@@ -295,12 +286,13 @@ class SSL_LLM_origin_ver2(sb.Brain):
         embed_fn = self.modules.LLM.get_input_embeddings()
         
         # ===== Tokenize phoneme sequences =====
-        if self.hparams.training_target == "target":
-            phn_list_to_use = batch.phn_list_target
-        elif self.hparams.training_target == "perceived":
-            phn_list_to_use = batch.phn_list_perceived
-        phn_seq = phn_list_to_seq(phn_list_to_use)
+        # import pdb; pdb.set_trace()
+        phn_seq = phn_list_to_seq(batch.phn_list_target)
+        can_seq = phn_list_to_seq(batch.phn_list_canonical)
+        # concat with \n
+        phn_seq = [c + "\n" + p for c, p in zip(can_seq, phn_seq)]
         phn_tokens = tok(phn_seq, return_tensors="pt", padding=True, add_special_tokens=False).to(device)
+
         # phn_tokens["input_ids"]: [B, L_phn]
         # phn_tokens["attention_mask"]: [B, L_phn]
         # tok.batch_decode(phn_tokens["input_ids"], skip_special_tokens=False)
@@ -308,6 +300,8 @@ class SSL_LLM_origin_ver2(sb.Brain):
         phn_ids = phn_tokens["input_ids"]
         phn_mask = phn_tokens["attention_mask"]
         L_phn = phn_ids.size(1)
+
+        # ==== Tokenize canonical phoneme sequences =====
         
         # ===== Prepare special tokens =====
         BOS_ID = tok.bos_token_id
@@ -449,8 +443,7 @@ class SSL_LLM_origin_ver2(sb.Brain):
             # llm_out.logits: [B, seq_len, 128000]
             # pdb.set_trace()
             loss = llm_out.loss  # CrossEntropyLoss if labels provided
-            # logger.info(f"LLM Loss: {loss.item():.4f}")
-            # pdb.set_trace()
+            # print(f"[DEBUG] LLM Loss: {loss.item()}")
             # pdb.set_trace()
             ce_logits = llm_out.logits
             
@@ -577,8 +570,8 @@ class SSL_LLM_origin_ver2(sb.Brain):
                     num_beams=1,
                     # top_k = 71,
                     # top_p = 0.9,
-                    max_new_tokens=L_phn + 10, 
-                    temperature=1.0,
+                    # max_new_tokens=200, 
+                    temperature=1.2,
                     # repetition_penalty=1.00,
                     # no_repeat_ngram_size=4,
                 )
@@ -606,7 +599,9 @@ class SSL_LLM_origin_ver2(sb.Brain):
                 #     print(f"[DEBUG] Decoded: <empty>")
                 
                 # Return for metrics calculation
-                return p_ctc, None, {"generated_ids": gen_tokens, "target_phonemes": phn_list_to_use}, wav_lens
+                # use concat of can and perceived as target_phonemes
+        
+                return p_ctc, None, {"generated_ids": gen_tokens, "target_phonemes": batch.phn_list_target, "canonical_phonemes": batch.phn_list_canonical}, wav_lens
 
     def compute_objectives(self, predictions, batch, stage):
         """Compute training objectives: CTC loss + LLM loss (big-vocab, 128K tokens)"""
@@ -650,7 +645,7 @@ class SSL_LLM_origin_ver2(sb.Brain):
             )
             self.ctc_metrics.append(ids, p_ctc, targets, lens_for_ctc, clipped_target_lens)
             # remove id==70 in ctc sequence
-            ctc_sequence = [[phn for phn in seq if phn != 70] for seq in ctc_sequence]
+            # ctc_sequence = [[phn for phn in seq if phn != 70] for seq in ctc_sequence]
             self.per_metrics.append(
                 ids=ids,
                 predict=ctc_sequence,
@@ -706,6 +701,32 @@ class SSL_LLM_origin_ver2(sb.Brain):
                                 target_len=None,
                                 ind2lab=lambda x: x 
                             )
+                            # import pdb; pdb.set_trace()
+                            # can_ref, tgt_ref = valid_labels.split(target_text.count("\n")+1)
+
+                            # can_ref = self.hparams.LLM_tokenizer.decode(can_ref, skip_special_tokens=True)
+                            # tgt_ref = self.hparams.LLM_tokenizer.decode(tgt_ref, skip_special_tokens=True)
+                            
+                            # pred_can, pred_tgt = pred_text.split("\n", 1)
+                            
+                            # self.can_per_metrics.append(
+                            #     ids=[ids[b]],
+                            #     predict=[pred_can.split()],
+                            #     target=[can_ref.split()],
+                            #     predict_len=None,
+                            #     target_len=None,
+                            #     ind2lab=lambda x: x 
+                            # )
+
+                            # self.tgt_per_metrics.append(
+                            #     ids=[ids[b]],
+                            #     predict=[pred_tgt.split()],
+                            #     target=[tgt_ref.split()],
+                            #     predict_len=None,
+                            #     target_len=None,
+                            #     ind2lab=lambda x: x 
+                            # )
+                            
                             self.mpd_f1_metrics.append(
                                 ids=[ids[b]],
                                 predict=[pred_text.split()],
@@ -733,13 +754,15 @@ class SSL_LLM_origin_ver2(sb.Brain):
                     hyps = self.hparams.LLM_tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
                     
                     # 2. Decode References (Targets)
-                    if self.hparams.training_target == "target":
-                        phn_list_to_use = batch.phn_list_target
-                    elif self.hparams.training_target == "perceived":
-                        phn_list_to_use = batch.phn_list_perceived
-                    refs = phn_list_to_seq(phn_list_to_use)
+                    refs_cano = phn_list_to_seq(batch.phn_list_canonical)
+                    refs_tgt = phn_list_to_seq(batch.phn_list_target)
+                    refs = [c + "\n" + p for c, p in zip(refs_cano, refs_tgt)]
                     
                     # 3. Compute PER
+                    # TODO
+                    # can_per 
+                    # tgt_per
+                    # llm_per = all
                     self.llm_per_metrics.append(
                         ids=ids,
                         predict=[hyp.split() for hyp in hyps],
@@ -748,11 +771,44 @@ class SSL_LLM_origin_ver2(sb.Brain):
                         target_len=None,
                         ind2lab=lambda x: x
                     )
+                    # try split canonical and perceived with \n
+                    can_hyps = []
+                    per_hyps = []
+                    for hyp in hyps:
+                        if "\n" in hyp:
+                            can_part, per_part = hyp.split("\n", 1)
+                        else:
+                            logger.warning(f"Generated hypothesis for ID {ids} does not contain newline separator. Assigning entire hypothesis to perceived part.")
+                            can_part = ""
+                            per_part = hyp
+                        can_hyps.append(can_part)
+                        per_hyps.append(per_part)
+                    
+                    # import pdb; pdb.set_trace()
+                    self.can_per_metrics.append(
+                        ids=ids,
+                        predict=[can_hyp.split() for can_hyp in can_hyps],
+                        target=[ref.split() for ref in refs_cano],
+                        predict_len=None,
+                        target_len=None,
+                        ind2lab=lambda x: x
+                    )
+                    
+                    self.tgt_per_metrics.append(
+                        ids=ids,
+                        predict=[per_hyp.split() for per_hyp in per_hyps],
+                        target=[ref.split() for ref in refs_tgt],
+                        predict_len=None,
+                        target_len=None,
+                        ind2lab=lambda x: x
+                    )
+
+
                     # 4. Compute MPD F1
                     # pdb.set_trace()
                     self.mpd_f1_metrics.append(
                         ids=ids,
-                        predict=[hyp.split() for hyp in hyps],
+                        predict=[hyp.split() for hyp in per_hyps],
                         canonical=canonical,
                         perceived=perceived,
                         predict_len=None,
@@ -1093,6 +1149,9 @@ class SSL_LLM_origin_ver2(sb.Brain):
         if stage != sb.Stage.TRAIN:
             self.per_metrics = self.hparams.per_stats()
             self.llm_per_metrics = self.hparams.per_stats()# 添加LLM PER统计
+            self.can_per_metrics = self.hparams.per_stats()  # 添加canonical PER统计
+            self.tgt_per_metrics = self.hparams.per_stats()  # 添加target PER统计
+
             self.mpd_f1_metrics = MpdStats()  # 添加MPD F1统计
             
     def on_stage_end(self, stage, stage_loss, epoch):

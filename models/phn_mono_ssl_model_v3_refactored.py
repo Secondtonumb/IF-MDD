@@ -507,7 +507,7 @@ class PhnMonoSSLModel(sb.Brain):
                 
                 # PER metrics
                 # Remove token ID 70 from sequences
-                # sequence = [[token for token in seq if token != 70] for seq in sequence]
+                sequence = [[token for token in seq if token != 70] for seq in sequence]
                         
                 self.per_metrics.append(
                     ids=ids,

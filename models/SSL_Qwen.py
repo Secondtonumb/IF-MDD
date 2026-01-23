@@ -46,7 +46,7 @@ def phn_list_to_seq(batch):
         result.append(" ".join(x for x in phn_list))
     return result
     
-class SSL_LLM_origin_ver2(sb.Brain):
+class SSL_Qwen(sb.Brain):
     def __init__(self, *args, patience=20, **kwargs):
         super().__init__(*args, **kwargs)
         self.patience = patience
@@ -140,19 +140,31 @@ class SSL_LLM_origin_ver2(sb.Brain):
                 PLACEHOLDER = "<<<SPEECH_EMBEDDING_HERE>>>"
 
                 # 1. 定义对话结构，把占位符放在你想插入语音的地方
-                #    注意：Llama 3 的 user content 通常紧跟在 header 之后
+                #    
+                #   Qwen2
                 chat_structure = [
                     {
                         "role": "system", 
-                        "content": "You are a arabic phoneme transcriber."
+                        "content": "You are a arabic expert. You know all kind of quranic pronuciation and phonemes."
                     },
+                    
                     {
                         "role": "user", 
-                        # 语音在指令之前
-                        "content": f"{PLACEHOLDER}\nTranscribe the preceding speech into phonemes."
+                        "content": [
+                            {"type": "audio", "audio_url": f"file://home/m64000/work/dataset/data_iqra_extra_is26/wav/is26_sample_1329.wav"},
+                            {"type": "text", "text": f"Transcribe the phonemes of the above audio into phoneme sequence."}
+                        ]
                     }
                 ]
-
+                
+                message = {
+                    "role": "user",
+                    "content": [
+                        {"type": "audio", "audio_url": "file://home/m64000/work/dataset/data_iqra_extra_is26/wav/is26_sample_1329.wav"},
+                        {"type": "text", "text": "Transcribe the phonemes of the above audio into phoneme sequence."}
+                    ]
+                }
+                    
                 # 2. 使用官方模板渲染成字符串 (tokenize=False)
                 #    add_generation_prompt=True 会自动加上 <|start_header_id|>assistant...
                 full_prompt_str = tok.apply_chat_template(
@@ -186,61 +198,6 @@ class SSL_LLM_origin_ver2(sb.Brain):
                 self.prompt_embed = torch.cat([self.prompt_prefix_embed, self.prompt_suffix_embed], dim=0)
                 print(f"[Lazy Init] Generated Llama 3 Prompt via Template.")
 
-    def _build_input_embeddings(self, B, Z, phn_embed, SEP_embed, BOS_embed, EOS_embed, 
-                                has_split_prompt=False, prompt_embed_batch=None):
-        """Build input embedding sequence for LLM forward pass.
-        
-        Consolidates all embedding concatenation logic to handle different prompt scenarios:
-        1. Split prompt: [prefix] [speech] [suffix] [phonemes] [EOS]
-        2. With prompt: [prompt] [SEP] [speech] [BOS] [phonemes] [EOS]
-        3. Without prompt: [SEP] [speech] [BOS] [phonemes] [EOS]
-        
-        Args:
-            B: Batch size
-            Z: Speech embeddings [B, Ts, H]
-            phn_embed: Phoneme embeddings [B, L_phn, H]
-            SEP_embed: SEP token embedding [B, 1, H]
-            BOS_embed: BOS token embedding [B, 1, H]
-            EOS_embed: EOS token embedding [B, 1, H]
-            has_split_prompt: Whether using split prompt (prefix/suffix)
-            prompt_embed_batch: Prompt embeddings [B, P, H] or None
-            
-        Returns:
-            inputs_embeds: Concatenated input embeddings [B, seq_len, H]
-        """
-        if has_split_prompt:
-            # [prefix] [speech] [suffix] [phonemes] [EOS]
-            prefix_embed = self.prompt_prefix_embed
-            suffix_embed = self.prompt_suffix_embed
-            inputs_embeds = torch.cat([
-                prefix_embed.unsqueeze(0).expand(B, -1, -1),
-                Z,
-                suffix_embed.unsqueeze(0).expand(B, -1, -1),
-                phn_embed,
-                EOS_embed
-            ], dim=1)
-        elif prompt_embed_batch is not None:
-            # [prompt] [SEP] [speech] [BOS] [phonemes] [EOS]
-            inputs_embeds = torch.cat([
-                prompt_embed_batch,  # [B, P, H]
-                SEP_embed,          # [B, 1, H]
-                Z,                   # [B, Ts, H]
-                BOS_embed,          # [B, 1, H]
-                phn_embed,          # [B, L_phn, H]
-                EOS_embed           # [B, 1, H]
-            ], dim=1)  # [B, P+1+Ts+1+L_phn+1, H]
-        else:
-            # [SEP] [speech] [BOS] [phonemes] [EOS]
-            inputs_embeds = torch.cat([
-                SEP_embed,          # [B, 1, H]
-                Z,                   # [B, Ts, H]
-                BOS_embed,          # [B, 1, H]
-                phn_embed,          # [B, L_phn, H]
-                EOS_embed           # [B, 1, H]
-            ], dim=1)  # [B, 1+Ts+1+L_phn+1, H]
-        
-        return inputs_embeds
-
     def compute_forward(self, batch, stage):
         """Given an input batch it computes the model forward pass.
         
@@ -262,24 +219,15 @@ class SSL_LLM_origin_ver2(sb.Brain):
             wavs = self.hparams.augmentation(wavs)
 
         # AudioEncoder + Projector
-        # import pdb; pdb.set_trace()
-        # try:
-        #     wav_feats = self.modules.perceived_ssl(wavs)  # [B, T, 1024]
-        # except:
-        #     # for whisper
-        #     wav_feats = self.modules.perceived_ssl.forward_encoder(wavs) 
-        
-        # # pdb.set_trace()
+        wav_feats = self.modules.perceived_ssl(wavs)  # [B, T, 1024]
         
         # AudioEncoder
-        # import pdb; pdb.set_trace()
         try:
             # with Conformer it give extra
             Z, _ = self.hparams.audio_encoder_modules(wavs)
         except:
             # SSL projection only
             Z = self.hparams.audio_encoder_modules(wavs)
-        # for whisper
         # CTC branch
         ctc_logits = self.modules.ctc_lin(Z)
         p_ctc = self.hparams.log_softmax(ctc_logits)
@@ -295,11 +243,7 @@ class SSL_LLM_origin_ver2(sb.Brain):
         embed_fn = self.modules.LLM.get_input_embeddings()
         
         # ===== Tokenize phoneme sequences =====
-        if self.hparams.training_target == "target":
-            phn_list_to_use = batch.phn_list_target
-        elif self.hparams.training_target == "perceived":
-            phn_list_to_use = batch.phn_list_perceived
-        phn_seq = phn_list_to_seq(phn_list_to_use)
+        phn_seq = phn_list_to_seq(batch.phn_list_target)
         phn_tokens = tok(phn_seq, return_tensors="pt", padding=True, add_special_tokens=False).to(device)
         # phn_tokens["input_ids"]: [B, L_phn]
         # phn_tokens["attention_mask"]: [B, L_phn]
@@ -356,11 +300,34 @@ class SSL_LLM_origin_ver2(sb.Brain):
         
         # Concatenate everything
         has_split_prompt = use_prompt and hasattr(self, "prompt_prefix_embed") and hasattr(self, "prompt_suffix_embed")
-        inputs_embeds = self._build_input_embeddings(
-            B, Z, phn_embed, SEP_embed, BOS_embed, EOS_embed,
-            has_split_prompt=has_split_prompt, 
-            prompt_embed_batch=prompt_embed_batch
-        )
+
+        if has_split_prompt:
+             prefix_embed = self.prompt_prefix_embed
+             suffix_embed = self.prompt_suffix_embed
+             inputs_embeds = torch.cat([
+                prefix_embed.unsqueeze(0).expand(B, -1, -1),
+                Z,
+                suffix_embed.unsqueeze(0).expand(B, -1, -1),
+                phn_embed,
+                EOS_embed
+            ], dim=1)
+        elif prompt_embed is not None:
+            inputs_embeds = torch.cat([
+                prompt_embed_batch,  # [B, P, H]
+                SEP_embed,          # [B, 1, H]
+                Z,                   # [B, Ts, H]
+                BOS_embed,          # [B, 1, H]
+                phn_embed,          # [B, L_phn, H]
+                EOS_embed           # [B, 1, H]
+            ], dim=1)  # [B, P+1+Ts+1+L_phn+1, H]
+        else:
+            inputs_embeds = torch.cat([
+                SEP_embed,          # [B, 1, H]
+                Z,                   # [B, Ts, H]
+                BOS_embed,          # [B, 1, H]
+                phn_embed,          # [B, L_phn, H]
+                EOS_embed           # [B, 1, H]
+            ], dim=1)  # [B, 1+Ts+1+L_phn+1, H]
         
         # Persist LayerNorm (created in on_fit_start, not per-forward)
         # if hasattr(self, "llm_norm") and self.llm_norm is not None:
@@ -449,8 +416,7 @@ class SSL_LLM_origin_ver2(sb.Brain):
             # llm_out.logits: [B, seq_len, 128000]
             # pdb.set_trace()
             loss = llm_out.loss  # CrossEntropyLoss if labels provided
-            # logger.info(f"LLM Loss: {loss.item():.4f}")
-            # pdb.set_trace()
+            # print(f"[DEBUG] LLM Loss: {loss.item()}")
             # pdb.set_trace()
             ce_logits = llm_out.logits
             
@@ -577,8 +543,8 @@ class SSL_LLM_origin_ver2(sb.Brain):
                     num_beams=1,
                     # top_k = 71,
                     # top_p = 0.9,
-                    max_new_tokens=L_phn + 10, 
-                    temperature=1.0,
+                    # max_new_tokens=200, 
+                    temperature=1.2,
                     # repetition_penalty=1.00,
                     # no_repeat_ngram_size=4,
                 )
@@ -606,7 +572,7 @@ class SSL_LLM_origin_ver2(sb.Brain):
                 #     print(f"[DEBUG] Decoded: <empty>")
                 
                 # Return for metrics calculation
-                return p_ctc, None, {"generated_ids": gen_tokens, "target_phonemes": phn_list_to_use}, wav_lens
+                return p_ctc, None, {"generated_ids": gen_tokens, "target_phonemes": batch.phn_list_target}, wav_lens
 
     def compute_objectives(self, predictions, batch, stage):
         """Compute training objectives: CTC loss + LLM loss (big-vocab, 128K tokens)"""
@@ -650,7 +616,7 @@ class SSL_LLM_origin_ver2(sb.Brain):
             )
             self.ctc_metrics.append(ids, p_ctc, targets, lens_for_ctc, clipped_target_lens)
             # remove id==70 in ctc sequence
-            ctc_sequence = [[phn for phn in seq if phn != 70] for seq in ctc_sequence]
+            # ctc_sequence = [[phn for phn in seq if phn != 70] for seq in ctc_sequence]
             self.per_metrics.append(
                 ids=ids,
                 predict=ctc_sequence,
@@ -733,11 +699,7 @@ class SSL_LLM_origin_ver2(sb.Brain):
                     hyps = self.hparams.LLM_tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
                     
                     # 2. Decode References (Targets)
-                    if self.hparams.training_target == "target":
-                        phn_list_to_use = batch.phn_list_target
-                    elif self.hparams.training_target == "perceived":
-                        phn_list_to_use = batch.phn_list_perceived
-                    refs = phn_list_to_seq(phn_list_to_use)
+                    refs = phn_list_to_seq(batch.phn_list_target)
                     
                     # 3. Compute PER
                     self.llm_per_metrics.append(
@@ -1363,9 +1325,9 @@ class SSL_LLM_origin_ver2(sb.Brain):
         # before = self.hparams.ssl_proj[1].state_dict()["w.weight"]
         # self.modules.ctc_lin.state_dict()['w.weight']
         
-        # import pdb; pdb.set_trace()
+        import pdb; pdb.set_trace()
         pretrainer.load_collected()
-        # import pdb; pdb.set_trace()
+        import pdb; pdb.set_trace()
         
         # Freeze loaded components if requested
         if freeze_loaded:
@@ -1404,19 +1366,46 @@ class SSL_LLM_origin_ver2(sb.Brain):
         # Wrap modules with parallel backend after jit
         self._wrap_distributed()
 
+        # ===== NOTE: Initialization moved to _ensure_initialized() =====
+        # This allows the model to work in inference mode without calling fit()
+        # The lazy initialization happens on first forward pass
+        # 
+        # Previously initialized here:
+        # - self.llm_norm (LayerNorm for LLM hidden states)
+        # - self.prompt_embed (soft or text prompt embeddings)
+        # 
+        # Now these are created in _ensure_initialized() which is called by compute_forward()
+        
+        # Initialize optimizers (happens during training only)
+
         self.init_optimizers()
         
+        # Wrap PeftModels in checkpointer to only save adapters
+        # if self.checkpointer is not None and PeftModel is not None:
+        #     # We iterate over keys to find PeftModels and wrap them
+        #     keys_to_wrap = []
+        #     for name, obj in self.checkpointer.recoverables.items():
+        #         # Handle DDP wrapped objects
+        #         real_obj = obj
+        #         if hasattr(obj, "module"):
+        #             real_obj = obj.module
+                
+        #         if isinstance(real_obj, PeftModel):
+        #             keys_to_wrap.append(name)
+            
+        #     for name in keys_to_wrap:
+        #         print(f"[Checkpointer] Wrapping '{name}' with PeftAdapterRecoverable to save ONLY adapters.")
+        #         self.checkpointer.recoverables[name] = PeftAdapterRecoverable(self.checkpointer.recoverables[name])
+
         if self.checkpointer is not None:
             self.checkpointer.recover_if_possible(min_key="LLM_PER")
         
         # Only Init the AudioEncoderPretrainer with pretrained components during training
-        # Essential for loading pretrained
         if getattr(self.hparams, 'load_pretrained_components', False):
             pretrained_path = getattr(self.hparams, 'pretrained_model_path', '')
             components = getattr(self.hparams, 'components_to_load', ['ssl'])
             freeze_loaded = getattr(self.hparams, 'freeze_loaded_components', True)
         
-        # for AudioEncoderPretrainer loading
         import os
         if pretrained_path and os.path.exists(pretrained_path):
             try:

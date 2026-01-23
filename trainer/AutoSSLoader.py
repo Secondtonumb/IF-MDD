@@ -41,7 +41,13 @@ pretrained_models={
     "mimi": "kyutai/mimi" # codec, 1
 }
 
-def AutoSSLLoader(model_name, freeze, freeze_feature_extractor, save_path, output_all_hiddens,encoder_type=None):
+def AutoSSLLoader(model_name,
+                freeze,
+                freeze_feature_extractor,
+                save_path,
+                output_all_hiddens,
+                encoder_type=None,
+                encoder_only=False):
     """
     source: str, the name of the pretrained model e.g "hubert_multilingual", "clap", "data2vec_base", etc.
     freeze: bool, whether to freeze the model
@@ -91,6 +97,7 @@ def AutoSSLLoader(model_name, freeze, freeze_feature_extractor, save_path, outpu
                 source=model_id,
                 freeze=freeze,
                 save_path=save_path,
+                encoder_only=encoder_only,
             )
         elif "mimi" in model_id:
             return Mimi(
