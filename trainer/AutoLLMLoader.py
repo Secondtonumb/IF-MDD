@@ -43,6 +43,7 @@ def AutoLLMLoader(model_name, use_lora=False, lora_config=None, replace_output_h
                 device_map="auto",
                 torch_dtype=torch.float16,
             )
+                # quantization_config=quantization_config,
         
         # ===== Replace LLM output head with custom phoneme head =====
         if replace_output_head and phoneme_dim is not None:

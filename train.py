@@ -44,6 +44,9 @@ from models.SSL_LLM_origin import SSL_LLM_origin
 from models.SSL_LLM_origin_ver2 import SSL_LLM_origin_ver2
 from models.SSL_LLM_origin_ver2_with_cano import SSL_LLM_origin_ver2_with_cano
 from models.SSL_LLM_MultiTarget_ver1 import SSL_LLM_MultiTarget_ver1
+from models.SSL_LLM_MultiTarget_ver2 import SSL_LLM_MultiTarget_ver2
+
+from models.SSL_LLM_PPATP import SSL_LLM_PPATP
 
 # from models.SSL_LLM_origin_ver2_expand_tok import SSL_LLM_origin_ver2_expand_tok
 
@@ -111,6 +114,8 @@ if __name__ == "__main__":
         asr_brain_class = Trans_IFMDD_ConPCO_ver2
     elif hparams["feature_fusion"] == "SSL_LLM_MultiTarget_ver1":
         asr_brain_class = SSL_LLM_MultiTarget_ver1
+    elif hparams["feature_fusion"] == "SSL_LLM_MultiTarget_ver2":
+        asr_brain_class = SSL_LLM_MultiTarget_ver2
     
         
     # elif hparams["feature_fusion"] == "SSL_LLM":
@@ -121,6 +126,8 @@ if __name__ == "__main__":
         asr_brain_class = SSL_LLM_origin_ver2
     elif hparams["feature_fusion"] == "SSL_LLM_origin_ver2_with_cano":
         asr_brain_class = SSL_LLM_origin_ver2_with_cano
+    elif hparams["feature_fusion"] == "SSL_LLM_PPATP":
+        asr_brain_class = SSL_LLM_PPATP
     # elif hparams["feature_fusion"] == "SSL_LLM_origin_ver2_expand_tok":
     #     asr_brain_class = SSL_LLM_origin_ver2_expand_tok
     # if asr_brain_class == SSL_LLM:
@@ -183,8 +190,7 @@ if __name__ == "__main__":
     # train_data = train_data.filtered_sorted(key_test={"id": lambda x: x in train_record},)
     # valid_data = valid_data.filtered_sorted(key_test={"id": lambda x: x in valid_record},)
     # test_record = test_data.data_ids[:16]
-    # test_data = test_data.filtered_sorted(key_test={"id": lambda x: x in test_record},)
-    
+    # test_data = test_data.filtered_sorted(key_test={"id": lambda x: x in test_record},)  
     
     # Debug
     

@@ -34,6 +34,7 @@ pretrained_models={
     "hubert_large_ll60k": "facebook/hubert-large-ll60k", # 1024
     "wavlm_large": "microsoft/wavlm-large", # 1024
     "data2vec_large": "facebook/data2vec-audio-large", #1024
+    "hubert_arabic": "omarxadel/hubert-large-arabic-egyptian", # 1024
     
     "whisper_medium": "openai/whisper-medium", # 1024
     "whisper_large_v3_turbo": "openai/whisper-large-v3-turbo", # 1280

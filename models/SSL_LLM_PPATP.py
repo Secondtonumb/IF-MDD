@@ -301,6 +301,9 @@ class SSL_LLM_PPATP(sb.Brain):
         prefix_lens = []
         suffix_lens = []
         
+        # 日志记录：仅在第一次调用时输出一个样本prompt
+        sample_prompt_logged = getattr(self, "_sample_prompt_logged", False)
+        
         for b in range(B):
             # ===== 1. 为这个样本构建user content =====
             user_content = f"{PLACEHOLDER}"
@@ -331,15 +334,38 @@ class SSL_LLM_PPATP(sb.Brain):
                         # ===== STATLLM 格式：穿插的 mispronunciation hints =====
                         if isinstance(can_phn_list, list) and len(can_phn_list) > 0:
                             interleaved_phonemes = []
-                            for phn in can_phn_list:
+                            
+                            # 检查是否使用Err_pos_aware模式
+                            statllm_mode = getattr(self.hparams, "statllm_mode", "standard")  # "standard" or "err_pos_aware"
+                            
+                            # 获取perceived phonemes用于比较
+                            perc_phn_list = None
+                            if statllm_mode == "err_pos_aware" and hasattr(batch, "phn_list_perceived") and batch.phn_list_perceived is not None and len(batch.phn_list_perceived) > b:
+                                perc_phn_list = batch.phn_list_perceived[b]
+                                if not isinstance(perc_phn_list, list):
+                                    perc_phn_list = [perc_phn_list]
+                            
+                            for idx, phn in enumerate(can_phn_list):
                                 phoneme_str = phn
                                 alternatives = []
-                                if self.confusion_matrix and phn in self.confusion_matrix:
-                                    confusions = self.confusion_matrix[phn].get("confusions", [])
-                                    for item in confusions[:3]:
-                                        confused_phn = item.get("phoneme")
-                                        if confused_phn and confused_phn != phn:
-                                            alternatives.append(confused_phn)
+                                
+                                # 判断是否需要添加alternatives
+                                should_add_alternatives = True
+                                
+                                if statllm_mode == "err_pos_aware" and perc_phn_list is not None:
+                                    # 只在perceived与canonical不同的位置添加alternatives
+                                    if idx < len(perc_phn_list) and perc_phn_list[idx] == phn:
+                                        # 该位置相同，不添加alternatives
+                                        should_add_alternatives = False
+                                
+                                if should_add_alternatives:
+                                    if self.confusion_matrix and phn in self.confusion_matrix:
+                                        confusions = self.confusion_matrix[phn].get("confusions", [])
+                                        for item in confusions[:3]:
+                                            confused_phn = item.get("phoneme")
+                                            if confused_phn and confused_phn != phn:
+                                                alternatives.append(confused_phn)
+                                
                                 if alternatives:
                                     phoneme_str += f" ({', '.join(alternatives)})"
                                 interleaved_phonemes.append(phoneme_str)
@@ -348,6 +374,7 @@ class SSL_LLM_PPATP(sb.Brain):
                             pp_context_lines.append(f"Canonical sequence: {canonical_str}")
                             if self.show_canonical_phn_length:
                                 pp_context_lines.append(f"Length: {len(can_phn_list)} phonemes")
+                            # import pdb; pdb.set_trace()
                         else:
                             can_phn_str = " ".join(can_phn_list) if isinstance(can_phn_list, list) else str(can_phn_list)
                             pp_context_lines.append(f"Canonical sequence: {can_phn_str}")
@@ -401,6 +428,16 @@ class SSL_LLM_PPATP(sb.Brain):
                     user_content += "\nReturn in CMUdict format with spaces between phonemes."
             else:
                 user_content += "\nTranscribe the preceding speech into phonemes."
+            
+            # 日志记录：仅在第一次（b=0）输出示例prompt
+            if b == 0 and not sample_prompt_logged:
+                logger.info("=" * 80)
+                logger.info(f"[Prompt Format: {prompt_format.upper()}] Sample user content:")
+                logger.info("-" * 80)
+                logger.info(user_content.replace(PLACEHOLDER, "[SPEECH_AUDIO]"))
+                logger.info("=" * 80)
+                self._sample_prompt_logged = True
+            
             # import pdb; pdb.set_trace()
             # ===== 2. 构建chat结构 =====
             chat_structure = [
@@ -785,7 +822,7 @@ class SSL_LLM_PPATP(sb.Brain):
             # llm_out.logits: [B, seq_len, 128000]
             # pdb.set_trace()
             loss = llm_out.loss  # CrossEntropyLoss if labels provided
-            # logger.info(f"LLM Loss: {loss.item():.4f}")
+            logger.info(f"LLM Loss: {loss.item():.4f}")
             # pdb.set_trace()
             # pdb.set_trace()
             ce_logits = llm_out.logits
@@ -948,11 +985,11 @@ class SSL_LLM_PPATP(sb.Brain):
                     bos_token_id=BOS_ID,
                     do_sample=True,
                     use_cache=True,
-                    num_beams=3,
+                    num_beams=1,
                     # top_k = 71,
                     # top_p = 0.9,
                     max_new_tokens=L_phn + 10, 
-                    temperature=1.1,
+                    temperature=1.0,
                     # repetition_penalty=1.00,
                     # no_repeat_ngram_size=4,
                 )
@@ -1185,7 +1222,7 @@ class SSL_LLM_PPATP(sb.Brain):
         return loss.detach()
 
     @torch.no_grad()
-    def inference_batch(self, batch, max_new_tokens=100, do_sample=False, temperature=1.0, top_k=50, top_p=0.9, num_beams=1):
+    def inference_batch(self, batch, max_new_tokens=100, do_sample=False, temperature=1.0, top_k=50, top_p=0.9, num_beams=1, inference_prompt_mode="with_alternatives"):
         """
         Pure inference when batch only contains id and sig (no target phonemes).
         
@@ -1199,6 +1236,7 @@ class SSL_LLM_PPATP(sb.Brain):
             top_k: Top-k sampling parameter
             top_p: Top-p (nucleus) sampling parameter
             num_beams: Number of beams for beam search (if applicable)
+            inference_prompt_mode: "with_alternatives" (add potential phonemes) or "canonical_only" (no alternatives)
             
         Returns:
             dict: {
@@ -1311,24 +1349,56 @@ class SSL_LLM_PPATP(sb.Brain):
                         if prompt_format == "statllm":
                             # ===== STATLLM 格式 =====
                             if isinstance(can_phn_list, list) and len(can_phn_list) > 0:
-                                interleaved_phonemes = []
-                                for phn in can_phn_list:
-                                    phoneme_str = phn
-                                    alternatives = []
-                                    if self.confusion_matrix and phn in self.confusion_matrix:
-                                        confusions = self.confusion_matrix[phn].get("confusions", [])
-                                        for item in confusions[:3]:
-                                            confused_phn = item.get("phoneme")
-                                            if confused_phn and confused_phn != phn:
-                                                alternatives.append(confused_phn)
-                                    if alternatives:
-                                        phoneme_str += f" ({', '.join(alternatives)})"
-                                    interleaved_phonemes.append(phoneme_str)
-                                
-                                canonical_str = " ".join(interleaved_phonemes)
-                                pp_context_lines.append(f"Canonical sequence: {canonical_str}")
-                                if self.show_canonical_phn_length:
-                                    pp_context_lines.append(f"Length: {len(can_phn_list)} phonemes")
+                                # 推理时控制是否添加alternatives
+                                if inference_prompt_mode == "canonical_only":
+                                    # 只显示canonical，不添加alternatives
+                                    can_phn_str = " ".join(can_phn_list)
+                                    pp_context_lines.append(f"Canonical sequence: {can_phn_str}")
+                                    if self.show_canonical_phn_length:
+                                        pp_context_lines.append(f"Length: {len(can_phn_list)} phonemes")
+                                else:
+                                    # "with_alternatives" 模式：添加alternatives
+                                    interleaved_phonemes = []
+                                    
+                                    # 检查是否使用Err_pos_aware模式
+                                    statllm_mode = getattr(self.hparams, "statllm_mode", "standard")  # "standard" or "err_pos_aware"
+                                    
+                                    # 获取perceived phonemes用于比较
+                                    perc_phn_list = None
+                                    if statllm_mode == "err_pos_aware" and hasattr(batch, "phn_list_perceived") and batch.phn_list_perceived is not None and len(batch.phn_list_perceived) > b:
+                                        perc_phn_list = batch.phn_list_perceived[b]
+                                        if not isinstance(perc_phn_list, list):
+                                            perc_phn_list = [perc_phn_list]
+                                    
+                                    for idx, phn in enumerate(can_phn_list):
+                                        phoneme_str = phn
+                                        alternatives = []
+                                        
+                                        # 判断是否需要添加alternatives
+                                        should_add_alternatives = True
+                                        
+                                        if statllm_mode == "err_pos_aware" and perc_phn_list is not None:
+                                            # 只在perceived与canonical不同的位置添加alternatives
+                                            if idx < len(perc_phn_list) and perc_phn_list[idx] == phn:
+                                                # 该位置相同，不添加alternatives
+                                                should_add_alternatives = False
+                                        
+                                        if should_add_alternatives:
+                                            if self.confusion_matrix and phn in self.confusion_matrix:
+                                                confusions = self.confusion_matrix[phn].get("confusions", [])
+                                                for item in confusions[:3]:
+                                                    confused_phn = item.get("phoneme")
+                                                    if confused_phn and confused_phn != phn:
+                                                        alternatives.append(confused_phn)
+                                        
+                                        if alternatives:
+                                            phoneme_str += f" ({', '.join(alternatives)})"
+                                        interleaved_phonemes.append(phoneme_str)
+                                    
+                                    canonical_str = " ".join(interleaved_phonemes)
+                                    pp_context_lines.append(f"Canonical sequence: {canonical_str}")
+                                    if self.show_canonical_phn_length:
+                                        pp_context_lines.append(f"Length: {len(can_phn_list)} phonemes")
                             else:
                                 can_phn_str = " ".join(can_phn_list) if isinstance(can_phn_list, list) else str(can_phn_list)
                                 pp_context_lines.append(f"Canonical sequence: {can_phn_str}")
@@ -1588,6 +1658,7 @@ class SSL_LLM_PPATP(sb.Brain):
                         top_k=top_k,
                         top_p=top_p,
                         num_beams=3,
+                        inference_prompt_mode="with_alternatives",
                     )
                     
                     # Collect results
@@ -1725,8 +1796,8 @@ class SSL_LLM_PPATP(sb.Brain):
                 f"{stage.name.lower()}_loss": stage_loss,
                 f"{stage.name.lower()}_ctc_per": per_ctc,
                 f"{stage.name.lower()}_llm_per": per_llm,
-                f"{stage.name.lower()}_llm_loss": llm_loss,
                 f"{stage.name.lower()}_ctc_loss": ctc_loss if hasattr(self.modules, "ctc_lin") else None,
+                f"{stage.name.lower()}_llm_loss": llm_loss,
                 f"{stage.name.lower()}_ctc_mpd_f1": ctc_mpd_f1 if hasattr(self, "ctc_mpd_f1_metrics") else None,
                 f"{stage.name.lower()}_llm_mpd_f1": mpd_f1 if hasattr(self, "mpd_f1_metrics") else None,
             }, step=epoch)
