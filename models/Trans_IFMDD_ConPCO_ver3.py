@@ -1,3 +1,4 @@
+# TODO support CROTTC loss on audio model
 import os
 
 import torch
@@ -38,8 +39,11 @@ import numpy as np
 from utils.layers.utils import make_pad_mask
 from utils.plot.plot_attn import plot_attention
 
+from utils.EncoderManager import EncoderManager
+from utils.LossManager import CTCLossManager
 
-class Trans_IFMDD_ConPCO(sb.Brain):
+
+class Trans_IFMDD_ConPCO_ver3(sb.Brain):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # self.        super().__init__(*args, **kwargs)
@@ -91,6 +95,43 @@ class Trans_IFMDD_ConPCO(sb.Brain):
         self.per_history = []
         self.f1_history = []
     
+    def _init_encoder_manager(self):
+        """Initialize encoder manager based on hparams"""
+        encoder_type = getattr(self.hparams, 'encoder_type', None)
+        
+        # Auto-detect encoder type if not specified
+        if encoder_type is None:
+            if getattr(self.modules, 'RVQ', None) is not None:
+                encoder_type = 'rvq'
+            elif getattr(self.modules, 'ConformerEncoder', None) is not None:
+                encoder_type = 'conformer'
+            elif getattr(self.modules, 'ZipformerEncoder', None) is not None:
+                encoder_type = 'zipformer'
+            elif getattr(self.modules, 'enc', None) is not None:
+                encoder_type = 'linear'
+            else:
+                encoder_type = None
+        
+        self.encoder_manager = EncoderManager(
+            encoder_type=encoder_type,
+            modules=self.modules,
+            hparams=self.hparams,
+            device=self.device
+        )
+        
+    def _init_loss_manager(self):
+        """Initialize loss manager based on hparams"""
+        loss_type = getattr(self.hparams, 'ctc_loss_type', 'vanilla')
+        
+        # import pdb; pdb.set_trace()
+        
+        self.loss_manager = CTCLossManager(
+            loss_type=loss_type,
+            ctc_cost=self.hparams.ctc_cost,
+            hparams=self.hparams,
+            blank_index=self.hparams.blank_index
+        )
+        
     def freeze_encoder_and_ssl(self):
         """Freeze encoder and SSL model parameters"""
         if not self.encoder_frozen:
