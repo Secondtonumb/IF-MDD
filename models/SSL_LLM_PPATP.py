@@ -266,6 +266,195 @@ class SSL_LLM_PPATP(sb.Brain):
             self._phn_token_embedder = embed_fn
             print(f"[Lazy Init] Registered phoneme token embedder function")
 
+    def _build_dynamic_chat_embeddings(self, B, batch, device, tok, embed_fn, PAD_ID):
+        """
+        为split prompt构建动态的Chat embeddings，包含PP (Potential Pronunciations) context。
+        
+        对batch中的每个样本：
+        1. 为该样本构建user content（包含word和canonical phoneme信息）
+        2. 生成可能的发音候选
+        3. 应用Chat template到placeholder
+        4. Tokenize prefix和suffix
+        5. 在batch维度上pad并embed
+        
+        Args:
+            B: Batch size
+            batch: 原始batch数据（包含wrd, phn_list_canonical等）
+            device: 计算设备
+            tok: LLM tokenizer
+            embed_fn: Token embedding函数
+            PAD_ID: Padding token ID
+            
+        Returns:
+            dict: {
+                "prefix_embed": [B, L_prefix, H] 前缀embedding
+                "suffix_embed": [B, L_suffix, H] 后缀embedding
+                "prefix_lens_tensor": [B] 实际前缀长度
+                "suffix_lens_tensor": [B] 实际后缀长度
+            }
+        """
+        PLACEHOLDER = "<<<SPEECH_EMBEDDING_HERE>>>"
+        
+        # 为batch中的每个样本构建chat结构
+        prefix_ids_list = []
+        suffix_ids_list = []
+        prefix_lens = []
+        suffix_lens = []
+        
+        for b in range(B):
+            # ===== 1. 为这个样本构建user content =====
+            user_content = f"{PLACEHOLDER}"
+            pp_context_lines = []
+            
+            # 获取 prompt 格式配置
+            # ATP: word + canonical only
+            # PPATP: word + canonical + potential pronunciation
+            # STATLLM: word + canonical (interleaved potential)
+            # SLAM: no context, just transcribe speech
+            prompt_format = getattr(self.hparams, "prompt_format", "statllm")
+            
+            if prompt_format != "slam":
+                # 添加word context（可选，基于hparams配置）
+                include_wrd = getattr(self.hparams, "include_wrd_in_prompt", True)
+                if include_wrd and hasattr(batch, "wrd") and batch.wrd is not None and len(batch.wrd) > b:
+                    if isinstance(batch.wrd[b], list):
+                        words_str = " ".join(batch.wrd[b])
+                    else:
+                        words_str = str(batch.wrd[b])
+                    pp_context_lines.append(f"Word: {words_str}")
+                
+                # 根据 prompt_format 选择格式
+                if hasattr(batch, "phn_list_canonical") and batch.phn_list_canonical is not None and len(batch.phn_list_canonical) > b:
+                    can_phn_list = batch.phn_list_canonical[b]
+                    
+                    if prompt_format == "statllm":
+                        # ===== STATLLM 格式：穿插的 mispronunciation hints =====
+                        if isinstance(can_phn_list, list) and len(can_phn_list) > 0:
+                            interleaved_phonemes = []
+                            for phn in can_phn_list:
+                                phoneme_str = phn
+                                alternatives = []
+                                if self.confusion_matrix and phn in self.confusion_matrix:
+                                    confusions = self.confusion_matrix[phn].get("confusions", [])
+                                    for item in confusions[:3]:
+                                        confused_phn = item.get("phoneme")
+                                        if confused_phn and confused_phn != phn:
+                                            alternatives.append(confused_phn)
+                                if alternatives:
+                                    phoneme_str += f" ({', '.join(alternatives)})"
+                                interleaved_phonemes.append(phoneme_str)
+                            
+                            canonical_str = " ".join(interleaved_phonemes)
+                            pp_context_lines.append(f"Canonical sequence: {canonical_str}")
+                            if self.show_canonical_phn_length:
+                                pp_context_lines.append(f"Length: {len(can_phn_list)} phonemes")
+                        else:
+                            can_phn_str = " ".join(can_phn_list) if isinstance(can_phn_list, list) else str(can_phn_list)
+                            pp_context_lines.append(f"Canonical sequence: {can_phn_str}")
+                    
+                    elif prompt_format == "ppatp":
+                        # ===== PPATP 格式：word + canonical + potential pronunciation =====
+                        can_phn_str = " ".join(can_phn_list) if isinstance(can_phn_list, list) else str(can_phn_list)
+                        can_phn_len = len(can_phn_list) if isinstance(can_phn_list, list) else 1
+                        
+                        if self.show_canonical_phn_length:
+                            pp_context_lines.append(f"Canonical sequence (length={can_phn_len}): {can_phn_str}")
+                        else:
+                            pp_context_lines.append(f"Canonical sequence: {can_phn_str}")
+                        
+                        if isinstance(can_phn_list, list):
+                            potential_pron = self.generate_potential_pronunciations(can_phn_list, top_k=5)
+                        else:
+                            potential_pron = can_phn_str
+                        pp_context_lines.append(f"Potential pronunciation: {potential_pron}")
+                    
+                    elif prompt_format == "atp":
+                        # ===== ATP 格式：word + canonical only (no potential) =====
+                        can_phn_str = " ".join(can_phn_list) if isinstance(can_phn_list, list) else str(can_phn_list)
+                        can_phn_len = len(can_phn_list) if isinstance(can_phn_list, list) else 1
+                        
+                        if self.show_canonical_phn_length:
+                            pp_context_lines.append(f"Canonical sequence (length={can_phn_len}): {can_phn_str}")
+                        else:
+                            pp_context_lines.append(f"Canonical sequence: {can_phn_str}")
+            
+            # 构建完整的user content
+            if prompt_format == "slam":
+                # ===== SLAM 格式：无额外上下文 =====
+                user_content += "\nTranscribe the preceding speech into phonemes."
+                user_content += "\nReturn in CMUdict format with spaces between phonemes."
+            elif pp_context_lines:
+                if prompt_format == "statllm":
+                    user_content += "\nHere is what the speaker read and the canonical phoneme sequence with potential mispronunciation hints:\n"
+                    user_content += "\n".join(pp_context_lines)
+                    user_content += "\n\nPlease predict the actual phonemes the speaker pronounced."
+                    user_content += "\nReturn in CMUdict format with spaces between phonemes."
+                elif prompt_format == "ppatp":
+                    user_content += "\nHere I give you what the speaker read and the canonical phonemes, as well each canonical phonemes's potential pronunciations.\n"
+                    user_content += "\n".join(pp_context_lines)
+                    user_content += "\nYou need to predict what phoneme the speaker is actually said, rather than the canonical ones."
+                    user_content += "\nReturn in CMUdict format with spaces between phonemes."
+                elif prompt_format == "atp":
+                    user_content += "\nHere is what the speaker read and the canonical phoneme sequence:\n"
+                    user_content += "\n".join(pp_context_lines)
+                    user_content += "\n\nPlease predict the actual phonemes the speaker pronounced."
+                    user_content += "\nReturn in CMUdict format with spaces between phonemes."
+            else:
+                user_content += "\nTranscribe the preceding speech into phonemes."
+            # import pdb; pdb.set_trace()
+            # ===== 2. 构建chat结构 =====
+            chat_structure = [
+                {"role": "system", "content": "You are a phoneme transcriber."},
+                {"role": "user", "content": user_content}
+            ]
+            
+            # ===== 3. 应用chat template =====
+            full_prompt_str = tok.apply_chat_template(
+                chat_structure,
+                tokenize=False,
+                add_generation_prompt=True
+            )
+            
+            if PLACEHOLDER not in full_prompt_str:
+                raise ValueError("Chat template processing removed the placeholder!")
+            
+            # ===== 4. 分割prefix和suffix =====
+            prefix_str, suffix_str = full_prompt_str.split(PLACEHOLDER)
+            
+            # ===== 5. Tokenize prefix和suffix =====
+            prefix_tokens = tok(prefix_str, return_tensors="pt", add_special_tokens=False).to(device)
+            suffix_tokens = tok(suffix_str, return_tensors="pt", add_special_tokens=False).to(device)
+            
+            prefix_seq = prefix_tokens["input_ids"].squeeze(0)
+            suffix_seq = suffix_tokens["input_ids"].squeeze(0)
+            
+            prefix_ids_list.append(prefix_seq)
+            suffix_ids_list.append(suffix_seq)
+            prefix_lens.append(len(prefix_seq))
+            suffix_lens.append(len(suffix_seq))
+        
+        # ===== 6. Pad sequences到相同长度 =====
+        from torch.nn.utils.rnn import pad_sequence
+        prefix_ids = pad_sequence(prefix_ids_list, batch_first=True, padding_value=PAD_ID)  # [B, L_prefix]
+        suffix_ids = pad_sequence(suffix_ids_list, batch_first=True, padding_value=PAD_ID)  # [B, L_suffix]
+        
+        # 转换长度为tensor
+        prefix_lens_tensor = torch.tensor(prefix_lens, dtype=torch.long, device=device)  # [B]
+        suffix_lens_tensor = torch.tensor(suffix_lens, dtype=torch.long, device=device)  # [B]
+        
+        # ===== 7. Embed prefix和suffix =====
+        prefix_embed = embed_fn(prefix_ids)  # [B, L_prefix, H]
+        suffix_embed = embed_fn(suffix_ids)  # [B, L_suffix, H]
+        
+        return {
+            "prefix_embed": prefix_embed,
+            "suffix_embed": suffix_embed,
+            "prefix_lens_tensor": prefix_lens_tensor,
+            "suffix_lens_tensor": suffix_lens_tensor,
+            "prefix_ids": prefix_ids,
+            "suffix_ids": suffix_ids,
+        }
+
     def _build_input_embeddings(self, B, Z, phn_embed, SEP_embed, BOS_embed, EOS_embed, 
                                 has_split_prompt=False, suffix_embed_enhanced=None,
                                 prompt_embed_batch=None, prefix_embed_enhanced=None):
@@ -442,101 +631,30 @@ class SSL_LLM_PPATP(sb.Brain):
         # ===== Build dynamic chat prompt with PP context (for split prompt) =====
         has_split_prompt = use_prompt and hasattr(self, "prompt_prefix_embed") and hasattr(self, "prompt_suffix_embed")
         suffix_embed_enhanced = None
+        prefix_embed = None
+        actual_prefix_lens = None
+        actual_suffix_lens = None
+        
+        # Initialize as None
+        self.prefix_ids = None
+        self.suffix_ids = None
         
         if has_split_prompt:
-            # Dynamically construct prompt with PP context for each sample
-            tok = self.hparams.LLM_tokenizer
-            PLACEHOLDER = "<<<SPEECH_EMBEDDING_HERE>>>"
-            
-            # Build chat structure for each sample in batch
-            prefix_ids_list = []
-            suffix_ids_list = []
-            prefix_lens = []  # Track actual lengths before padding
-            suffix_lens = []  # Track actual lengths before padding
-            
-            for b in range(B):
-                # Build user content for this specific sample
-                user_content = f"{PLACEHOLDER}"
-                pp_context_lines = []
-                
-                # Add word context for this sample
-                if hasattr(batch, "wrd") and batch.wrd is not None and len(batch.wrd) > b:
-                    if isinstance(batch.wrd[b], list):
-                        words_str = " ".join(batch.wrd[b])
-                    else:
-                        words_str = str(batch.wrd[b])
-                    pp_context_lines.append(f"Word: {words_str}")
-                
-                # Add canonical phoneme context and potential pronunciations for this sample
-                if hasattr(batch, "phn_list_canonical") and batch.phn_list_canonical is not None and len(batch.phn_list_canonical) > b:
-                    can_phn_list = batch.phn_list_canonical[b]
-                    can_phn_str = " ".join(can_phn_list) if isinstance(can_phn_list, list) else str(can_phn_list)
-                    # Add length info if enabled
-                    can_phn_len = len(can_phn_list) if isinstance(can_phn_list, list) else 1
-                    if self.show_canonical_phn_length:
-                        pp_context_lines.append(f"Canonical sequence (length={can_phn_len}): {can_phn_str}")
-                    else:
-                        pp_context_lines.append(f"Canonical sequence: {can_phn_str}")
-                    
-                    # Generate potential pronunciations based on confusion matrix
-                    if isinstance(can_phn_list, list):
-                        potential_pron = self.generate_potential_pronunciations(can_phn_list, top_k=5)
-                    else:
-                        potential_pron = can_phn_str
-                    pp_context_lines.append(f"Potential pronunciation: {potential_pron}")
-                # Build full user content for this sample
-                if pp_context_lines:
-                    user_content += "\nHere I give you what the speaker read and the canonical phonemes, as well each canonical phonemes's potential pronunciations.\n"
-                    user_content += "\n".join(pp_context_lines)
-                    user_content += "\nYou need to predict what phoneme the speaker is actually said, rather than the canonical ones."
-                    user_content += "\nReturn in CMUdict format with spaces between phonemes."
-                else:
-                    user_content += "\nTranscribe the preceding speech into phonemes."
-                
-                # Construct chat structure for this sample
-                chat_structure = [
-                    {"role": "system", "content": "You are a phoneme transcriber."},
-                    {"role": "user", "content": user_content}
-                ]
-                # pdb.set_trace()
-                # Apply chat template for this sample
-                full_prompt_str = tok.apply_chat_template(
-                    chat_structure,
-                    tokenize=False,
-                    add_generation_prompt=True
-                )
-                
-                # Split by placeholder
-                if PLACEHOLDER not in full_prompt_str:
-                    raise ValueError("Chat template processing removed the placeholder!")
-                
-                prefix_str, suffix_str = full_prompt_str.split(PLACEHOLDER)
-                
-                # Tokenize this sample's prefix and suffix
-                prefix_tokens = tok(prefix_str, return_tensors="pt", add_special_tokens=False).to(device)
-                suffix_tokens = tok(suffix_str, return_tensors="pt", add_special_tokens=False).to(device)
-                
-                prefix_seq = prefix_tokens["input_ids"].squeeze(0)
-                suffix_seq = suffix_tokens["input_ids"].squeeze(0)
-                
-                prefix_ids_list.append(prefix_seq)
-                suffix_ids_list.append(suffix_seq)
-                prefix_lens.append(len(prefix_seq))
-                suffix_lens.append(len(suffix_seq))
-            
-            # Pad sequences to same length within batch
-            from torch.nn.utils.rnn import pad_sequence
-            prefix_ids = pad_sequence(prefix_ids_list, batch_first=True, padding_value=PAD_ID)  # [B, L_prefix]
-            suffix_ids = pad_sequence(suffix_ids_list, batch_first=True, padding_value=PAD_ID)  # [B, L_suffix]
-            
-            # Convert lengths to tensors for later use
-            prefix_lens_tensor = torch.tensor(prefix_lens, dtype=torch.long, device=device)  # [B]
-            suffix_lens_tensor = torch.tensor(suffix_lens, dtype=torch.long, device=device)  # [B]
-            
-            # Embed prefix and suffix for all samples
-            prefix_embed = embed_fn(prefix_ids)  # [B, L_prefix, H]
-            suffix_embed = embed_fn(suffix_ids)  # [B, L_suffix, H]
-            suffix_embed_enhanced = suffix_embed  # Keep structure consistent
+            # 调用封装的函数来构建动态Chat embeddings
+            result = self._build_dynamic_chat_embeddings(
+                B=B, 
+                batch=batch, 
+                device=device, 
+                tok=self.hparams.LLM_tokenizer,
+                embed_fn=embed_fn,
+                PAD_ID=PAD_ID
+            )
+            prefix_embed = result["prefix_embed"]
+            suffix_embed_enhanced = result["suffix_embed"]
+            actual_prefix_lens = result["prefix_lens_tensor"]
+            actual_suffix_lens = result["suffix_lens_tensor"]
+            self.prefix_ids = result["prefix_ids"]
+            self.suffix_ids = result["suffix_ids"]
         
         # ===== Build input embedding sequence =====
         inputs_embeds = self._build_input_embeddings(
@@ -549,8 +667,8 @@ class SSL_LLM_PPATP(sb.Brain):
         
         # Store prefix/suffix lengths for attention mask and label calculation
         if has_split_prompt:
-            actual_prefix_lens = prefix_lens_tensor  # [B]
-            actual_suffix_lens = suffix_lens_tensor  # [B]
+            actual_prefix_lens = actual_prefix_lens  # [B]
+            actual_suffix_lens = actual_suffix_lens  # [B]
         
         # Persist LayerNorm (created in on_fit_start, not per-forward)
         # if hasattr(self, "llm_norm") and self.llm_norm is not None:
@@ -572,8 +690,8 @@ class SSL_LLM_PPATP(sb.Brain):
             if has_split_prompt:
                 # For split prompt: [prefix_padded] [speech] [suffix_padded] [phn] [EOS]
                 # Need to mask padding in prefix, suffix, and phonemes
-                L_prefix_padded = prefix_ids.size(1)
-                L_suffix_padded = suffix_ids.size(1)
+                L_prefix_padded = self.prefix_ids.size(1)
+                L_suffix_padded = self.suffix_ids.size(1)
                 
                 for b in range(B):
                     # Mask prefix padding
@@ -616,8 +734,8 @@ class SSL_LLM_PPATP(sb.Brain):
             if has_split_prompt:
                 # For split prompt, suffix contains BOS at the end (before phonemes)
                 # Sequence: [prefix_padded] [speech] [suffix_padded] [phn] [EOS]
-                L_prefix_padded = prefix_ids.size(1)
-                L_suffix_padded = suffix_ids.size(1)
+                L_prefix_padded = self.prefix_ids.size(1)
+                L_suffix_padded = self.suffix_ids.size(1)
                 suffix_start = L_prefix_padded + Ts
                 text_start = suffix_start + L_suffix_padded
                 bos_pos = text_start - 1  # Last position of suffix is BOS
@@ -692,8 +810,8 @@ class SSL_LLM_PPATP(sb.Brain):
                 
                 if has_split_prompt:
                     # For split prompt with variable-length prefix/suffix
-                    L_prefix_padded = prefix_ids.size(1)
-                    L_suffix_padded = suffix_ids.size(1)
+                    L_prefix_padded = self.prefix_ids.size(1)
+                    L_suffix_padded = self.suffix_ids.size(1)
                     
                     for b in range(B):
                         # Mask prefix padding
@@ -743,8 +861,8 @@ class SSL_LLM_PPATP(sb.Brain):
                 
                 # Calculate positions (same as training)
                 if has_split_prompt:
-                    L_prefix_padded = prefix_ids.size(1)
-                    L_suffix_padded = suffix_ids.size(1)
+                    L_prefix_padded = self.prefix_ids.size(1)
+                    L_suffix_padded = self.suffix_ids.size(1)
                     suffix_start = L_prefix_padded + Ts
                     text_start = suffix_start + L_suffix_padded
                     bos_pos = text_start - 1
@@ -774,13 +892,13 @@ class SSL_LLM_PPATP(sb.Brain):
                     inputs_embeds_inference = torch.cat([
                         prefix_embed,  # [B, L_prefix, H] (already padded and embedded)
                         Z,             # [B, Ts, H]
-                        suffix_embed   # [B, L_suffix, H] (already padded and embedded)
+                        suffix_embed_enhanced   # [B, L_suffix, H] (already padded and embedded)
                     ], dim=1)
                     
                     # Build attention mask for inference (mask paddings)
                     attention_mask_inference = torch.ones(B, inputs_embeds_inference.size(1), dtype=torch.long, device=device)
-                    L_prefix_padded = prefix_ids.size(1)
-                    L_suffix_padded = suffix_ids.size(1)
+                    L_prefix_padded = self.prefix_ids.size(1)
+                    L_suffix_padded = self.suffix_ids.size(1)
                     
                     for b in range(B):
                         # Mask prefix padding
@@ -830,11 +948,11 @@ class SSL_LLM_PPATP(sb.Brain):
                     bos_token_id=BOS_ID,
                     do_sample=True,
                     use_cache=True,
-                    num_beams=1,
+                    num_beams=3,
                     # top_k = 71,
                     # top_p = 0.9,
                     max_new_tokens=L_phn + 10, 
-                    temperature=1.0,
+                    temperature=1.1,
                     # repetition_penalty=1.00,
                     # no_repeat_ngram_size=4,
                 )
@@ -915,6 +1033,32 @@ class SSL_LLM_PPATP(sb.Brain):
                 target_len=target_lens,
                 ind2lab=self.label_encoder.decode_ndim,
             )
+            
+            # 计算CTC的MPD F1
+            try:
+                canonical = batch.phn_list_canonical
+                perceived = batch.phn_list_perceived
+            except:
+                canonical = None
+                perceived = None
+            
+            if canonical is not None and perceived is not None:
+                # 将CTC序列转换为phoneme列表
+                ctc_pred_phonemes = []
+                for seq in ctc_sequence:
+                    phn_list = self.label_encoder.decode_ndim(seq)
+                    ctc_pred_phonemes.append(phn_list)
+                
+                self.ctc_mpd_f1_metrics.append(
+                    ids=ids,
+                    predict=ctc_pred_phonemes,
+                    canonical=canonical,
+                    perceived=perceived,
+                    predict_len=None,
+                    canonical_len=None,
+                    perceived_len=None,
+                    ind2lab=lambda x: x
+                )
 
             # 2.2 LLM Metrics (Stage Dependent)
             if stage == sb.Stage.VALID:
@@ -1147,39 +1291,96 @@ class SSL_LLM_PPATP(sb.Brain):
                 user_content = f"{PLACEHOLDER}"
                 pp_context_lines = []
                 
-                # Add word context if available
-                if hasattr(batch, "wrd") and batch.wrd is not None and len(batch.wrd) > b:
-                    if isinstance(batch.wrd[b], list):
-                        words_str = " ".join(batch.wrd[b])
-                    else:
-                        words_str = str(batch.wrd[b])
-                    pp_context_lines.append(f"Word: {words_str}")
+                # 获取 prompt 格式配置
+                prompt_format = getattr(self.hparams, "prompt_format", "statllm")
                 
-                # Add canonical phoneme context and potential pronunciations if available
-                if hasattr(batch, "phn_list_canonical") and batch.phn_list_canonical is not None and len(batch.phn_list_canonical) > b:
-                    can_phn_list = batch.phn_list_canonical[b]
-                    can_phn_str = " ".join(can_phn_list) if isinstance(can_phn_list, list) else str(can_phn_list)
-                    # Add length info if enabled
-                    can_phn_len = len(can_phn_list) if isinstance(can_phn_list, list) else 1
-                    if self.show_canonical_phn_length:
-                        pp_context_lines.append(f"Canonical sequence (length={can_phn_len}): {can_phn_str}")
-                    else:
-                        pp_context_lines.append(f"Canonical sequence: {can_phn_str}")
+                if prompt_format != "slam":
+                    # 添加word context（可选，基于hparams配置）
+                    include_wrd = getattr(self.hparams, "include_wrd_in_prompt", True)
+                    if include_wrd and hasattr(batch, "wrd") and batch.wrd is not None and len(batch.wrd) > b:
+                        if isinstance(batch.wrd[b], list):
+                            words_str = " ".join(batch.wrd[b])
+                        else:
+                            words_str = str(batch.wrd[b])
+                        pp_context_lines.append(f"Word: {words_str}")
                     
-                    # Generate potential pronunciations based on confusion matrix
-                    if isinstance(can_phn_list, list):
-                        potential_pron = self.generate_potential_pronunciations(can_phn_list, top_k=5)
-                    else:
-                        potential_pron = can_phn_str
-                    pp_context_lines.append(f"Potential pronunciation: {potential_pron}")
-                # Build full user content
-                if pp_context_lines:
-                    user_content += "\nHere I give you what the speaker read and the canonical phonemes.\n"
-                    user_content += "\n".join(pp_context_lines)
-                    user_content += "\nYou need to predict what phoneme the speaker really said."
+                    # 根据 prompt_format 选择格式
+                    if hasattr(batch, "phn_list_canonical") and batch.phn_list_canonical is not None and len(batch.phn_list_canonical) > b:
+                        can_phn_list = batch.phn_list_canonical[b]
+                        
+                        if prompt_format == "statllm":
+                            # ===== STATLLM 格式 =====
+                            if isinstance(can_phn_list, list) and len(can_phn_list) > 0:
+                                interleaved_phonemes = []
+                                for phn in can_phn_list:
+                                    phoneme_str = phn
+                                    alternatives = []
+                                    if self.confusion_matrix and phn in self.confusion_matrix:
+                                        confusions = self.confusion_matrix[phn].get("confusions", [])
+                                        for item in confusions[:3]:
+                                            confused_phn = item.get("phoneme")
+                                            if confused_phn and confused_phn != phn:
+                                                alternatives.append(confused_phn)
+                                    if alternatives:
+                                        phoneme_str += f" ({', '.join(alternatives)})"
+                                    interleaved_phonemes.append(phoneme_str)
+                                
+                                canonical_str = " ".join(interleaved_phonemes)
+                                pp_context_lines.append(f"Canonical sequence: {canonical_str}")
+                                if self.show_canonical_phn_length:
+                                    pp_context_lines.append(f"Length: {len(can_phn_list)} phonemes")
+                            else:
+                                can_phn_str = " ".join(can_phn_list) if isinstance(can_phn_list, list) else str(can_phn_list)
+                                pp_context_lines.append(f"Canonical sequence: {can_phn_str}")
+                        
+                        elif prompt_format == "ppatp":
+                            # ===== PPATP 格式 =====
+                            can_phn_str = " ".join(can_phn_list) if isinstance(can_phn_list, list) else str(can_phn_list)
+                            can_phn_len = len(can_phn_list) if isinstance(can_phn_list, list) else 1
+                            
+                            if self.show_canonical_phn_length:
+                                pp_context_lines.append(f"Canonical sequence (length={can_phn_len}): {can_phn_str}")
+                            else:
+                                pp_context_lines.append(f"Canonical sequence: {can_phn_str}")
+                            
+                            if isinstance(can_phn_list, list):
+                                potential_pron = self.generate_potential_pronunciations(can_phn_list, top_k=5)
+                            else:
+                                potential_pron = can_phn_str
+                            pp_context_lines.append(f"Potential pronunciation: {potential_pron}")
+                        
+                        elif prompt_format == "atp":
+                            # ===== ATP 格式：word + canonical only =====
+                            can_phn_str = " ".join(can_phn_list) if isinstance(can_phn_list, list) else str(can_phn_list)
+                            can_phn_len = len(can_phn_list) if isinstance(can_phn_list, list) else 1
+                            
+                            if self.show_canonical_phn_length:
+                                pp_context_lines.append(f"Canonical sequence (length={can_phn_len}): {can_phn_str}")
+                            else:
+                                pp_context_lines.append(f"Canonical sequence: {can_phn_str}")
+                
+                # 构建完整的user content
+                if prompt_format == "slam":
+                    user_content += "\nTranscribe the preceding speech into phonemes."
+                    user_content += "\nReturn in CMUdict format with spaces between phonemes."
+                elif pp_context_lines:
+                    if prompt_format == "statllm":
+                        user_content += "\nHere is what the speaker read and the canonical phoneme sequence with potential mispronunciation hints:\n"
+                        user_content += "\n".join(pp_context_lines)
+                        user_content += "\n\nPlease predict the actual phonemes the speaker pronounced."
+                        user_content += "\nReturn in CMUdict format with spaces between phonemes."
+                    elif prompt_format == "ppatp":
+                        user_content += "\nHere I give you what the speaker read and the canonical phonemes, as well each canonical phonemes's potential pronunciations.\n"
+                        user_content += "\n".join(pp_context_lines)
+                        user_content += "\nYou need to predict what phoneme the speaker is actually said, rather than the canonical ones."
+                        user_content += "\nReturn in CMUdict format with spaces between phonemes."
+                    elif prompt_format == "atp":
+                        user_content += "\nHere is what the speaker read and the canonical phoneme sequence:\n"
+                        user_content += "\n".join(pp_context_lines)
+                        user_content += "\n\nPlease predict the actual phonemes the speaker pronounced."
+                        user_content += "\nReturn in CMUdict format with spaces between phonemes."
                 else:
                     user_content += "\nTranscribe the preceding speech into phonemes."
-                
                 # Construct chat structure
                 chat_structure = [
                     {"role": "system", "content": "You are a arabic phoneme transcriber."},
@@ -1445,7 +1646,8 @@ class SSL_LLM_PPATP(sb.Brain):
         "Gets called when a stage (either training, validation, test) starts."
         self.ctc_metrics = self.hparams.ctc_stats()
         self.llm_metrics = self.hparams.llm_stats()  # 添加LLM损失统计
-        self.mpd_f1_metrics = MpdStats()  # 添加MPD F1统计
+        self.mpd_f1_metrics = MpdStats()  # LLM MPD F1统计
+        self.ctc_mpd_f1_metrics = MpdStats()  # CTC MPD F1统计
         
         if hasattr(self.modules, "ctc_lin"):
             self.ctc_metrics = self.hparams.ctc_stats()
@@ -1453,7 +1655,8 @@ class SSL_LLM_PPATP(sb.Brain):
         if stage != sb.Stage.TRAIN:
             self.per_metrics = self.hparams.per_stats()
             self.llm_per_metrics = self.hparams.per_stats()# 添加LLM PER统计
-            self.mpd_f1_metrics = MpdStats()  # 添加MPD F1统计
+            self.mpd_f1_metrics = MpdStats()  # LLM MPD F1统计
+            self.ctc_mpd_f1_metrics = MpdStats()  # CTC MPD F1统计
             
     def on_stage_end(self, stage, stage_loss, epoch):
         """Gets called at the end of a stage to summarize and log."""
@@ -1470,8 +1673,13 @@ class SSL_LLM_PPATP(sb.Brain):
             # Summarize and log metrics
             stage_stats["llm_loss"] = llm_loss
             
+            # LLM MPD F1
             mpd_f1 = self.mpd_f1_metrics.summarize("mpd_f1")
             stage_stats["llm_mpd_f1"] = mpd_f1
+            
+            # CTC MPD F1
+            ctc_mpd_f1 = self.ctc_mpd_f1_metrics.summarize("mpd_f1")
+            stage_stats["ctc_mpd_f1"] = ctc_mpd_f1
         
             if hasattr(self.modules, "ctc_lin"):
                 ctc_loss = self.ctc_metrics.summarize("average")
@@ -1519,6 +1727,7 @@ class SSL_LLM_PPATP(sb.Brain):
                 f"{stage.name.lower()}_llm_per": per_llm,
                 f"{stage.name.lower()}_llm_loss": llm_loss,
                 f"{stage.name.lower()}_ctc_loss": ctc_loss if hasattr(self.modules, "ctc_lin") else None,
+                f"{stage.name.lower()}_ctc_mpd_f1": ctc_mpd_f1 if hasattr(self, "ctc_mpd_f1_metrics") else None,
                 f"{stage.name.lower()}_llm_mpd_f1": mpd_f1 if hasattr(self, "mpd_f1_metrics") else None,
             }, step=epoch)
             if self.no_improve_epochs >= self.patience:
@@ -1533,6 +1742,7 @@ class SSL_LLM_PPATP(sb.Brain):
             # import pdb; pdb.set_trace()
             per_ctc = self.per_metrics.summarize("error_rate")
             mpd_f1 = self.mpd_f1_metrics.summarize("mpd_f1")
+            ctc_mpd_f1 = self.ctc_mpd_f1_metrics.summarize("mpd_f1")
             
             
             # Check if LLM metrics have data before summarizing (避免空数据错误)
@@ -1560,6 +1770,8 @@ class SSL_LLM_PPATP(sb.Brain):
                 test_stats["ctc_loss"] = ctc_loss
             if hasattr(self, "mpd_f1_metrics"):
                 test_stats["llm_mpd_f1"] = mpd_f1
+            if hasattr(self, "ctc_mpd_f1_metrics"):
+                test_stats["ctc_mpd_f1"] = ctc_mpd_f1
             
             self.hparams.train_logger.log_stats(
                 stats_meta={"Epoch loaded": self.hparams.epoch_counter.current},
@@ -1587,11 +1799,23 @@ class SSL_LLM_PPATP(sb.Brain):
                     self.hparams.mpd_seq_file = self.hparams.mpd_file.replace('.txt', '_llm.txt')
 
                 with open(self.hparams.mpd_seq_file, "w") as m:
-                    m.write("MPD results and stats:\n")
+                    m.write("LLM MPD results and stats:\n")
                     self.mpd_f1_metrics.write_stats(m)
                     print(
-                        "MPD results and stats written to file",
+                        "LLM MPD results and stats written to file",
                         self.hparams.mpd_seq_file,
+                    )
+                
+                # 也保存CTC的MPD统计
+                if not hasattr(self.hparams, 'ctc_mpd_seq_file'):
+                    self.hparams.ctc_mpd_seq_file = self.hparams.mpd_file.replace('.txt', '_ctc.txt')
+                
+                with open(self.hparams.ctc_mpd_seq_file, "w") as m:
+                    m.write("CTC MPD results and stats:\n")
+                    self.ctc_mpd_f1_metrics.write_stats(m)
+                    print(
+                        "CTC MPD results and stats written to file",
+                        self.hparams.ctc_mpd_seq_file,
                     )
                     
     def check_gradients(self, loss):
@@ -1641,7 +1865,6 @@ class SSL_LLM_PPATP(sb.Brain):
                 #     self.scaler.step(self.pretrained_opt_class)
                 if any(p.requires_grad for p in self.adam_optimizer.param_groups[0]['params']):
                     self.scaler.step(self.adam_optimizer)
-
 
             self.scaler.update()
 
