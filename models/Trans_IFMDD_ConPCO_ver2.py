@@ -516,6 +516,11 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
             feats = feats[self.hparams.preceived_ssl_emb_layer]
         
         current_epoch = self.hparams.epoch_counter.current
+
+
+        # check why enc_out -> ctc get's lower performance than original ctc path
+        feats_ssl_proj = self.modules.enc(feats)
+        enc_out_ssl_proj, _ = self.modules.ConformerEncoder.forward(feats_ssl_proj)
         
         # ==================== Initialize all output variables ====================
         p_ctc_logits = None
@@ -560,6 +565,7 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
                     wav_len=wav_lens,
                     pad_idx=self.hparams.blank_index,
             )
+
             # self.modules.TransASR.encoder.state_dict()['norm.norm.bias']
             # self.hparams.pretrainer.loadables['model'][1].state_dict()['norm.norm.bias']
             # pdb.set_trace()
@@ -568,7 +574,9 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
                 enc_out, hidden_outs, dec_out = outs
             else:
                 enc_out, dec_out = outs
-            
+        
+
+
             # ==================== Train: Fuse canonical embeddings with audio features ====================
             if "enc" in self.hparams.fuse_enc_or_dec:
                 memory = enc_out
@@ -628,7 +636,8 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
             p_mispro_cls_logits = torch.nn.functional.log_softmax(h_mispro_cls, dim=-1)
 
             # CTC head
-            h_ctc_feat = self.modules.ctc_lin(enc_out)  # [B, T_s, C]
+            # h_ctc_feat = self.modules.ctc_lin(enc_out)  # [B, T_s, C]
+            h_ctc_feat = self.modules.ctc_lin(enc_out_ssl_proj)  # [B, T_s, C]
             p_ctc_logits = self.hparams.log_softmax(h_ctc_feat)  # Log probabilities
 
             # seq2seq head
@@ -714,7 +723,8 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
                     p_mispro_cls_logits = torch.nn.functional.log_softmax(h_mispro_cls, dim=-1)
                     
                     # ==================== Validation: CTC and Seq2Seq head outputs ====================
-                    h_ctc_feat = self.modules.ctc_lin(enc_out)  # [B, T_s, C]
+                    # h_ctc_feat = self.modules.ctc_lin(enc_out)  # [B, T_s, C]
+                    h_ctc_feat = self.modules.ctc_lin(enc_out_ssl_proj)  # [B, T_s, C]
                     p_ctc_logits = self.hparams.log_softmax(h_ctc_feat)
 
                     h_seq_feat = self.modules.d_out(dec_out)  # [B, T_p+1, C]
@@ -725,7 +735,8 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
                     #         enc_out.detach(), wav_lens
                     #     )
                     hyps = p_seq_logits.argmax(dim=-1)  # [B, T_p+1]
-
+                    from speechbrain.utils.data_utils import undo_padding
+                    hyps = undo_padding(hyps, target_lens_bos)
                     attn_map = None
                     
                     # ==================== Validation: Optional attention visualization ====================
@@ -845,7 +856,8 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
                         p_mispro_cls_logits = torch.nn.functional.log_softmax(h_mispro_cls, dim=-1)
                         
                         # ==================== TEST: CTC and Seq2Seq head outputs ====================
-                        h_ctc_feat = self.modules.ctc_lin(enc_out)  # [B, T_s, C]
+                        # h_ctc_feat = self.modules.ctc_lin(enc_out)  # [B, T_s, C]
+                        h_ctc_feat = self.modules.ctc_lin(enc_out_ssl_proj)  # [B, T_s, C]
                         p_ctc_logits = self.hparams.log_softmax(h_ctc_feat)
 
                         h_seq_feat = self.modules.d_out(dec_out)  # [B, T_p+1, C]
@@ -1059,6 +1071,8 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
             tgt_emb = tgt_emb + self.modules.TransASR.positional_encoding(tgt_emb)
 
         tgt_emb_for_pco = self.modules.conpco_proj_perceived_phn_feat(tgt_emb)
+        # apply l2 norm
+        tgt_emb_for_pco = F.normalize(tgt_emb_for_pco, p=2, dim=-1)
         
         # if also apply decode positional embedding  proj on dec_out
         # pdb.set_trace()
@@ -1078,6 +1092,8 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
             dec_out_proj = dec_out
 
         audio_feats_for_pco = self.modules.conpco_proj_audio_feat(dec_out_proj)
+        # apply l2 norm
+        audio_feats_for_pco = F.normalize(audio_feats_for_pco, p=2, dim=-1)
         
         # TODO: use real gt
         # current solution, as we are using target_eos as decoder input, assume they are all high score.
@@ -1140,7 +1156,7 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
                     show_audio_scatter=self.hparams.conPCO_plot_show_audio_scatter,
                     show_phoneme_centroid=self.hparams.conPCO_plot_show_phoneme_centroid,
                     show_phoneme_scatter=self.hparams.conPCO_plot_show_phoneme_scatter,
-                    reduction_method="umap"
+                    # reduction_method="umap"
                 )
                 
                 output_dir.mkdir(parents=True, exist_ok=True)
@@ -1298,6 +1314,7 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
                 
                 # self.ctc_metrics_fuse.append(ids, sequence_decoder_out, targets, wav_lens, target_lens)
                 # CTC-only results
+                # import pdb; pdb.set_trace()
                 if self.hparams.ctc_head_target == "perceived":
                     if self.hparams.eval_with_silence == False and filtered_ctc_ref is not None:
                         self.per_metrics.append(
@@ -1338,6 +1355,7 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
                         )
                     
                 # seq2seq results
+                # import pdb; pdb.set_trace()
                 if self.hparams.decoder_target == "perceived":
                     if self.hparams.eval_with_silence == False and filtered_seq_ref is not None:
                         self.per_metrics_seq.append(
@@ -1358,6 +1376,7 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
                             ind2lab=self.label_encoder.decode_ndim,
                         )
                 else:
+                    
                     if self.hparams.eval_with_silence == False and filtered_seq_ref is not None:
                         self.per_metrics_seq.append(
                             ids=ids,
@@ -1381,7 +1400,7 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
                             target_len=target_lens,
                             ind2lab=self.label_encoder.decode_ndim,
                         )
-                import pdb; pdb.set_trace()
+                # import pdb; pdb.set_trace()
                 # MPD metrics
                 self.mpd_metrics.append(
                     ids=ids,
@@ -1682,7 +1701,8 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
     def init_optimizers(self):
 
         self.adam_optimizer = self.hparams.adam_opt_class(
-            self.hparams.model.parameters(),
+            # self.hparams.model.parameters(),
+            self.hparams.trainable_model.parameters(),
         )
         
         # frz perceived SSL, TransASR's custom_src_module and encoder, as well as ctc head
