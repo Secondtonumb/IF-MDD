@@ -45,8 +45,7 @@ canonical_ssl_model: Null
 ENCODER_DIM: 1024
 
 # # How to fuse the features
-feature_fusion: "mono"        # Options: "mono" for single ssl, "dual_ssl_enc" for dual ssl encoder, "dual_loss" for single SSL dual ssl loss
-blend_alpha: 0.5              # If using "blend" fusion
+feature_fusion: None
 
 # Input files
 # Data files
@@ -77,11 +76,11 @@ train_log: !ref <output_folder>/train_log.txt
 on_training_test_wer_folder: !ref <output_folder>/on_training_test_wer
 on_training_test_mpd_folder: !ref <output_folder>/on_training_test_mpd
 
-# Training Target 
+
 training_target: "target" # "target": deduplicated canonical phoneme sequence; "target_with_repeats": with repeats
                           # "canonical"
                           # "perceived": deduplicated perceived phoneme sequence
-# Modules (SpeechBrain lobes)
+
 modules:
     canonical_ssl: !ref <canonical_ssl>
     perceived_ssl: !ref <perceived_ssl>
@@ -98,15 +97,18 @@ modules:
 
     phn_emb: !ref <phn_emb>
     
+post_encoder_modules: !new:torch.nn.ModuleList
+    - [!ref <enc>, !ref <ConformerEncoder>, !ref <ctc_lin>, !ref <lm_weight>]
+
 # Text prompt module
 phn_emb_head: !new:torch.nn.Embedding
         num_embeddings: !ref <output_neurons>
         embedding_dim: !ref <dnn_neurons>
-
+dummy_norm: !new:torch.nn.LayerNorm
+        normalized_shape: !ref <dnn_neurons>
 phn_emb: !new:torch.nn.Sequential
     - !ref <phn_emb_head>
-    - !new:torch.nn.LayerNorm
-        normalized_shape: !ref <dnn_neurons>
+    - !ref <dummy_norm>
 
 perceived_ssl: !apply:trainer.AutoSSLoader.AutoSSLLoader
     model_name: !ref <perceived_ssl_model>
@@ -131,8 +133,7 @@ enc: !new:torch.nn.Sequential
      activation: !ref <activation>
      dnn_blocks: !ref <dnn_layers>
      dnn_neurons: !ref <dnn_neurons>
-  - !new:torch.nn.LayerNorm
-     normalized_shape: !ref <dnn_neurons>
+  - !ref <dummy_norm>
 
 
 kernel_size: 7
@@ -241,6 +242,8 @@ mispro_cost_bin: !name:speechbrain.nnet.losses.bce_loss
             - [2.0]
         - "cuda:0"
 
+mpd_loss_weight: 10
+
 mispro_cost_cls: !name:speechbrain.nnet.losses.kldiv_loss
     reduction: batchmean
 
@@ -254,7 +257,6 @@ output_neurons: 71 # l2arctic: 40phns(sil)+err+blank + eos + bos =44
 blank_index: 0
 
 model: !new:torch.nn.ModuleList
-    # - [!ref <enc>, !ref <ConformerEncoder>, !ref <ctc_lin>, !ref <lm_weight>]
     - [!ref <enc>,
       !ref <ConformerEncoder>,
       !ref <ctc_lin>,
@@ -266,6 +268,7 @@ model: !new:torch.nn.ModuleList
       !ref <mispro_head_binary_out>,
       !ref <mispro_head_class_out>,
       ]
+    # - [!ref <enc>, !ref <ConformerEncoder>, !ref <ctc_lin>, !ref <lm_weight>]
 
 adam_opt_class: !name:torch.optim.Adam
     lr: !ref <lr>
@@ -376,14 +379,14 @@ valid_dataloader_opts:
 test_dataloader_opts:
     batch_size: !ref <batch_size>
 
-# # resume_from_pretrainer, to fine-tune from a saved pretrainer checkpoint
-# resume_from: /home/m64000/work/IF-MDD/exp_iqra_tts/wavlm_large_None_PhnMonoSSL_crottc_confEnc_RoPE_k7/save/CKPT+088_PER_6.2082_F1_0.9074.ckpt
+# resume_from_pretrainer, to fine-tune from a saved pretrainer checkpoint
+resume_from: /home/m64000/work/IF-MDD/pretrained_models/iqra_extra_acou_model/ottc_k7_RoPE_TTS_FT
 
-# resume_from_pretrainer: !new:speechbrain.utils.parameter_transfer.Pretrainer
-#     collect_in: !ref <resume_from>/
-#     loadables:
-#         perceived_ssl: !ref <perceived_ssl>
-#         model: !ref <model>
+resume_from_pretrainer: !new:speechbrain.utils.parameter_transfer.Pretrainer
+    collect_in: !ref <resume_from>/
+    loadables:
+        perceived_ssl: !ref <perceived_ssl>
+        model: !ref <post_encoder_modules>
 # # 
 # pretrainer: !new:speechbrain.utils.parameter_transfer.Pretrainer
 #     collect_in: !ref <save_folder>/
@@ -396,6 +399,16 @@ encoder: !new:speechbrain.nnet.containers.LengthsCapableSequential
     enc: !ref <enc>
     ctc_lin: !ref <ctc_lin>
     log_softmax: !ref <log_softmax>
+
+# pretrained_model_path: /home/m64000/work/IF-MDD/pretrained_models/iqra_extra_acou_model/ottc_k7_RoPE_TTS_FT
+# AudioEncoderPretrainer : !new:speechbrain.utils.parameter_transfer.Pretrainer
+#     collect_in: !ref <pretrained_model_path>
+#     loadables:
+#         perceived_ssl: !ref <perceived_ssl>
+#         post_encoder_modules: !ref <post_encoder_modules>
+#     paths:
+#         perceived_ssl: !ref <pretrained_model_path>/perceived_ssl.ckpt
+#         post_encoder_modules: !ref <pretrained_model_path>/model.ckpt
 
 decoding_function: !name:speechbrain.decoders.ctc_greedy_decode
     blank_id: !ref <blank_index>

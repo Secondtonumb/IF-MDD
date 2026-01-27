@@ -210,6 +210,13 @@ class PhnMonoSSLModel_IF(sb.Brain):
         # Initialize unified components
         self._init_encoder_manager()
         self._init_loss_manager()
+        self._init_mpd_loss_manager()
+        
+        # MPD loss tracking (will be reset each epoch)
+        self.mpd_binary_loss_sum = 0.0
+        self.mpd_binary_loss_count = 0
+        self.mpd_cls_loss_sum = 0.0
+        self.mpd_cls_loss_count = 0
         
     def _init_encoder_manager(self):
         """Initialize encoder manager based on hparams"""
@@ -246,6 +253,15 @@ class PhnMonoSSLModel_IF(sb.Brain):
             ctc_cost=self.hparams.ctc_cost,
             hparams=self.hparams,
             blank_index=self.hparams.blank_index
+        )
+    
+    def _init_mpd_loss_manager(self):
+        """Initialize MPD loss manager"""
+        from utils.MPDLossManager import MPDLossManager
+        
+        self.mpd_loss_manager = MPDLossManager(
+            hparams=self.hparams,
+            device=self.device
         )
     
     def create_attention_mask_from_input_sequence(self, input_sequence):
@@ -346,6 +362,9 @@ class PhnMonoSSLModel_IF(sb.Brain):
         # fuse cano_emb with x if crottc, use half batch of x for crottc/crctc
         if use_crottc or use_crctc:
             x_half = x[: x.shape[0] // 2, :, :]
+        else:
+            x_half = x
+        
         memory = x_half
         if self.hparams.post_encoder_reduction_factor >= 1:
             memory = self.modules.projector(memory)
@@ -511,6 +530,39 @@ class PhnMonoSSLModel_IF(sb.Brain):
             loss = loss + extras['commitment_loss'] + extras['codebook_loss']
             loss_dict['commitment_loss'] = extras['commitment_loss'].detach()
             loss_dict['codebook_loss'] = extras['codebook_loss'].detach()
+        
+        # ===== Compute MPD losses (mispronunciation detection) =====
+        if stage == sb.Stage.TRAIN and 'h_mispro_bin' in extras and 'h_mispro_cls' in extras:
+            h_mispro_bin = extras['h_mispro_bin']
+            h_mispro_cls = extras['h_mispro_cls']
+            
+            # Get canonical lengths for masking if available
+            cano_lens = None
+            if canonicals is not None and canonical_lens is not None:
+                cano_lens = canonical_lens
+            
+            # Compute MPD losses
+            
+            mpd_loss, mpd_loss_dict = self.mpd_loss_manager.compute_loss_with_weight_mask(
+                h_mispro_bin, h_mispro_cls, batch, cano_lens=cano_lens, stage=stage
+            )
+            
+            # Add MPD losses to total loss and loss dict
+            loss_dict.update(mpd_loss_dict)
+            
+            # Get MPD loss weights from hparams
+            mpd_loss_weight = getattr(self.hparams, 'mpd_loss_weight', 0.1)
+            loss = loss + mpd_loss_weight * mpd_loss
+            
+            # Track MPD losses for logging
+            # import pdb; pdb.set_trace()
+            if mpd_loss_dict['binary_loss'].item() > 0:
+                self.mpd_binary_loss_sum += mpd_loss_dict['binary_loss'].item()
+                self.mpd_binary_loss_count += 1
+            if mpd_loss_dict['cls_loss'].item() > 0:
+                self.mpd_cls_loss_sum += mpd_loss_dict['cls_loss'].item()
+                self.mpd_cls_loss_count += 1
+            
         
         # Evaluation metrics (validation/test stage)
         if stage != sb.Stage.TRAIN:
@@ -1054,6 +1106,14 @@ class PhnMonoSSLModel_IF(sb.Brain):
             self.cr_loss_count = 0
             self.ctc_loss_sum = 0.0
             self.ctc_loss_count = 0
+            
+            # Reset MPD loss tracking at the start of each training epoch
+            self.mpd_binary_loss_sum = 0.0
+            self.mpd_binary_loss_count = 0
+            self.mpd_cls_loss_sum = 0.0
+            self.mpd_cls_loss_count = 0
+            self.ctc_loss_sum = 0.0
+            self.ctc_loss_count = 0
         
         if stage != sb.Stage.TRAIN:
             self.per_metrics = self.hparams.per_stats()
@@ -1085,6 +1145,12 @@ class PhnMonoSSLModel_IF(sb.Brain):
             if self.loss_manager.loss_type == 'crctc' or self.loss_manager.loss_type == 'crottc':
                 train_stats["ctc_loss"] = getattr(self, 'avg_ctc_loss_train', 0.0)
                 train_stats["cr_loss"] = getattr(self, 'avg_cr_loss', 0.0)
+            
+            # Add MPD losses to train stats if available
+            if self.mpd_binary_loss_count > 0:
+                train_stats["mpd_binary_loss"] = self.mpd_binary_loss_sum / self.mpd_binary_loss_count
+            if self.mpd_cls_loss_count > 0:
+                train_stats["mpd_cls_loss"] = self.mpd_cls_loss_sum / self.mpd_cls_loss_count
             
             # Prepare valid stats
             valid_stats = {
@@ -1152,6 +1218,12 @@ class PhnMonoSSLModel_IF(sb.Brain):
             if self.loss_manager.loss_type == 'crctc' or self.loss_manager.loss_type == 'crottc':
                 wandb_dict["train_ctc_loss"] = getattr(self, 'avg_ctc_loss_train', 0.0)
                 wandb_dict["train_cr_loss"] = getattr(self, 'avg_cr_loss', 0.0)
+            
+            # Add MPD losses to wandb logging
+            if self.mpd_binary_loss_count > 0:
+                wandb_dict["train_mpd_binary_loss"] = self.mpd_binary_loss_sum / self.mpd_binary_loss_count
+            if self.mpd_cls_loss_count > 0:
+                wandb_dict["train_mpd_cls_loss"] = self.mpd_cls_loss_sum / self.mpd_cls_loss_count
             
             wandb.log(wandb_dict, step=epoch)
             
