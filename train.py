@@ -31,6 +31,7 @@ from datetime import datetime
 # from models.phn_mono_ssl_model import PhnMonoSSLModel, PhnMonoSSLModel_DualCTCHead, PhnMonoSSLModel_RVQforBoth
 # from models.phn_mono_ssl_model import PhnMonoSSLModel_CRCTC
 from models.phn_mono_ssl_model_v3_refactored import *
+from models.phn_mono_ssl_model_v3_refactored_IF import PhnMonoSSLModel_IF
 
 from models.Transformer import TransformerMDD
 from models.Transformer_TP import TransformerMDD_TP
@@ -100,6 +101,8 @@ if __name__ == "__main__":
     # Model Selection
     if hparams["feature_fusion"] == "PhnMonoSSL":
         asr_brain_class = PhnMonoSSLModel
+    elif hparams["feature_fusion"] == "PhnMonoSSL_IF":
+        asr_brain_class = PhnMonoSSLModel_IF
     elif hparams["feature_fusion"] == "TransformerMDD":
         asr_brain_class = TransformerMDD
     elif hparams["feature_fusion"] == "TransformerMDD_TP":
@@ -132,7 +135,7 @@ if __name__ == "__main__":
     #     asr_brain_class = SSL_LLM_origin_ver2_expand_tok
     # if asr_brain_class == SSL_LLM:
 #         DataPrep  = LLMDataIOPrep_ver3(hparams)
-    if asr_brain_class == TransformerMDD_TP_encdec_errclass:
+    if asr_brain_class == TransformerMDD_TP_encdec_errclass or asr_brain_class == PhnMonoSSLModel_IF:
         DataPrep  = LLMDataIOPrep_ver2(hparams)
     else:
         DataPrep  = LLMDataIOPrep(hparams)
