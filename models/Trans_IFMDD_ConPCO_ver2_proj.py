@@ -38,7 +38,7 @@ import numpy as np
 from utils.layers.utils import make_pad_mask
 from utils.plot.plot_attn import plot_attention
 
-class Trans_IFMDD_ConPCO_ver2(sb.Brain):
+class Trans_IFMDD_ConPCO_ver2_proj(sb.Brain):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # self.        super().__init__(*args, **kwargs)
@@ -573,16 +573,15 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
             # pdb.set_trace()
             
             if allow_ASR_hidden:
-                enc_out, hidden_outs, dec_out = outs
+                enc_out, enc_proj, hidden_outs, dec_out = outs
             else:
-                enc_out, dec_out = outs
+                enc_out, enc_proj, dec_out = outs
         
-
 
             # ==================== Train: Fuse canonical embeddings with audio features ====================
             if "enc" in self.hparams.fuse_enc_or_dec:
                 memory = enc_out
-                memory = self.modules.mem_proj(memory)  # [B, T_s, D]
+                # memory = self.modules.mem_proj(memory)  # [B, T_s, D]
                 # project post encoder
                 if self.hparams.post_encoder_reduction_factor >= 1:
                     # 使用Conv1d在时间维度降采样，保持D维度不变
@@ -603,7 +602,7 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
             if "dec" in self.hparams.fuse_enc_or_dec:
                 memory = dec_out
                 # LayerNorm and Positional Embedding
-                memory = self.modules.mem_proj_dec(memory)  # [B, T_p, D]
+                # memory = self.modules.mem_proj_dec(memory)  # [B, T_p, D]
                 # tgt_causal_mask = get_lookahead_mask(Cano_emb)
                 fuse_feat_dec, _,  fuse_attn_dec = self.modules.fuse_net_dec(
                     tgt=Cano_emb,
@@ -709,14 +708,14 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
                     )
                     
                     if allow_ASR_hidden:
-                        enc_out, hidden_outs, dec_out = outs
+                        enc_out, enc_proj, hidden_outs, dec_out = outs
                     else:
-                        enc_out, dec_out = outs
+                        enc_out, enc_proj, dec_out = outs
                     
                     # ==================== Validation: Fuse canonical embeddings with audio features ====================
                     if "enc" in self.hparams.fuse_enc_or_dec:
                         memory = enc_out
-                        memory = self.modules.mem_proj(memory)  # [B, T_s, D]
+                        # memory = self.modules.mem_proj(memory)  # [B, T_s, D]
                         
                         if self.hparams.post_encoder_reduction_factor >= 1:
                             memory = self.modules.mem_proj_cnn_post_enc(memory)
@@ -732,7 +731,7 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
 
                     if "dec" in self.hparams.fuse_enc_or_dec:
                         memory = dec_out
-                        memory = self.modules.mem_proj_dec(memory)  # [B, T_p, D]
+                        # memory = self.modules.mem_proj_dec(memory)  # [B, T_p, D]
                         fuse_feat_dec, _,  fuse_attn_dec = self.modules.fuse_net_dec(
                             tgt=Cano_emb,
                             memory=memory,
@@ -850,16 +849,17 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
                                 wav_len=wav_lens,
                                 pad_idx=0,
                         )
+                        # import pdb; pdb.set_trace()
                         
                         if allow_ASR_hidden:
-                            enc_out, hidden_outs, dec_out = outs
+                            enc_out, enc_proj, hidden_outs, dec_out = outs
                         else:
-                            enc_out, dec_out = outs
+                            enc_out, enc_proj, dec_out = outs
                         
                         # ==================== TEST: Fuse canonical embeddings with audio features ====================
                         if "enc" in self.hparams.fuse_enc_or_dec:
                             memory = enc_out
-                            memory = self.modules.mem_proj(memory)  # [B, T_s, D]
+                            # memory = self.modules.mem_proj(memory)  # [B, T_s, D]
                             
                             if self.hparams.post_encoder_reduction_factor >= 1:
                                 
@@ -878,7 +878,7 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
 
                         if "dec" in self.hparams.fuse_enc_or_dec:
                             memory = dec_out
-                            memory = self.modules.mem_proj_dec(memory)  # [B, T_p, D]
+                            # memory = self.modules.mem_proj_dec(memory)  # [B, T_p, D]
                             fuse_feat_dec, _,  fuse_attn_dec = self.modules.fuse_net_dec(
                                 tgt=Cano_emb,
                                 memory=memory,

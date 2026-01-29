@@ -39,6 +39,7 @@ from models.Transformer_TP_fuse_errclass import TransformerMDD_TP_encdec_errclas
 from models.Transformer_TP_fuse_errclass_ConPCO import TransformerMDD_TP_encdec_errclass_ConPCO
 from models.Trans_IFMDD_ConPCO import Trans_IFMDD_ConPCO
 from models.Trans_IFMDD_ConPCO_ver2 import Trans_IFMDD_ConPCO_ver2
+from models.Trans_IFMDD_ConPCO_ver2_proj import Trans_IFMDD_ConPCO_ver2_proj
 
 # from models.SSL_LLM import SSL_LLM
 from models.SSL_LLM_origin import SSL_LLM_origin
@@ -115,6 +116,8 @@ if __name__ == "__main__":
         asr_brain_class = Trans_IFMDD_ConPCO
     elif hparams["feature_fusion"] == "Trans_IFMDD_ConPCO_ver2":
         asr_brain_class = Trans_IFMDD_ConPCO_ver2
+    elif hparams["feature_fusion"] == "Trans_IFMDD_ConPCO_ver2_proj":
+        asr_brain_class = Trans_IFMDD_ConPCO_ver2_proj
     elif hparams["feature_fusion"] == "SSL_LLM_MultiTarget_ver1":
         asr_brain_class = SSL_LLM_MultiTarget_ver1
     elif hparams["feature_fusion"] == "SSL_LLM_MultiTarget_ver2":

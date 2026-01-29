@@ -196,6 +196,8 @@ TransASR: !new:trainer.ConPCO_TransASR.ConPCO_TransformerASR
     causal: !ref <causal>
     custom_src_module: !ref <enc>
     custom_encoder: !ref <ConformerEncoder>
+    encoder_proj_decoder: !ref <mem_proj_cnn_post_enc>
+    post_encoder_reduction_factor: !ref <post_encoder_reduction_factor>
     # custom_tgt_module: !ref <phn_emb>
     # activation: !ref <activation>
 
@@ -318,7 +320,7 @@ mem_proj_dec: !new:torch.nn.Sequential
 
 # memory
 # Fusion network
-fuse_enc_or_dec: "encdec"
+fuse_enc_or_dec: "dec"
 fuse_net_layers: 2
 
 fuse_net: !new:speechbrain.lobes.models.transformer.Transformer.TransformerDecoder
@@ -362,7 +364,7 @@ valid_search: !new:speechbrain.decoders.seq2seq.S2STransformerBeamSearcher
   bos_index: !ref <bos_index>
   eos_index: !ref <eos_index>
   min_decode_ratio: 0.0
-  max_decode_ratio: 0.3
+  max_decode_ratio: 0.4
   length_normalization: False
   using_eos_threshold: False
   beam_size: 1
@@ -373,7 +375,7 @@ test_search: !new:speechbrain.decoders.seq2seq.S2STransformerBeamSearcher
   bos_index: !ref <bos_index>
   eos_index: !ref <eos_index>
   min_decode_ratio: 0.0
-  max_decode_ratio: 0.3
+  max_decode_ratio: 0.4
   temperature: 1.05
   length_normalization: False
   using_eos_threshold: False
@@ -404,7 +406,7 @@ log_softmax: !new:speechbrain.nnet.activations.Softmax
     apply_log: True
 
 ctc_weight: 0.0
-ctc_decode_weight: 0.9
+ctc_decode_weight: 0.7
 
 ctc_cost: !name:speechbrain.nnet.losses.ctc_loss
     blank_index: !ref <blank_index>
@@ -593,10 +595,10 @@ __set_seed: !apply:torch.manual_seed [!ref <seed>]
 number_of_epochs: 500
 valid_search_interval: 1
 batch_size: 24
-lr: 0.0002
-sorting: ascending
+lr: 0.001
+# sorting: ascending
 # sorting: descending
-# sorting: random
+sorting: random
 sample_rate: 16000
 gradient_accumulation: 1
 lr_pretrained: 0.00001
@@ -629,23 +631,28 @@ valid_dataloader_opts:
 test_dataloader_opts:
     batch_size: !ref <batch_size>
 
-noam_annealing: !new:speechbrain.nnet.schedulers.NewBobScheduler
-    initial_value: !ref <lr>
-    annealing_factor: 0.8
-    improvement_threshold: 0.0025
-    patient: 0
+# noam_annealing: !new:speechbrain.nnet.schedulers.NewBobScheduler
+#     initial_value: !ref <lr>
+#     annealing_factor: 0.8
+#     improvement_threshold: 0.0025
+#     patient: 0
+noam_annealing: !new:speechbrain.nnet.schedulers.NoamIntervalScheduler
+    lr_initial: !ref <lr>
+    n_warmup_steps: 5
+    anneal_steps: [50, 150]
+    anneal_rates: [0.5, 0.1]
 
 # Plot attention for fusion
-plot_attention: False
-plot_attention_interval: 10
+plot_attention: True
+plot_attention_interval: 30
 valid_attention_plot_dir: !ref <output_folder>/valid_attention_plots
 test_attention_plot_dir: !ref <output_folder>/test_attention_plots
 
 # ConPCO visualization
-plot_conpco_interval: 10
-plot_conpco: False
+plot_conpco_interval: 30
+plot_conpco: True
 conpco_plot_dir: !ref <output_folder>/conpco_plots
-max_phones: 10
+max_phones: 8
 conPCO_plot_show_audio_centroid: False
 conPCO_plot_show_audio_scatter: True
 conPCO_plot_show_phoneme_centroid: True
