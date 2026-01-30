@@ -104,6 +104,8 @@ if __name__ == "__main__":
         asr_brain_class = PhnMonoSSLModel
     elif hparams["feature_fusion"] == "PhnMonoSSL_IF":
         asr_brain_class = PhnMonoSSLModel_IF
+    elif hparams["feature_fusion"] == "PhnMonoSSL_TextGate":
+        asr_brain_class = PhnMonoSSLModel_TextGate
     elif hparams["feature_fusion"] == "TransformerMDD":
         asr_brain_class = TransformerMDD
     elif hparams["feature_fusion"] == "TransformerMDD_TP":

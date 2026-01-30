@@ -637,6 +637,60 @@ class PhnMonoSSLModel(sb.Brain):
         # print out
         return result
     
+    def inference(
+        self,
+        test_set,
+        min_key: Optional[str] = None,
+        max_key: Optional[str] = None,
+        output_file: Optional[str] = None,
+        test_loader_kwargs: Optional[Dict] = None,
+    ) -> TestResults:
+        """
+        Run inference on a test set (dataset or dataloader) with flexible output.
+        
+        This method:
+        1. Creates a dataloader from test_set if needed
+        2. Runs inference on all batches
+        3. Computes metrics if reference data available
+        4. Saves results to CSV if output_file provided
+        5. Loads best checkpoint based on min_key or max_key
+        
+        Args:
+            test_set: Test dataset or dataloader
+            min_key: Metric to minimize for checkpoint selection (e.g., "PER")
+            max_key: Metric to maximize for checkpoint selection (e.g., "mpd_f1")
+            output_file: Optional path to save CSV results
+            test_loader_kwargs: Dict of kwargs to create dataloader (if test_set is a dataset)
+        
+        Returns:
+            TestResults object with all results and summary statistics
+        """
+        # Load best checkpoint based on keys
+        if self.checkpointer is not None:
+            if max_key is not None:
+                self.checkpointer.recover_if_possible(max_key=max_key)
+            elif min_key is not None:
+                self.checkpointer.recover_if_possible(min_key=min_key)
+        
+        # Create dataloader if test_set is a dataset (not already a dataloader)
+        if test_loader_kwargs is not None and not hasattr(test_set, '__iter__'):
+            # test_set is likely a Dataset, create a DataLoader
+            from torch.utils.data import DataLoader
+            dataloader = DataLoader(test_set, **test_loader_kwargs)
+        else:
+            # test_set is already a dataloader or iterable
+            dataloader = test_set
+        
+        # Run inference on dataset
+        test_results = self.inference_dataset(
+            dataloader,
+            output_csv=output_file,
+            compute_metrics=True,
+            show_progress=True
+        )
+        
+        return test_results
+    
     def inference_batch(
         self,
         batch,
@@ -1639,6 +1693,122 @@ class PhnMonoSSLModel_TextGate(PhnMonoSSLModel):
         
         # Standard output
         return p_ctc, wav_lens
+    
+    def inference_batch(self, batch, compute_metrics: bool = True):
+        """
+        Inference on a batch with TextGate integration.
+        
+        Handles both:
+        1. Full reference mode: batch has canonical, perceived, target
+        2. Pure inference mode: batch has only audio and canonical
+        
+        Args:
+            batch: SpeechBrain batch object
+            compute_metrics: Whether to compute metrics if reference available
+        
+        Returns:
+            List of InferenceResult objects
+        """
+        self.modules.eval()
+        
+        with torch.no_grad():
+            batch = batch.to(self.device)
+            wavs, wav_lens = batch.sig
+            ids = batch.id
+            
+            # Extract SSL features
+            feats = self.modules.perceived_ssl(wavs)
+            
+            # Encode features
+            x, _ = self.encoder_manager(feats, wav_lens)
+            
+            # Get canonical embeddings
+            canonicals, canonical_lens = batch.phn_encoded_canonical
+            cano_emb = self.modules.phn_emb(canonicals)
+            
+            # Apply positional encoding
+            from speechbrain.lobes.models.transformer.Transformer import PositionalEncoding
+            PosEnc = PositionalEncoding(input_size=self.hparams.dnn_neurons, max_len=5000).to(self.device)
+            cano_emb = cano_emb + PosEnc(cano_emb)
+            
+            # Align cano_emb time dimension to match x (audio features)
+            if x.shape[1] != cano_emb.shape[1]:
+                # Use interpolation to match audio length
+                cano_emb_transposed = cano_emb.transpose(1, 2)  # [B, D, T_canonical]
+                cano_emb_aligned = torch.nn.functional.interpolate(
+                    cano_emb_transposed, 
+                    size=x.shape[1], 
+                    mode='linear', 
+                    align_corners=False
+                )
+                cano_emb = cano_emb_aligned.transpose(1, 2)  # [B, T_audio, D]
+            
+            # Apply TextGate to fuse audio and canonical text features
+            x, _ = self.modules.textgate(q_audio=x, k_text=cano_emb, v_text=cano_emb)
+            
+            # CTC output
+            logits = self.modules.ctc_lin(x)
+            p_ctc = self.hparams.log_softmax(logits)
+            
+            # Greedy CTC decoding
+            sequences = sb.decoders.ctc_greedy_decode(
+                p_ctc, wav_lens, blank_id=self.hparams.blank_index
+            )
+        
+        results = []
+        
+        # Check what reference data is available
+        has_target = hasattr(batch, 'phn_encoded_target')
+        has_canonical = hasattr(batch, 'phn_encoded_canonical')
+        has_perceived = hasattr(batch, 'phn_encoded_perceived')
+        
+        # Get reference data if available
+        targets = None
+        target_lens = None
+        perceiveds = None
+        perceived_lens = None
+        
+        if has_target:
+            targets, target_lens = batch.phn_encoded_target
+        if has_perceived:
+            perceiveds, perceived_lens = batch.phn_encoded_perceived
+        
+        for i, (seq_id, seq) in enumerate(zip(ids, sequences)):
+            pred_str = self._decode_sequence(seq)
+            
+            result = InferenceResult(
+                id=seq_id,
+                prediction=pred_str
+            )
+            
+            # Add reference canonical data if available
+            if has_canonical and canonicals is not None:
+                result.canonical = self._decode_tensor(canonicals[i], canonical_lens[i] if canonical_lens is not None else None)
+            
+            # Add reference perceived data if available
+            if has_perceived and perceiveds is not None:
+                result.perceived = self._decode_tensor(perceiveds[i], perceived_lens[i] if perceived_lens is not None else None)
+            
+            # Add reference target data if available
+            if has_target and targets is not None:
+                result.target = self._decode_tensor(targets[i], target_lens[i] if target_lens is not None else None)
+                
+                # Compute PER if target available and metrics requested
+                if compute_metrics:
+                    result.per = self._compute_per(pred_str, result.target)
+            
+            # Compute MPD if canonical and perceived available
+            if compute_metrics and has_canonical and has_perceived:
+                if hasattr(result, 'canonical') and hasattr(result, 'perceived'):
+                    result.mpd_result = self._compute_mpd_single(
+                        pred_str,
+                        result.canonical,
+                        result.perceived
+                    )
+            
+            results.append(result)
+        
+        return results
     
     def on_fit_start(self):
         """Gets called at the beginning of ``fit()``, on multiple processes
