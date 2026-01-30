@@ -2118,7 +2118,7 @@ class InferDataIOPrep_with_cano(InferDataIOPrep):
         # Set output keys
         sb.dataio.dataset.set_output_keys(
             [infer_data],
-            ["id", "sig", "phn_list_canonical"],
+            ["id", "sig", "phn_list_canonical", "phn_encoded_list_canonical", "phn_encoded_canonical"],
         )
         
         return infer_data
@@ -2127,10 +2127,15 @@ class InferDataIOPrep_with_cano(InferDataIOPrep):
         @sb.utils.data_pipeline.takes("canonical_aligned")
         @sb.utils.data_pipeline.provides(
             "phn_list_canonical",
+            "phn_encoded_list_canonical",
+            "phn_encoded_canonical",
         )
         def text_pipeline(canonical):
             phn_list_canonical = canonical.strip().split()
             yield phn_list_canonical
+            phn_encoded_list_canonical = self.label_encoder.encode_sequence(phn_list_canonical)
+            phn_encoded_canonical = torch.LongTensor(phn_encoded_list_canonical)
+            yield phn_encoded_canonical
         
         return text_pipeline
     
