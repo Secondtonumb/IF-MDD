@@ -1484,3 +1484,232 @@ class PhnMonoSSLModel_withcanoPhnEmb_HMA_CTC(PhnMonoSSLModel):
             )
         
         return loss
+    
+class PhnMonoSSLModel_TextGate(PhnMonoSSLModel):
+    def compute_forward(self, batch, stage, pseudo_labels=None, pseudo_label_lens=None):
+        """
+            Unified forward pass supporting all configurations.
+            
+            Args:
+                batch: Input batch
+                stage: Training stage
+                pseudo_labels: Optional pseudo labels for unlabeled data (for OTTC)
+                pseudo_label_lens: Optional pseudo label lengths (for OTTC)
+            
+            Returns:
+                Depending on configuration, returns:
+                - (p_ctc, wav_lens) for vanilla
+                - (p_ctc, wav_lens, commitment_loss, codebook_loss) for RVQ
+                - (p_ctc, logits, weights_logits, weights_labels, wav_lens) for OTTC
+                - (p_ctc, wav_lens, time_mask, is_crctc_mode) for CR-CTC
+        """
+        batch = batch.to(self.device)
+        wavs, wav_lens = batch.sig
+        
+        # check if OTTC mode is enabled
+        use_ottc = (
+            self.loss_manager.loss_type == 'ottc' and 
+            stage == sb.Stage.TRAIN and
+            getattr(self.hparams, "use_ottc", True)
+        )
+        
+        # Check if CR-CTC mode is enabled (requires augmentation)
+        use_crctc = (
+            self.loss_manager.loss_type == 'crctc' and 
+            stage == sb.Stage.TRAIN and
+            getattr(self.hparams, "use_crctc", True) and
+            hasattr(self.hparams, "augmentation")  # CR-CTC requires augmentation
+        )
+
+        # Check if CT-OTTC mode is enabled
+        use_crottc = (
+            self.loss_manager.loss_type == 'crottc' and
+            stage == sb.Stage.TRAIN and
+            getattr(self.hparams, "use_crottc", True) and
+            hasattr(self.hparams, "augmentation")  # OTTC requires augmentation
+        )
+        
+        # Apply augmentation in training,
+        if stage == sb.Stage.TRAIN:
+            if hasattr(self.hparams, "speed_augmentation"):
+                wavs = self.hparams.speed_augmentation(wavs)
+            
+            # Essential Augmentation for for CR-CTC / CR-OTTC
+            if use_crctc or use_crottc:
+                # CR-CTC: Apply augmentation twice to get two different views
+                wavs_1, wav_lens_1 = self.hparams.augmentation.forward(wavs, lengths=wav_lens)
+                wavs_2, wav_lens_2 = self.hparams.augmentation.forward(wavs, lengths=wav_lens)
+                
+                # Extract SSL features for both augmented versions
+                feats_1 = self.modules.perceived_ssl(wavs_1)
+                feats_2 = self.modules.perceived_ssl(wavs_2)
+                
+                # Concatenate both versions: [2*B, T, D]
+                feats = torch.cat([feats_1, feats_2], dim=0)
+                wav_lens = wav_lens.repeat(2)
+            else:
+                # Standard augmentation (non-CR-CTC)
+                if hasattr(self.hparams, "augmentation"):
+                    wavs = self.hparams.augmentation(wavs)
+                
+                # Extract SSL features
+                feats = self.modules.perceived_ssl(wavs)
+        else:
+            # Extract SSL features (no augmentation)
+            feats = self.modules.perceived_ssl(wavs)
+        
+        # Encode features
+        x, encoder_extras = self.encoder_manager(feats, wav_lens)
+        
+        # import pdb; pdb.set_trace()
+        
+        canonicals, canonical_lens = batch.phn_encoded_canonical
+        
+        cano_emb = self.modules.phn_emb(canonicals)
+        from speechbrain.nnet.attention import RelPosEncXL, RelPosMHAXL, RoPEMHA
+        from speechbrain.lobes.models.transformer.Transformer import PositionalEncoding
+        
+        # Apply positional encoding BEFORE doubling to maintain consistent positions (0-T for both copies)
+        # pos_enc = RelPosEncXL(emb_dim=self.hparams.dnn_neurons)(cano_emb).to(self.device)
+        # RoPEMHA(emb_dim=self.hparams.dnn_neurons, n_heads=8)
+        PosEnc = PositionalEncoding(input_size=self.hparams.dnn_neurons, max_len=5000).to(self.device)
+        # import pdb; pdb.set_trace()
+        # cano_emb = RoPEMHA(emb_dim=self.hparams.dnn_neurons, n_heads=8)(cano_emb).to(self.device)
+        cano_emb = cano_emb + PosEnc(cano_emb)
+        
+        if use_crctc or use_crottc and stage == sb.Stage.TRAIN:
+            # Double cano_emb: [B, T, D] -> [2*B, T, D]
+            # Both copies share the same position encoding (0-T) since they represent the same canonical sequence
+            cano_emb = torch.cat([cano_emb, cano_emb], dim=0)
+        
+            # canonical_lens = canonical_lens.repeat(2)
+        
+        # cano_emb = cano_emb.transpose(1, 2)  # (B, D, T)
+        # x, gated_interaction = self.modules.textgate(q=x, k=cano_emb.transpose(1, 2), v=cano_emb.transpose(1, 2))
+        x, gated_interaction = self.modules.textgate(q_audio=x, k_text=cano_emb, v_text=cano_emb)
+        
+        # CTC output layer
+        logits = self.modules.ctc_lin(x)
+        p_ctc = self.hparams.log_softmax(logits)
+        
+        # Handle OTTC-specific outputs
+        if use_crottc or use_ottc:
+            # 支持 labeled 数据（真实标签）和 unlabeled 数据（伪标签）
+            if hasattr(self.modules, "lm_weight") and stage != sb.Stage.TEST:
+                # 获取标签（真实或伪标签）
+                if hasattr(batch, 'phn_encoded_target') and batch.phn_encoded_target is not None:
+                    # Labeled data: 使用真实标签
+                    targets, target_lens = batch.phn_encoded_target
+                elif pseudo_labels is not None:
+                    # Unlabeled data: 使用伪标签（从 teacher model 生成）
+                    targets = pseudo_labels
+                    target_lens = pseudo_label_lens
+                else:
+                    # 没有任何标签，跳过 OTTC 权重计算
+                    targets = None
+                
+                if targets is not None:
+                    labels_mask = (targets != self.hparams.blank_index).float()
+                    
+                    weights_logits = self.modules.lm_weight(x)
+                    lens_abs = (wav_lens * feats.shape[-2]).int()
+                    output_mask = self.create_attention_mask_from_input_sequence(lens_abs)
+                    
+                    import torch.nn.functional as F
+                    # Optimize: use in-place operations and avoid unnecessary copies
+                    weights_logits = weights_logits.squeeze()
+                    weights_logits = weights_logits.masked_fill(output_mask == 0, -torch.inf)
+                    weights_logits = F.softmax(weights_logits, dim=-1)
+                    
+                    # Optimize: use clamp to avoid division by zero without sync
+                    label_sums = labels_mask.sum(dim=1, keepdim=True).clamp(min=1e-8)
+                    weights_labels = labels_mask / label_sums
+                    
+                    return p_ctc, logits, weights_logits, weights_labels, wav_lens
+        
+        # Handle RVQ outputs
+        if 'commitment_loss' in encoder_extras:
+            return (p_ctc, wav_lens, 
+                    encoder_extras['commitment_loss'], 
+                    encoder_extras['codebook_loss'])
+        
+        # Handle CR-CTC outputs
+        if use_crctc:
+            return p_ctc, wav_lens, None, True  # True indicates CR-CTC mode
+        
+        # Standard output
+        return p_ctc, wav_lens
+    
+    def on_fit_start(self):
+        """Gets called at the beginning of ``fit()``, on multiple processes
+        if ``distributed_count > 0`` and backend is ddp.
+
+        Default implementation compiles the jit modules, initializes
+        optimizers, and loads the latest checkpoint to resume training.
+        """
+        # Run this *after* starting all processes since jit modules cannot be
+        # pickled.
+        self._compile()
+
+        # Wrap modules with parallel backend after jit
+        self._wrap_distributed()
+
+        # Initialize optimizers after parameters are configured
+        self.init_optimizers()
+
+        # if self.checkpointer is not None:
+        #     # TODO: support recover best on PER or mpd_f1 or averaged model of best PER and mpd_f1
+        #     self.checkpointer.recover_if_possible(
+        #         max_key="mpd_f1_seq",
+        #         # max_key="mpd_f1",
+        #         # importance_keys=[
+        #         #     lambda ckpt: (-ckpt.meta.get("PER_seq", 1e6), ckpt.meta.get("mpd_f1_seq", 0), -ckpt.meta.get("PER", 1e6), ckpt.meta.get("mpd_f1", 0)),
+        #         # ]
+        #     )
+        
+        # For CTC Head init, usually means training from scratch.
+        
+        pretrainer = getattr(self.hparams, 'pretrainer', None)
+        if pretrainer is not None and getattr(self.hparams, 'resume_from_folder', False):
+            paths = pretrainer.collect_files(default_source=self.hparams.resume_from_folder)
+            pretrainer.load_collected()
+            # pdb.set_trace()
+            # self.modules.perceived_ssl.model.state_dict()['encoder.layers.23.final_layer_norm.bias']== pretrainer.loadables['perceived_ssl'].state_dict()['model.encoder.layers.23.final_layer_norm.bias']
+            # self.modules.enc.state_dict()["1.bias"] = pretrainer.loadables['model'][0].state_dict()["1.bias"]
+            # self.modules.ConformerEncoder.state_dict()['layers.0.convolution_module.conv.weight'] == pretrainer.loadables['model'].state_dict()['1.layers.0.convolution_module.conv.weight']
+            
+        # Load pretrained components if specified
+        # if getattr(self.hparams, 'load_pretrained_components', False):
+        #     pretrained_path = getattr(self.hparams, 'pretrained_model_path', '')
+        #     components = getattr(self.hparams, 'components_to_load', ['ssl', 'enc', "ctc_head"])
+        #     freeze_loaded = getattr(self.hparams, 'freeze_loaded_components', True)
+            
+        #     if pretrained_path and os.path.exists(pretrained_path):
+        #         try:
+        #             self.load_pretrained_components(
+        #                 checkpoint_path=pretrained_path,
+        #                 components_to_load=components,
+        #                 freeze_loaded=freeze_loaded
+        #             )
+        #         except Exception as e:
+        #             print(f"❌ Failed to load pretrained components: {e}")
+        #             print("   Continuing with random initialization...")
+        #     else:
+        #         print(f"⚠️  Pretrained model path not found: {pretrained_path}")
+        #         print("   Continuing with random initialization...")
+        # Load latest checkpoint to resume training if interrupted
+        ## NOTE: make sure to use the "best" model to continual training
+        ## so we set the `min_key` argument
+        
+        # TODO For resume training or VALID or TESTING use this head
+        
+        
+        if self.checkpointer is not None:
+            # TODO: support recover best on PER or mpd_f1 or averaged model of best PER and mpd_f1
+            self.checkpointer.recover_if_possible(
+                # max_key="mpd_f1_seq",
+                max_key="mpd_f1",
+                # importance_keys=[
+                #     lambda ckpt: (-ckpt.meta.get("PER_seq", 1e6), ckpt.meta.get("mpd_f1_seq", 0), -ckpt.meta.get("PER", 1e6), ckpt.meta.get("mpd_f1", 0)),
+                # ]
+            )
