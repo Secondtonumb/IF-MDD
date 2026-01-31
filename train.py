@@ -149,8 +149,16 @@ if __name__ == "__main__":
     
     # Infer Data prep, return id, sig only
     if args.mode == "infer" and hparams.get("infer_annotation", False):
-        InferDataPrep  = InferDataIOPrep(hparams)
-        infer_data = InferDataPrep.prepare()
+        if hparams.get("inference_prompt_mode") == "canonical_only":
+            # canonical aware inference
+            from utils.DataPrepIO import InferDataIOPrep_with_cano
+            InferDataIOPrep_cano = InferDataIOPrep_with_cano(hparams)
+            infer_data = InferDataIOPrep_cano.prepare()
+        else:
+            # default inference
+            InferDataPrep  = InferDataIOPrep(hparams)
+            infer_data = InferDataPrep.prepare()
+        
 
     logger.info(f"Using ASR brain class: {asr_brain_class.__name__}")
     

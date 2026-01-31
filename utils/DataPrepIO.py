@@ -639,11 +639,11 @@ class LLMDataIOPrep_ver2(LLMDataIOPrep):
             mispro_label = []
             for p, c in zip(phn_list_perceived, phn_list_canonical):
                 if p != c:
-                    if p == "sil" and c != "sil":
+                    if (p == "sil" and c != "sil") or (p == "<sil>" and c != "<sil>"):
                         mispro_label.append(3)  # insertion
-                    elif p != "sil" and c == "sil":
+                    elif (p != "sil" and c == "sil") or (p != "<sil>" and c == "<sil>"):
                         mispro_label.append(2)  # deletion
-                    elif p != "sil" and c != "sil":
+                    elif (p != "sil" and c != "sil") or (p != "<sil>" and c != "<sil>"):
                         mispro_label.append(1)  # substitution
                     else:
                         raise ValueError("Unexpected case in mispronunciation labeling")
@@ -2075,6 +2075,69 @@ class InferDataIOPrep(BaseDataIOPrep):
         )
 
         return infer_data
+    
+    def _prepare_datasets(self):
+        """Prepare train, valid, and test datasets with sorting."""
+        # 1. Declarations:
+        infer_data = sb.dataio.dataset.DynamicItemDataset.from_json(
+            json_path=self.hparams["infer_annotation"],
+            replacements={"data_root": self.data_folder},
+        )
+        # Apply sorting
+        if self.hparams["sorting"] == "ascending":
+            infer_data = infer_data.filtered_sorted(sort_key="duration")
+            self.hparams["train_dataloader_opts"]["shuffle"] = False
+        elif self.hparams["sorting"] == "descending":
+            infer_data = infer_data.filtered_sorted(sort_key="duration", reverse=True)
+            self.hparams["train_dataloader_opts"]["shuffle"] = False
+        elif self.hparams["sorting"] == "random":
+            pass
+        else:
+            raise NotImplementedError("sorting must be random, ascending or descending")
+
+        infer_data = infer_data.filtered_sorted(sort_key="duration")
+        
+        return infer_data
+
+class InferDataIOPrep_with_cano(InferDataIOPrep):
+    """Data IO preparation for inference, only loading id and sig."""
+    
+    def prepare(self):
+        """Prepare datasets for inference."""
+        infer_data = self._prepare_datasets()
+        datasets = [infer_data]
+        
+        # Add audio pipeline
+        audio_pipeline = self._create_audio_pipeline()
+        sb.dataio.dataset.add_dynamic_item(datasets, audio_pipeline)
+        
+        # Add text pipeline
+        text_pipeline = self._create_text_pipelines()
+        sb.dataio.dataset.add_dynamic_item(datasets, text_pipeline)
+
+        # Set output keys
+        sb.dataio.dataset.set_output_keys(
+            [infer_data],
+            ["id", "sig", "phn_list_canonical", "phn_encoded_list_canonical", "phn_encoded_canonical"],
+        )
+        
+        return infer_data
+    
+    def _create_text_pipelines(self):
+        @sb.utils.data_pipeline.takes("canonical_aligned")
+        @sb.utils.data_pipeline.provides(
+            "phn_list_canonical",
+            "phn_encoded_list_canonical",
+            "phn_encoded_canonical",
+        )
+        def text_pipeline(canonical):
+            phn_list_canonical = canonical.strip().split()
+            yield phn_list_canonical
+            phn_encoded_list_canonical = self.label_encoder.encode_sequence(phn_list_canonical)
+            phn_encoded_canonical = torch.LongTensor(phn_encoded_list_canonical)
+            yield phn_encoded_canonical
+        
+        return text_pipeline
     
     def _prepare_datasets(self):
         """Prepare train, valid, and test datasets with sorting."""
