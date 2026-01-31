@@ -2107,6 +2107,7 @@ class InferDataIOPrep_with_cano(InferDataIOPrep):
         infer_data = self._prepare_datasets()
         datasets = [infer_data]
         
+        self._setup_label_encoder(datasets)
         # Add audio pipeline
         audio_pipeline = self._create_audio_pipeline()
         sb.dataio.dataset.add_dynamic_item(datasets, audio_pipeline)
@@ -2134,6 +2135,7 @@ class InferDataIOPrep_with_cano(InferDataIOPrep):
             phn_list_canonical = canonical.strip().split()
             yield phn_list_canonical
             phn_encoded_list_canonical = self.label_encoder.encode_sequence(phn_list_canonical)
+            yield phn_encoded_list_canonical
             phn_encoded_canonical = torch.LongTensor(phn_encoded_list_canonical)
             yield phn_encoded_canonical
         
