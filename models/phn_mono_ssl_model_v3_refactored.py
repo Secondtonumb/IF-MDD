@@ -637,60 +637,6 @@ class PhnMonoSSLModel(sb.Brain):
         # print out
         return result
     
-    def inference(
-        self,
-        test_set,
-        min_key: Optional[str] = None,
-        max_key: Optional[str] = None,
-        output_file: Optional[str] = None,
-        test_loader_kwargs: Optional[Dict] = None,
-    ) -> TestResults:
-        """
-        Run inference on a test set (dataset or dataloader) with flexible output.
-        
-        This method:
-        1. Creates a dataloader from test_set if needed
-        2. Runs inference on all batches
-        3. Computes metrics if reference data available
-        4. Saves results to CSV if output_file provided
-        5. Loads best checkpoint based on min_key or max_key
-        
-        Args:
-            test_set: Test dataset or dataloader
-            min_key: Metric to minimize for checkpoint selection (e.g., "PER")
-            max_key: Metric to maximize for checkpoint selection (e.g., "mpd_f1")
-            output_file: Optional path to save CSV results
-            test_loader_kwargs: Dict of kwargs to create dataloader (if test_set is a dataset)
-        
-        Returns:
-            TestResults object with all results and summary statistics
-        """
-        # Load best checkpoint based on keys
-        if self.checkpointer is not None:
-            if max_key is not None:
-                self.checkpointer.recover_if_possible(max_key=max_key)
-            elif min_key is not None:
-                self.checkpointer.recover_if_possible(min_key=min_key)
-        
-        # Create dataloader if test_set is a dataset (not already a dataloader)
-        if test_loader_kwargs is not None and not hasattr(test_set, '__iter__'):
-            # test_set is likely a Dataset, create a DataLoader
-            from torch.utils.data import DataLoader
-            dataloader = DataLoader(test_set, **test_loader_kwargs)
-        else:
-            # test_set is already a dataloader or iterable
-            dataloader = test_set
-        
-        # Run inference on dataset
-        test_results = self.inference_dataset(
-            dataloader,
-            output_csv=output_file,
-            compute_metrics=True,
-            show_progress=True
-        )
-        
-        return test_results
-    
     def inference_batch(
         self,
         batch,
@@ -1694,16 +1640,22 @@ class PhnMonoSSLModel_TextGate(PhnMonoSSLModel):
         # Standard output
         return p_ctc, wav_lens
     
-    def inference_batch(self, batch, compute_metrics: bool = True):
+    def inference_batch(
+        self,
+        batch,
+        compute_metrics: bool = True
+    ) -> List[InferenceResult]:
         """
-        Inference on a batch with TextGate integration.
+        Run inference on a batch using TextGate fusion.
         
-        Handles both:
-        1. Full reference mode: batch has canonical, perceived, target
-        2. Pure inference mode: batch has only audio and canonical
+        Input batch should contain:
+            - batch.sig: (wavs, wav_lens)
+            - batch.phn_encoded_canonical: canonical phoneme sequences
+            - batch.id: utterance IDs
+            - Optionally: batch.phn_encoded_target, batch.phn_encoded_perceived (for metrics)
         
         Args:
-            batch: SpeechBrain batch object
+            batch: SpeechBrain batch object with audio and canonical phonemes
             compute_metrics: Whether to compute metrics if reference available
         
         Returns:
@@ -1715,15 +1667,15 @@ class PhnMonoSSLModel_TextGate(PhnMonoSSLModel):
             batch = batch.to(self.device)
             wavs, wav_lens = batch.sig
             ids = batch.id
+            canonicals, canonical_lens = batch.phn_encoded_canonical
             
             # Extract SSL features
             feats = self.modules.perceived_ssl(wavs)
             
-            # Encode features
+            # Encode audio features
             x, _ = self.encoder_manager(feats, wav_lens)
             
-            # Get canonical embeddings
-            canonicals, canonical_lens = batch.phn_encoded_canonical
+            # Get canonical phoneme embeddings
             cano_emb = self.modules.phn_emb(canonicals)
             
             # Apply positional encoding
@@ -1731,26 +1683,14 @@ class PhnMonoSSLModel_TextGate(PhnMonoSSLModel):
             PosEnc = PositionalEncoding(input_size=self.hparams.dnn_neurons, max_len=5000).to(self.device)
             cano_emb = cano_emb + PosEnc(cano_emb)
             
-            # Align cano_emb time dimension to match x (audio features)
-            if x.shape[1] != cano_emb.shape[1]:
-                # Use interpolation to match audio length
-                cano_emb_transposed = cano_emb.transpose(1, 2)  # [B, D, T_canonical]
-                cano_emb_aligned = torch.nn.functional.interpolate(
-                    cano_emb_transposed, 
-                    size=x.shape[1], 
-                    mode='linear', 
-                    align_corners=False
-                )
-                cano_emb = cano_emb_aligned.transpose(1, 2)  # [B, T_audio, D]
-            
-            # Apply TextGate to fuse audio and canonical text features
+            # Apply TextGate fusion
             x, _ = self.modules.textgate(q_audio=x, k_text=cano_emb, v_text=cano_emb)
             
-            # CTC output
+            # CTC decoding
             logits = self.modules.ctc_lin(x)
             p_ctc = self.hparams.log_softmax(logits)
             
-            # Greedy CTC decoding
+            # Decode sequences
             sequences = sb.decoders.ctc_greedy_decode(
                 p_ctc, wav_lens, blank_id=self.hparams.blank_index
             )
@@ -1758,9 +1698,8 @@ class PhnMonoSSLModel_TextGate(PhnMonoSSLModel):
         results = []
         
         # Check what reference data is available
-        has_target = hasattr(batch, 'phn_encoded_target')
-        has_canonical = hasattr(batch, 'phn_encoded_canonical')
-        has_perceived = hasattr(batch, 'phn_encoded_perceived')
+        has_target = hasattr(batch, 'phn_encoded_target') and batch.phn_encoded_target is not None
+        has_perceived = hasattr(batch, 'phn_encoded_perceived') and batch.phn_encoded_perceived is not None
         
         # Get reference data if available
         targets = None
@@ -1781,15 +1720,14 @@ class PhnMonoSSLModel_TextGate(PhnMonoSSLModel):
                 prediction=pred_str
             )
             
-            # Add reference canonical data if available
-            if has_canonical and canonicals is not None:
-                result.canonical = self._decode_tensor(canonicals[i], canonical_lens[i] if canonical_lens is not None else None)
+            # Add canonical phonemes
+            result.canonical = self._decode_tensor(canonicals[i], canonical_lens[i] if canonical_lens is not None else None)
             
-            # Add reference perceived data if available
+            # Add perceived if available
             if has_perceived and perceiveds is not None:
                 result.perceived = self._decode_tensor(perceiveds[i], perceived_lens[i] if perceived_lens is not None else None)
             
-            # Add reference target data if available
+            # Add target if available
             if has_target and targets is not None:
                 result.target = self._decode_tensor(targets[i], target_lens[i] if target_lens is not None else None)
                 
@@ -1798,17 +1736,132 @@ class PhnMonoSSLModel_TextGate(PhnMonoSSLModel):
                     result.per = self._compute_per(pred_str, result.target)
             
             # Compute MPD if canonical and perceived available
-            if compute_metrics and has_canonical and has_perceived:
-                if hasattr(result, 'canonical') and hasattr(result, 'perceived'):
-                    result.mpd_result = self._compute_mpd_single(
-                        pred_str,
-                        result.canonical,
-                        result.perceived
-                    )
+            if compute_metrics and has_perceived:
+                result.mpd_result = self._compute_mpd_single(
+                    pred_str,
+                    result.canonical,
+                    result.perceived
+                )
             
             results.append(result)
         
         return results
+    
+    def inference_dataset(
+        self,
+        dataloader,
+        output_csv: Optional[str] = None,
+        compute_metrics: bool = True,
+        show_progress: bool = True
+    ) -> TestResults:
+        """
+        Run inference on entire dataset with TextGate fusion and optionally save to CSV.
+        
+        Args:
+            dataloader: PyTorch DataLoader with batches containing:
+                - batch.sig: (wavs, wav_lens)
+                - batch.phn_encoded_canonical: canonical phoneme sequences
+                - batch.id: utterance IDs
+                - Optionally: batch.phn_encoded_target, batch.phn_encoded_perceived
+            output_csv (str, optional): File path to save inference results
+            compute_metrics (bool): Whether to compute metrics if reference available
+            show_progress (bool): Whether to show progress bar
+        
+        Returns:
+            TestResults object containing all inference results
+        """
+        test_results = TestResults()
+        
+        iterator = dataloader
+        if show_progress:
+            from tqdm import tqdm
+            iterator = tqdm(dataloader, desc="Inferencing", dynamic_ncols=True)
+        
+        for batch in iterator:
+            batch_results = self.inference_batch(batch, compute_metrics=compute_metrics)
+            test_results.results.extend(batch_results)
+        
+        # Compute summary statistics
+        if compute_metrics:
+            # Check if we have metrics to compute
+            has_per = any(r.per is not None for r in test_results.results)
+            has_mpd = any(r.mpd_result is not None for r in test_results.results)
+            
+            if has_per:
+                per_scores = [r.per for r in test_results.results if r.per is not None]
+                test_results.overall_per = sum(per_scores) / len(per_scores) if per_scores else None
+            
+            if has_mpd:
+                mpd_f1_scores = [r.mpd_result['f1'] for r in test_results.results if r.mpd_result is not None]
+                test_results.overall_mpd_f1 = sum(mpd_f1_scores) / len(mpd_f1_scores) if mpd_f1_scores else None
+        
+        # Write CSV results if specified
+        if output_csv:
+            writer = ResultWriter(output_csv)
+            writer.write(test_results)
+            logging.info(f"Inference results saved to: {output_csv}")
+        
+        return test_results
+    
+    def inference(
+        self,
+        test_set,
+        test_loader_kwargs=None,
+        max_key=None,
+        min_key=None,
+        output_file=None
+    ):
+        """
+        Run inference on entire dataset with TextGate fusion.
+        
+        This is the main entry point matching train.py expectations.
+        
+        Args:
+            test_set: Dataset for inference (batch must contain canonical phonemes and audio)
+            test_loader_kwargs (dict, optional): Kwargs for DataLoader creation
+            max_key (str, optional): Key to maximize for best model selection (e.g., 'mpd_f1')
+            min_key (str, optional): Key to minimize for best model selection (e.g., 'PER')
+            output_file (str, optional): File path to save CSV results
+            
+        Returns:
+            TestResults: All inference results containing predictions and metrics
+        """
+        # Load best checkpoint if specified
+        
+        if max_key is not None or min_key is not None:
+            logging.info(f"Loading best checkpoint with max_key={max_key}, min_key={min_key}")
+            self.checkpointer.recover_if_possible(max_key=max_key, min_key=min_key)
+        
+        # Setup inference dataloader
+        if test_loader_kwargs is None:
+            test_loader_kwargs = {}
+        
+        logging.info(f"Creating test dataloader with kwargs: {test_loader_kwargs}")
+        test_dataloader = self.make_dataloader(test_set, stage=sb.Stage.TEST, **test_loader_kwargs)
+        
+        # Run inference on dataset
+        logging.info("Starting inference on full dataset...")
+        test_results = self.inference_dataset(
+            dataloader=test_dataloader,
+            output_csv=output_file,
+            compute_metrics=True,
+            show_progress=True
+        )
+        
+        # Log summary
+        logging.info("\n" + "="*70)
+        logging.info("Inference Results Summary")
+        logging.info("="*70)
+        logging.info(f"Total samples: {len(test_results.results)}")
+        if test_results.overall_per is not None:
+            logging.info(f"Average PER: {test_results.overall_per:.4f}")
+        if test_results.overall_mpd_f1 is not None:
+            logging.info(f"Average MPD F1: {test_results.overall_mpd_f1:.4f}")
+        if output_file:
+            logging.info(f"Results saved to: {output_file}")
+        logging.info("="*70)
+        
+        return test_results
     
     def on_fit_start(self):
         """Gets called at the beginning of ``fit()``, on multiple processes
