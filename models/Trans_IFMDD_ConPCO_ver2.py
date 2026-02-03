@@ -767,7 +767,7 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
                     p_seq_logits = self.hparams.log_softmax(h_seq_feat)
 
                     # ==================== Validation: Get greedy hypothesis ====================
-                    if self.hparams.valid_search_interval > 0 and (current_epoch % self.hparams.valid_search_interval == 0):
+                    if self.hparams.valid_search_interval > 0 and (current_epoch % self.hparams.valid_search_interval == 0) and self.hparams.valid_decode_mode == "AR":
                         # AR decoding
                         hyps, top_lengths, top_scores, top_log_probs = self.hparams.valid_search(
                                 enc_out.detach(), wav_lens
@@ -776,7 +776,7 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
                         # hyps = p_seq_logits.argmax(dim=-1)  # [B, T_p+1]
                         # from speechbrain.utils.data_utils import undo_padding
                         # hyps = undo_padding(hyps, target_lens_bos)
-                    else:
+                    elif self.hparams.valid_decode_mode == "teacher_forcing":
                         # fallback to teacher forcing decoding
                         hyps = p_seq_logits.argmax(dim=-1)  # [B, T_p+1]
                         from speechbrain.utils.data_utils import undo_padding
@@ -1582,6 +1582,7 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
                 #     lambda ckpt: (-ckpt.meta.get("PER_seq", 1e6), ckpt.meta.get("mpd_f1_seq", 0), -ckpt.meta.get("PER", 1e6), ckpt.meta.get("mpd_f1", 0)),
                 # ]
             )
+            
 
     def on_stage_end(self, stage, stage_loss, epoch):
         current_stage = self.hparams.epoch_counter.current
