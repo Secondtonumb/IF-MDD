@@ -19,121 +19,6 @@ from speechbrain.nnet.loss.guidedattn_loss import GuidedAttentionLoss
 import re
 from utils.EncoderManager import EncoderManager
 from utils.LossManager import CTCLossManager
-import matplotlib
-import matplotlib.pyplot as plt
-from pathlib import Path
-
-
-# ============================================================================
-# Forced Alignment Helper Functions
-# ============================================================================
-
-def compute_ground_truth_alignment(p_ctc_sample, targets_sample_no_pad, actual_target_len, 
-                                   actual_input_len, blank_index, device, sample_id, stage):
-    """
-    计算地面真实强制对齐
-    
-    Arguments
-    ---------
-    p_ctc_sample : torch.Tensor
-        单个样本的CTC对数概率 [1, T, C]
-    targets_sample_no_pad : torch.Tensor
-        去除填充的目标序列
-    actual_target_len : int
-        实际目标长度
-    actual_input_len : int
-        实际输入长度
-    blank_index : int
-        空白索引
-    device : torch.device
-        运算设备
-    sample_id : str
-        样本ID
-    stage : sb.Stage
-        训练阶段
-    
-    Returns
-    -------
-    aligned_tokens_gt : list or None
-        对齐的令牌
-    scores : torch.Tensor or None
-        对齐分数
-    """
-    from torchaudio.functional import forced_align, merge_tokens
-    
-    try:
-        forced_alignments, scores = forced_align(
-            log_probs=p_ctc_sample,
-            targets=targets_sample_no_pad,
-            target_lengths=torch.tensor([actual_target_len], dtype=torch.int32, device=device),
-            input_lengths=torch.tensor([actual_input_len], dtype=torch.int32, device=device),
-            blank=blank_index
-        )
-        forced_alignments = forced_alignments[0]
-        scores = scores[0].exp()
-        aligned_tokens_gt = merge_tokens(forced_alignments, scores)
-        
-    except Exception as e:
-        if stage == sb.Stage.TEST:
-            print(f"⚠️  [{sample_id}] Forced alignment failed: {e}")
-        aligned_tokens_gt = None
-        scores = None
-    
-    return aligned_tokens_gt, scores
-
-
-def compute_predicted_alignment(p_ctc_sample, predict_target_sample, actual_input_len, 
-                                blank_index, device, sample_id, stage):
-    """
-    计算预测强制对齐
-    
-    Arguments
-    ---------
-    p_ctc_sample : torch.Tensor
-        单个样本的CTC对数概率 [1, T, C]
-    predict_target_sample : list
-        预测的目标序列
-    actual_input_len : int
-        实际输入长度
-    blank_index : int
-        空白索引
-    device : torch.device
-        运算设备
-    sample_id : str
-        样本ID
-    stage : sb.Stage
-        训练阶段
-    
-    Returns
-    -------
-    aligned_tokens_pred : list or None
-        对齐的令牌
-    p_scores : torch.Tensor or None
-        对齐分数
-    """
-    from torchaudio.functional import forced_align, merge_tokens
-    
-    aligned_tokens_pred = None
-    p_scores = None
-    
-    if len(predict_target_sample) > 0:
-        predict_target_tensor = torch.tensor([predict_target_sample], dtype=torch.int32, device=device)
-        try:
-            p_forced_alignments, p_scores = forced_align(
-                log_probs=p_ctc_sample,
-                targets=predict_target_tensor,
-                target_lengths=torch.tensor([len(predict_target_sample)], dtype=torch.int32, device=device),
-                input_lengths=torch.tensor([actual_input_len], dtype=torch.int32, device=device),
-                blank=blank_index
-            )
-            p_forced_alignments = p_forced_alignments[0]
-            p_scores = p_scores[0].exp()
-            aligned_tokens_pred = merge_tokens(p_forced_alignments, p_scores)
-        except Exception as e:
-            if stage == sb.Stage.TEST:
-                print(f"⚠️  [{sample_id}] Predicted alignment failed: {e}")
-    
-    return aligned_tokens_pred, p_scores
 
 
 # ============================================================================
@@ -285,7 +170,7 @@ class ResultWriter:
 # Base Model with Unified Architecture
 # ============================================================================
 
-class PhnMonoSSLModel(sb.Brain):
+class PhnMonoSSLModel_IF(sb.Brain):
     """
     Unified base model for phoneme-level mispronunciation detection.
     
@@ -325,6 +210,13 @@ class PhnMonoSSLModel(sb.Brain):
         # Initialize unified components
         self._init_encoder_manager()
         self._init_loss_manager()
+        self._init_mpd_loss_manager()
+        
+        # MPD loss tracking (will be reset each epoch)
+        self.mpd_binary_loss_sum = 0.0
+        self.mpd_binary_loss_count = 0
+        self.mpd_cls_loss_sum = 0.0
+        self.mpd_cls_loss_count = 0
         
     def _init_encoder_manager(self):
         """Initialize encoder manager based on hparams"""
@@ -363,6 +255,15 @@ class PhnMonoSSLModel(sb.Brain):
             blank_index=self.hparams.blank_index
         )
     
+    def _init_mpd_loss_manager(self):
+        """Initialize MPD loss manager"""
+        from utils.MPDLossManager import MPDLossManager
+        
+        self.mpd_loss_manager = MPDLossManager(
+            hparams=self.hparams,
+            device=self.device
+        )
+    
     def create_attention_mask_from_input_sequence(self, input_sequence):
         """Create attention mask from input sequence lengths (optimized for GPU)"""
         batch_size = input_sequence.size(0)
@@ -378,285 +279,6 @@ class PhnMonoSSLModel(sb.Brain):
             print("Warning: loss is not finite, skipping step")
             return False
         return True
-    
-    def plot_scores(self, word_spans, scores):
-        """Plot alignment scores for a single sequence"""
-        fig, ax = plt.subplots()
-        span_xs, span_hs = [], []
-        ax.axvspan(word_spans[0].start - 0.05, word_spans[-1].end + 0.05, 
-                   facecolor="paleturquoise", edgecolor="none", zorder=-1)
-        
-        for span in word_spans:
-            for t in range(span.start, span.end):
-                span_xs.append(t + 0.5)
-                span_hs.append(scores[t].item())
-            ax.annotate(self.label_encoder.decode_ndim(span.token), (span.start, -0.07))
-            ax.axvspan(span.start - 0.05, span.end + 0.05, 
-                       facecolor="mistyrose", edgecolor="none", zorder=-1)
-        
-        ax.bar(span_xs, span_hs, color="lightsalmon", edgecolor="coral")
-        ax.set_title("Frame-level scores and word segments")
-        ax.set_ylim(-0.1, None)
-        ax.grid(True, axis="y")
-        ax.axhline(0, color="black")
-        fig.tight_layout()
-        return fig
-    
-    def plot_alignment_comparison(self, word_spans_gt, scores_gt, word_spans_pred, scores_pred, 
-                                  title="GT vs Predicted"):
-        """
-        Plot GT and Predicted alignment side by side for comparison.
-        
-        Arguments
-        ---------
-        word_spans_gt : list of namedtuples
-            Ground truth word/token spans
-        scores_gt : tensor
-            Ground truth alignment scores
-        word_spans_pred : list of namedtuples or None
-            Predicted word/token spans
-        scores_pred : tensor or None
-            Predicted alignment scores
-        title : str
-            Title for the figure
-            
-        Returns
-        -------
-        fig : matplotlib figure
-            Figure with comparison plots
-        """
-        matplotlib.use('Agg')  # Non-interactive backend
-        
-        # Determine layout
-        if word_spans_pred is not None and len(word_spans_pred) > 0:
-            fig, axes = plt.subplots(2, 1, figsize=(14, 8))
-        else:
-            fig, axes = plt.subplots(1, 1, figsize=(14, 4))
-            axes = [axes]
-        
-        # Plot GT alignment
-        ax = axes[0]
-        span_xs, span_hs = [], []
-        if len(word_spans_gt) > 0:
-            ax.axvspan(word_spans_gt[0].start - 0.05, word_spans_gt[-1].end + 0.05, 
-                       facecolor="paleturquoise", edgecolor="none", zorder=-1)
-            for span in word_spans_gt:
-                for t in range(span.start, span.end):
-                    span_xs.append(t + 0.5)
-                    span_hs.append(scores_gt[t].item())
-                token_name = self.label_encoder.decode_ndim(span.token)
-                ax.annotate(token_name, (span.start, -0.07), fontsize=8)
-                ax.axvspan(span.start - 0.05, span.end + 0.05, 
-                           facecolor="mistyrose", edgecolor="none", zorder=-1)
-        ax.bar(span_xs, span_hs, color="lightsalmon", edgecolor="coral", alpha=0.8)
-        ax.set_title("🎯 Ground Truth Alignment", fontsize=11, fontweight='bold')
-        ax.set_ylabel("Score", fontsize=10)
-        ax.set_ylim(-0.1, None)
-        ax.grid(True, axis="y", alpha=0.3)
-        ax.axhline(0, color="black", linewidth=0.8)
-        
-        # Plot Predicted alignment (if available)
-        if len(axes) > 1:
-            ax = axes[1]
-            if word_spans_pred is not None and len(word_spans_pred) > 0 and scores_pred is not None:
-                span_xs_pred, span_hs_pred = [], []
-                ax.axvspan(word_spans_pred[0].start - 0.05, word_spans_pred[-1].end + 0.05, 
-                           facecolor="lightgreen", edgecolor="none", zorder=-1, alpha=0.5)
-                for span in word_spans_pred:
-                    for t in range(span.start, span.end):
-                        span_xs_pred.append(t + 0.5)
-                        span_hs_pred.append(scores_pred[t].item())
-                    token_name = self.label_encoder.decode_ndim(span.token)
-                    ax.annotate(token_name, (span.start, -0.07), fontsize=8)
-                    ax.axvspan(span.start - 0.05, span.end + 0.05, 
-                               facecolor="lightcyan", edgecolor="none", zorder=-1)
-                ax.bar(span_xs_pred, span_hs_pred, color="lightgreen", edgecolor="green", alpha=0.8)
-                ax.set_title("📊 Predicted Alignment", fontsize=11, fontweight='bold')
-                ax.set_ylabel("Score", fontsize=10)
-                ax.set_xlabel("Frame Index", fontsize=10)
-                ax.set_ylim(-0.1, None)
-                ax.grid(True, axis="y", alpha=0.3)
-                ax.axhline(0, color="black", linewidth=0.8)
-            else:
-                ax.text(0.5, 0.5, "❌ Predicted alignment unavailable\n(empty or failed)", 
-                       ha='center', va='center', fontsize=12, transform=ax.transAxes)
-                ax.set_xticks([])
-                ax.set_yticks([])
-        
-        fig.suptitle(title, fontsize=13, fontweight='bold', y=0.995)
-        plt.tight_layout()
-        return fig
-    
-    def process_alignment_sample(self, batch, real_batch_idx, p_ctc, wav_lens, 
-                                 output_dir, output_base, stage, stage_label):
-        """
-        处理单个样本的对齐计算和可视化
-        包含：样本提取、长度计算、对齐计算、图表保存
-        
-        Arguments
-        ---------
-        batch : object
-            批次数据
-        real_batch_idx : int
-            批次中的真实样本索引
-        p_ctc : torch.Tensor
-            CTC对数概率 [B, T, C]
-        wav_lens : torch.Tensor
-            波形长度
-        output_dir : str
-            输出目录
-        output_base : str
-            输出基础路径
-        stage : sb.Stage
-            训练阶段
-        stage_label : str
-            阶段标签（用于图表标题）
-        
-        Returns
-        -------
-        dict
-            包含测试阶段的记录数据（用于JSON保存）或None
-        """
-        sample_id = batch.id[real_batch_idx]
-        
-        # ==================== 样本提取和长度处理 ====================
-        # 提取单个样本
-        p_ctc_sample = p_ctc[real_batch_idx:real_batch_idx+1]  # [1, T, C]
-        wav_lens_sample = wav_lens[real_batch_idx:real_batch_idx+1]  # [1]
-        
-        # 获取目标序列
-        targets, target_lens = batch.phn_encoded_target
-        targets_sample = targets[real_batch_idx:real_batch_idx+1]
-        target_lens_sample = target_lens[real_batch_idx:real_batch_idx+1]
-        
-        # 移除填充（获取实际长度）
-        actual_target_len = int(target_lens_sample[0].item() * targets_sample.shape[-1])
-        targets_sample_no_pad = targets_sample[:, :actual_target_len]
-        
-        # 计算实际输入长度
-        actual_input_len = int(wav_lens_sample[0].item() * p_ctc_sample.shape[1])
-        
-        # 贪心解码预测
-        predict_target = sb.decoders.ctc_greedy_decode(
-            p_ctc_sample, wav_lens_sample, blank_id=self.hparams.blank_index
-        )
-        
-        # 准备输出文件名
-        sample_stem = Path(sample_id).stem
-        
-        # ==================== 对齐计算 ====================
-        # 地面真实对齐
-        aligned_tokens_gt, scores = compute_ground_truth_alignment(
-            p_ctc_sample=p_ctc_sample,
-            targets_sample_no_pad=targets_sample_no_pad,
-            actual_target_len=actual_target_len,
-            actual_input_len=actual_input_len,
-            blank_index=self.hparams.blank_index,
-            device=self.device,
-            sample_id=sample_id,
-            stage=stage
-        )
-        
-        # 预测对齐
-        predict_target_sample = predict_target[0] if predict_target else []
-        aligned_tokens_pred, p_scores = compute_predicted_alignment(
-            p_ctc_sample=p_ctc_sample,
-            predict_target_sample=predict_target_sample,
-            actual_input_len=actual_input_len,
-            blank_index=self.hparams.blank_index,
-            device=self.device,
-            sample_id=sample_id,
-            stage=stage
-        )
-        
-        # ==================== 保存图表 ====================
-        if stage == sb.Stage.VALID:
-            # VALID阶段：保存GT和Pred的分离图表
-            if aligned_tokens_gt is not None and scores is not None:
-                try:
-                    fig_gt = self.plot_scores(aligned_tokens_gt, scores)
-                    fig_gt.suptitle(f"GT Alignment - {sample_stem} ({stage_label})")
-                    gt_path = os.path.join(output_dir, f"gt_alignment_{sample_stem}.png")
-                    fig_gt.savefig(gt_path, dpi=150, bbox_inches='tight')
-                    plt.close(fig_gt)
-                except Exception as e:
-                    print(f"⚠️  [{sample_id}] Failed to save GT plot: {e}")
-            
-            if aligned_tokens_pred is not None and p_scores is not None:
-                try:
-                    fig_pred = self.plot_scores(aligned_tokens_pred, p_scores)
-                    fig_pred.suptitle(f"Pred Alignment - {sample_stem} ({stage_label})")
-                    pred_path = os.path.join(output_dir, f"pred_alignment_{sample_stem}.png")
-                    fig_pred.savefig(pred_path, dpi=150, bbox_inches='tight')
-                    plt.close(fig_pred)
-                except Exception as e:
-                    print(f"⚠️  [{sample_id}] Failed to save pred plot: {e}")
-        
-        elif stage == sb.Stage.TEST:
-            # TEST阶段：保存对比图表
-            if aligned_tokens_gt is not None and scores is not None:
-                try:
-                    # 从sample_id提取speaker (例如: "/path/L2-ARCTIC/TLV/..." -> "TLV")
-                    speaker_id = "unknown"
-                    if "/" in sample_id:
-                        parts = sample_id.split("/")
-                        # 查找已知的模式: L2-ARCTIC/SPEAKER_ID
-                        for i, part in enumerate(parts):
-                            if part in ["L2-ARCTIC", "L2ARCTIC"] and i+1 < len(parts):
-                                speaker_id = parts[i+1]
-                                break
-                    
-                    comparison_title = f"🎤 {speaker_id} - {sample_stem}\n GT vs Predicted Alignment"
-                    
-                    fig_compare = self.plot_alignment_comparison(
-                        aligned_tokens_gt, scores,
-                        aligned_tokens_pred if aligned_tokens_pred is not None else [],
-                        p_scores if p_scores is not None else None,
-                        title=comparison_title
-                    )
-                    compare_path = os.path.join(output_dir, f"alignment_compare_{sample_stem}.png")
-                    fig_compare.savefig(compare_path, dpi=150, bbox_inches='tight')
-                    plt.close(fig_compare)
-                    print(f"💾 Saved comparison plot: {compare_path}")
-                except Exception as e:
-                    print(f"⚠️  [{sample_id}] Failed to save comparison plot: {e}")
-        
-        # ==================== TEST阶段：保存JSON记录 ====================
-        test_record = None
-        if stage == sb.Stage.TEST:
-            # 解码序列
-            decoded_seq = self.label_encoder.decode_ndim(predict_target_sample) if len(predict_target_sample) > 0 else ""
-            
-            # 加载目标和标准发音
-            try:
-                canonicals, canonical_lens = batch.phn_encoded_canonical
-                perceiveds, perceived_lens = batch.phn_encoded_perceived
-                canonical_sample = canonicals[real_batch_idx:real_batch_idx+1]
-                perceived_sample = perceiveds[real_batch_idx:real_batch_idx+1]
-                canonical_len = canonical_lens[real_batch_idx].item()
-                perceived_len = perceived_lens[real_batch_idx].item()
-                
-                canonical_decoded = self.label_encoder.decode_ndim(canonical_sample[0, :int(canonical_len*canonical_sample.shape[-1])].tolist())
-                perceived_decoded = self.label_encoder.decode_ndim(perceived_sample[0, :int(perceived_len*perceived_sample.shape[-1])].tolist())
-            except:
-                canonical_decoded = ""
-                perceived_decoded = ""
-            
-            # 创建测试记录
-            test_record = {
-                "sample_id": sample_id,
-                "predicted": decoded_seq,
-                "canonical": canonical_decoded,
-                "perceived": perceived_decoded,
-                "num_predicted": len(predict_target_sample),
-            }
-            
-            # 保存JSON文件
-            json_path = os.path.join(output_dir, f"decode_{sample_stem}.json")
-            with open(json_path, 'w', encoding='utf-8') as f:
-                json.dump(test_record, f, ensure_ascii=False, indent=2)
-        
-        return test_record
     
     def compute_forward(self, batch, stage, pseudo_labels=None, pseudo_label_lens=None):
         """
@@ -733,6 +355,48 @@ class PhnMonoSSLModel(sb.Brain):
         # Encode features
         x, encoder_extras = self.encoder_manager(feats, wav_lens)
         
+        # apply fusenet
+        cano_phn, cano_lens = batch.phn_encoded_canonical if hasattr(batch, 'phn_encoded_canonical') else (None, None)
+        Cano_emb = self.modules.phn_emb(cano_phn) if cano_phn is not None else None
+
+        # fuse cano_emb with x if crottc, use half batch of x for crottc/crctc
+        if use_crottc or use_crctc:
+            x_half = x[: x.shape[0] // 2, :, :]
+        else:
+            x_half = x
+        
+        memory = x_half
+        if self.hparams.post_encoder_reduction_factor >= 1:
+            memory = self.modules.projector(memory)
+
+        from utils.layers.utils import make_pad_mask
+        from speechbrain.nnet.attention import RelPosEncXL, RelPosMHAXL, RoPEMHA 
+        # import pdb; pdb.set_trace()
+
+        fuse_feat, _,  fuse_attn = self.modules.fuse_net(
+            tgt=Cano_emb,
+            memory=memory,
+            tgt_key_padding_mask=make_pad_mask(Cano_emb.shape[1] * cano_lens, maxlen=Cano_emb.shape[1]).to(self.device),
+            pos_embs_tgt=RelPosEncXL(emb_dim=self.hparams.dnn_neurons)(Cano_emb).to(self.device),
+            pos_embs_src=RelPosEncXL(emb_dim=self.hparams.dnn_neurons)(memory).to(self.device)
+        )
+            # memory_key_padding_mask=make_pad_mask(memory.shape[1] * wav_lens, maxlen=memory.shape[1]).to(self.device),
+        
+        # import pdb; pdb.set_trace()
+
+        h_mispro = self.hparams.mispro_head(fuse_feat.transpose(1, 2))
+        # for binary detection, 
+        h_mispro_bin = self.hparams.mispro_head_binary_out(h_mispro)
+        h_mispro_bin = h_mispro_bin.transpose(1, 2)  # [B, T_c, 1]
+        # for multi-class detection, 4 classes
+        h_mispro_cls = self.hparams.mispro_head_class_out(h_mispro.transpose(1, 2)) #[B, T_c, 4]
+
+        # [B, T_p, D]
+            # pos_embs_tgt=RelPosEncXL(emb_dim=self.hparams.dnn_neurons)(Cano_emb).to(self.device),
+            # pos_embs_src=RelPosEncXL(emb_dim=self.hparams.dnn_neurons)(memory).to(self.device)
+
+        # import pdb; pdb.set_trace()
+
         # CTC output layer
         logits = self.modules.ctc_lin(x)
         p_ctc = self.hparams.log_softmax(logits)
@@ -766,26 +430,11 @@ class PhnMonoSSLModel(sb.Brain):
                     weights_logits = weights_logits.masked_fill(output_mask == 0, -torch.inf)
                     weights_logits = F.softmax(weights_logits, dim=-1)
                     
-                    # 计算 label weights: 支持预定义权重或 uniform 权重
-                    # import pdb; pdb.set_trace()
-                    if hasattr(self.hparams, 'label_importance_weights') and self.hparams.label_importance_weights is not None:
-                        # 使用预定义的标签重要性权重
-                        # label_importance_weights 应该是一个 Tensor: [vocab_size]
-                        # 从 targets 中提取每个位置的权重
-                        importance_weights = self.hparams.label_importance_weights.to(targets.device)
-                        # 根据 target token 索引获取权重: [B, T]
-                        token_weights = importance_weights[targets.long()]
-                        # 只保留非 blank 的权重
-                        token_weights = token_weights * labels_mask
-                        # 归一化每个样本的权重和为 1
-                        weight_sums = token_weights.sum(dim=1, keepdim=True).clamp(min=1e-8)
-                        weights_labels = token_weights / weight_sums
-                    else:
-                        # 使用 uniform 权重 (原始方法)
-                        label_sums = labels_mask.sum(dim=1, keepdim=True).clamp(min=1e-8)
-                        weights_labels = labels_mask / label_sums
+                    # Optimize: use clamp to avoid division by zero without sync
+                    label_sums = labels_mask.sum(dim=1, keepdim=True).clamp(min=1e-8)
+                    weights_labels = labels_mask / label_sums
                     
-                    return p_ctc, logits, weights_logits, weights_labels, wav_lens
+                    return p_ctc, logits, weights_logits, weights_labels, wav_lens, h_mispro_bin, h_mispro_cls
         
         # Handle RVQ outputs
         if 'commitment_loss' in encoder_extras:
@@ -796,68 +445,6 @@ class PhnMonoSSLModel(sb.Brain):
         # Handle CR-CTC outputs
         if use_crctc:
             return p_ctc, wav_lens, None, True  # True indicates CR-CTC mode
-        
-        # ==================== Forced Alignment for VALID/TEST ====================
-        # Support decoding and alignment monitoring for VALID and TEST stages
-        if stage == sb.Stage.VALID or stage == sb.Stage.TEST:
-            # Check if alignment monitoring is enabled
-            enable_alignment = getattr(self.hparams, 'enable_alignment_monitoring', False)
-            
-            if enable_alignment:
-                # For VALID: monitor a fixed sample across epochs
-                # For TEST: save alignments for all samples
-                if stage == sb.Stage.VALID:
-                    # Initialize fixed sample ID if not exists (use first batch's first ID)
-                    if not hasattr(self, '_fixed_sample_id'):
-                        self._fixed_sample_id = batch.id[0]
-                        print(f"📌 VALID 固定监控样本 ID: {self._fixed_sample_id}")
-                    
-                    # Only process if current batch contains the fixed sample ID
-                    if self._fixed_sample_id not in batch.id:
-                        if 'commitment_loss' in encoder_extras:
-                            return (p_ctc, wav_lens, 
-                                    encoder_extras['commitment_loss'], 
-                                    encoder_extras['codebook_loss'])
-                        return p_ctc, wav_lens
-                    
-                    sample_indices = [batch.id.index(self._fixed_sample_id)]
-                    epoch = self.hparams.epoch_counter.current
-                    alignment_dir = os.path.join(self.hparams.output_folder, "alignment_monitoring")
-                    output_base = os.path.join(alignment_dir, f"epoch_{epoch:03d}")
-                    stage_label = f"VALID-Epoch{epoch}"
-                    
-                else:  # TEST stage
-                    # Process all samples in the batch
-                    sample_indices = list(range(len(batch.id)))
-                    alignment_dir = os.path.join(self.hparams.output_folder, "test_decoding")
-                    output_base = alignment_dir
-                    stage_label = "TEST"
-                
-                # Create output directory
-                os.makedirs(output_base, exist_ok=True)
-                
-                # Initialize list for collecting all predictions (for TEST stage)
-                if stage == sb.Stage.TEST:
-                    if not hasattr(self, '_test_predictions'):
-                        self._test_predictions = []
-                
-                # Process selected samples
-                for loop_idx, real_batch_idx in enumerate(sample_indices):
-                    # 调用统一的样本处理函数
-                    test_record = self.process_alignment_sample(
-                        batch=batch,
-                        real_batch_idx=real_batch_idx,
-                        p_ctc=p_ctc,
-                        wav_lens=wav_lens,
-                        output_dir=output_base,
-                        output_base=output_base,
-                        stage=stage,
-                        stage_label=stage_label
-                    )
-                    
-                    # 如果是TEST阶段，将记录添加到预测列表
-                    if stage == sb.Stage.TEST and test_record is not None:
-                        self._test_predictions.append(test_record)
         
         # Standard output
         return p_ctc, wav_lens
@@ -875,9 +462,9 @@ class PhnMonoSSLModel(sb.Brain):
             else:  # RVQ
                 p_ctc, wav_lens, commitment_loss, codebook_loss = predictions
                 extras = {'commitment_loss': commitment_loss, 'codebook_loss': codebook_loss}
-        elif len(predictions) == 5:  # OTTC or CR-OTTC
-            p_ctc, logits, weights_logits, weights_labels, wav_lens = predictions
-            extras = {'logits': logits, 'weights_logits': weights_logits, 'weights_labels': weights_labels}
+        elif len(predictions) == 7:  # OTTC or CR-OTTC
+            p_ctc, logits, weights_logits, weights_labels, wav_lens, h_mispro_bin, h_mispro_cls = predictions
+            extras = {'logits': logits, 'weights_logits': weights_logits, 'weights_labels': weights_labels, 'h_mispro_bin': h_mispro_bin, 'h_mispro_cls': h_mispro_cls}
             if self.loss_manager.loss_type == 'crottc':
                 extras['is_crottc_mode'] = True
         else:
@@ -943,6 +530,39 @@ class PhnMonoSSLModel(sb.Brain):
             loss = loss + extras['commitment_loss'] + extras['codebook_loss']
             loss_dict['commitment_loss'] = extras['commitment_loss'].detach()
             loss_dict['codebook_loss'] = extras['codebook_loss'].detach()
+        
+        # ===== Compute MPD losses (mispronunciation detection) =====
+        if stage == sb.Stage.TRAIN and 'h_mispro_bin' in extras and 'h_mispro_cls' in extras:
+            h_mispro_bin = extras['h_mispro_bin']
+            h_mispro_cls = extras['h_mispro_cls']
+            
+            # Get canonical lengths for masking if available
+            cano_lens = None
+            if canonicals is not None and canonical_lens is not None:
+                cano_lens = canonical_lens
+            
+            # Compute MPD losses
+            
+            mpd_loss, mpd_loss_dict = self.mpd_loss_manager.compute_loss_with_weight_mask(
+                h_mispro_bin, h_mispro_cls, batch, cano_lens=cano_lens, stage=stage
+            )
+            
+            # Add MPD losses to total loss and loss dict
+            loss_dict.update(mpd_loss_dict)
+            
+            # Get MPD loss weights from hparams
+            mpd_loss_weight = getattr(self.hparams, 'mpd_loss_weight', 0.1)
+            loss = loss + mpd_loss_weight * mpd_loss
+            
+            # Track MPD losses for logging
+            # import pdb; pdb.set_trace()
+            if mpd_loss_dict['binary_loss'].item() > 0:
+                self.mpd_binary_loss_sum += mpd_loss_dict['binary_loss'].item()
+                self.mpd_binary_loss_count += 1
+            if mpd_loss_dict['cls_loss'].item() > 0:
+                self.mpd_cls_loss_sum += mpd_loss_dict['cls_loss'].item()
+                self.mpd_cls_loss_count += 1
+            
         
         # Evaluation metrics (validation/test stage)
         if stage != sb.Stage.TRAIN:
@@ -1486,6 +1106,14 @@ class PhnMonoSSLModel(sb.Brain):
             self.cr_loss_count = 0
             self.ctc_loss_sum = 0.0
             self.ctc_loss_count = 0
+            
+            # Reset MPD loss tracking at the start of each training epoch
+            self.mpd_binary_loss_sum = 0.0
+            self.mpd_binary_loss_count = 0
+            self.mpd_cls_loss_sum = 0.0
+            self.mpd_cls_loss_count = 0
+            self.ctc_loss_sum = 0.0
+            self.ctc_loss_count = 0
         
         if stage != sb.Stage.TRAIN:
             self.per_metrics = self.hparams.per_stats()
@@ -1517,6 +1145,12 @@ class PhnMonoSSLModel(sb.Brain):
             if self.loss_manager.loss_type == 'crctc' or self.loss_manager.loss_type == 'crottc':
                 train_stats["ctc_loss"] = getattr(self, 'avg_ctc_loss_train', 0.0)
                 train_stats["cr_loss"] = getattr(self, 'avg_cr_loss', 0.0)
+            
+            # Add MPD losses to train stats if available
+            if self.mpd_binary_loss_count > 0:
+                train_stats["mpd_binary_loss"] = self.mpd_binary_loss_sum / self.mpd_binary_loss_count
+            if self.mpd_cls_loss_count > 0:
+                train_stats["mpd_cls_loss"] = self.mpd_cls_loss_sum / self.mpd_cls_loss_count
             
             # Prepare valid stats
             valid_stats = {
@@ -1585,6 +1219,12 @@ class PhnMonoSSLModel(sb.Brain):
                 wandb_dict["train_ctc_loss"] = getattr(self, 'avg_ctc_loss_train', 0.0)
                 wandb_dict["train_cr_loss"] = getattr(self, 'avg_cr_loss', 0.0)
             
+            # Add MPD losses to wandb logging
+            if self.mpd_binary_loss_count > 0:
+                wandb_dict["train_mpd_binary_loss"] = self.mpd_binary_loss_sum / self.mpd_binary_loss_count
+            if self.mpd_cls_loss_count > 0:
+                wandb_dict["train_mpd_cls_loss"] = self.mpd_cls_loss_sum / self.mpd_cls_loss_count
+            
             wandb.log(wandb_dict, step=epoch)
             
             # Early stop if patience exceeded
@@ -1632,24 +1272,6 @@ class PhnMonoSSLModel(sb.Brain):
                                    os.path.join(self.hparams.output_folder, 'test_results.csv'))
                 writer = ResultWriter(csv_path)
                 writer.write(self.test_results_for_csv)
-            
-            # Save aggregated test decoding results from forced alignment
-            if hasattr(self, '_test_predictions') and len(self._test_predictions) > 0:
-                test_decoding_dir = os.path.join(self.hparams.output_folder, "test_decoding")
-                os.makedirs(test_decoding_dir, exist_ok=True)
-                
-                # Save aggregated results as JSON
-                test_summary_path = os.path.join(test_decoding_dir, "test_decoding_summary.json")
-                test_summary = {
-                    "total_samples": len(self._test_predictions),
-                    "predictions": self._test_predictions
-                }
-                with open(test_summary_path, 'w', encoding='utf-8') as f:
-                    json.dump(test_summary, f, ensure_ascii=False, indent=2)
-                
-                logging.info(f"💾 Test decoding results saved to: {test_decoding_dir}")
-                logging.info(f"   Total samples: {len(self._test_predictions)}")
-                logging.info(f"   Summary file: {test_summary_path}")
     
     def fit_batch(self, batch):
         """Fit one batch"""
@@ -1777,653 +1399,3 @@ class PhnMonoSSLModel(sb.Brain):
                     for param in self.modules.ctc_lin.parameters():
                         param.requires_grad = False
                     print("   🔒 CTC head frozen")
-
-
-
-
-# ============================================================================
-# Specialized Models (继承重构后的基类)
-# ============================================================================
-
-class PhnMonoSSLModel_DualCTCHead(PhnMonoSSLModel):
-    """
-    Dual CTC heads for perceived and canonical phonemes.
-    - Perceived feature from middle SSL layers
-    - Canonical from last layer
-    """
-    
-    def compute_forward(self, batch, stage):
-        """Dual-head forward pass"""
-        batch = batch.to(self.device)
-        wavs, wav_lens = batch.sig
-        
-        if stage == sb.Stage.TRAIN:
-            if hasattr(self.hparams, "augmentation"):
-                wavs = self.hparams.augmentation(wavs)
-        
-        # Extract features from multiple SSL layers
-        feats = self.modules.perceived_ssl(wavs)
-        assert feats.dim() == 4  # (B, L, T, D)
-        
-        feats_cano = feats[self.hparams.canonical_ssl_emb_layer]
-        feats_perc = feats[self.hparams.preceived_ssl_emb_layer]
-        
-        # Encode separately or shared
-        if (self.hparams.preceived_ssl_emb_layer == self.hparams.canonical_ssl_emb_layer and
-            self.hparams.shareenc and getattr(self.modules, "enc_cano", None) is None):
-            x_perc = self.modules.enc(feats_perc)
-            x_cano = x_perc
-        else:
-            try:
-                x_cano = self.modules.enc_cano(feats_cano)
-                x_perc = self.modules.enc(feats_perc)
-            except:
-                if self.hparams.preceived_ssl_emb_layer != self.hparams.canonical_ssl_emb_layer:
-                    raise ValueError("Please define a separate encoder for Canonical feature")
-        
-        # Apply Conformer if exists
-        if getattr(self.modules, "ConformerEncoder", None) is not None:
-            from speechbrain.nnet.attention import RelPosEncXL
-            pos_emb = RelPosEncXL(emb_dim=self.hparams.dnn_neurons)(x_perc).to(self.device)
-            x_perc, _ = self.modules.ConformerEncoder(x_perc, pos_embs=pos_emb)
-        
-        # Dual CTC heads
-        logits_cano = self.modules.ctc_lin(x_cano)
-        p_ctc_cano = self.hparams.log_softmax(logits_cano)
-        
-        logits_perc = self.modules.ctc_perc_lin(x_perc)
-        p_ctc_perc = self.hparams.log_softmax(logits_perc)
-        
-        return p_ctc_cano, p_ctc_perc, wav_lens
-    
-    def compute_objectives(self, predictions, batch, stage):
-        """Dual CTC loss computation"""
-        p_ctc_cano, p_ctc_perc, wav_lens = predictions
-        ids = batch.id
-        targets, target_lens = batch.phn_encoded_target
-        canonicals, canonical_lens = batch.phn_encoded_canonical
-        perceiveds, perceived_lens = batch.phn_encoded_perceived
-        
-        # Dual losses
-        loss_cano = self.hparams.ctc_cost(p_ctc_cano, canonicals, wav_lens, canonical_lens)
-        loss_perc = self.hparams.ctc_cost(p_ctc_perc, perceiveds, wav_lens, perceived_lens)
-        
-        loss = loss_cano + loss_perc
-        
-        # Evaluation metrics
-        if stage != sb.Stage.TRAIN:
-            sequence_cano = sb.decoders.ctc_greedy_decode(
-                p_ctc_cano, wav_lens, blank_id=self.hparams.blank_index
-            )
-            sequence_perc = sb.decoders.ctc_greedy_decode(
-                p_ctc_perc, wav_lens, blank_id=self.hparams.blank_index
-            )
-            
-            self.ctc_metrics.append(ids, p_ctc_cano, canonicals, wav_lens, canonical_lens)
-            self.per_metrics.append(
-                ids=ids, predict=sequence_cano, target=canonicals,
-                predict_len=None, target_len=canonical_lens,
-                ind2lab=self.label_encoder.decode_ndim,
-            )
-            
-            self.mpd_metrics.append(
-                ids=ids, predict=sequence_perc,
-                canonical=canonicals, perceived=perceiveds,
-                predict_len=None,
-                canonical_len=canonical_lens, perceived_len=perceived_lens,
-                ind2lab=self.label_encoder.decode_ndim,
-            )
-        
-        return loss
-
-
-class PhnMonoSSLModel_withcanoPhnEmb_HMA_CTC(PhnMonoSSLModel):
-    """
-    Hybrid Model with Attention: [Attn, SSL] -> Linear -> CTC
-    Uses canonical phoneme embeddings with cross-attention.
-    """
-    
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        # Move canonical phoneme modules to device
-        if self.modules.CanonicalPhonemeEmbedding:
-            self.modules.CanonicalPhonemeEmbedding.to(self.device)
-        if self.modules.CanonicalPhonemeLSTM:
-            self.modules.CanonicalPhonemeLSTM.to(self.device)
-        if self.modules.CanonicalPhonemeLinear:
-            self.modules.CanonicalPhonemeLinear.to(self.device)
-        if self.modules.cross_attention:
-            self.modules.cross_attention.to(self.device)
-        if self.modules.attn_proj:
-            self.modules.attn_proj.to(self.device)
-        if self.modules.out_sequence:
-            self.modules.out_sequence.to(self.device)
-    
-    def compute_forward(self, batch, stage):
-        """Forward with canonical phoneme attention"""
-        batch = batch.to(self.device)
-        wavs, wav_lens = batch.sig
-        canonicals, canonical_lens = batch.phn_encoded_canonical
-        
-        if stage == sb.Stage.TRAIN:
-            if hasattr(self.hparams, "augmentation"):
-                wavs = self.hparams.augmentation(wavs)
-        
-        # SSL features
-        feats = self.modules.perceived_ssl(wavs)
-        x = self.modules.enc(feats)
-        
-        # CTC branch
-        logits = self.modules.ctc_lin(x)
-        p_ctc = self.hparams.log_softmax(logits)
-        
-        # Canonical phoneme embeddings
-        canonical_embeds = self.modules.CanonicalPhonemeEmbedding(canonicals)
-        canonical_lstm_out, _ = self.modules.CanonicalPhonemeLSTM(canonical_embeds)
-        canonical_out = self.modules.CanonicalPhonemeLinear(canonical_lstm_out)
-        
-        # Cross-attention
-        attn_output, attn_map = self.modules.cross_attention(
-            query=x,
-            key=canonical_lstm_out,
-            value=canonical_out,
-        )
-        attn_output_logits = self.modules.attn_proj(attn_output)
-        p_attn = self.hparams.log_softmax(attn_output_logits)
-        
-        # Combined output
-        concat_hidden = torch.cat((logits, attn_output_logits), dim=-1)
-        out_logits = self.modules.out_sequence(concat_hidden)
-        p_out = self.hparams.log_softmax(out_logits)
-        
-        return p_out, p_ctc, p_attn, wav_lens, attn_map
-    
-    def compute_objectives(self, predictions, batch, stage):
-        """Compute objectives for HMA model"""
-        p_out, p_ctc, p_attn, wav_lens, attn_map = predictions
-        
-        ids = batch.id
-        targets, target_lens = batch.phn_encoded_target
-        canonicals, canonical_lens = batch.phn_encoded_canonical
-        perceiveds, perceived_lens = batch.phn_encoded_perceived
-        
-        # Compute losses
-        loss_ctc = self.hparams.ctc_cost(p_ctc, targets, wav_lens, target_lens)
-        loss_attn = self.hparams.ctc_cost(p_attn, targets, wav_lens, target_lens)
-        loss_out = self.hparams.ctc_cost(p_out, targets, wav_lens, target_lens)
-        
-        loss = loss_attn  # or combine: loss_ctc + loss_attn + loss_out
-        
-        # Evaluation
-        if stage != sb.Stage.TRAIN:
-            sequence_out = sb.decoders.ctc_greedy_decode(
-                p_out, wav_lens, blank_id=self.hparams.blank_index
-            )
-            
-            self.ctc_metrics.append(ids, p_out, targets, wav_lens, target_lens)
-            self.per_metrics.append(
-                ids=ids, predict=sequence_out, target=targets,
-                predict_len=None, target_len=target_lens,
-                ind2lab=self.label_encoder.decode_ndim,
-            )
-            self.mpd_metrics.append(
-                ids=ids, predict=sequence_out,
-                canonical=canonicals, perceived=perceiveds,
-                predict_len=None,
-                canonical_len=canonical_lens, perceived_len=perceived_lens,
-                ind2lab=self.label_encoder.decode_ndim,
-            )
-        
-        return loss
-    
-class PhnMonoSSLModel_TextGate(PhnMonoSSLModel):
-    def compute_forward(self, batch, stage, pseudo_labels=None, pseudo_label_lens=None):
-        """
-            Unified forward pass supporting all configurations.
-            
-            Args:
-                batch: Input batch
-                stage: Training stage
-                pseudo_labels: Optional pseudo labels for unlabeled data (for OTTC)
-                pseudo_label_lens: Optional pseudo label lengths (for OTTC)
-            
-            Returns:
-                Depending on configuration, returns:
-                - (p_ctc, wav_lens) for vanilla
-                - (p_ctc, wav_lens, commitment_loss, codebook_loss) for RVQ
-                - (p_ctc, logits, weights_logits, weights_labels, wav_lens) for OTTC
-                - (p_ctc, wav_lens, time_mask, is_crctc_mode) for CR-CTC
-        """
-        batch = batch.to(self.device)
-        wavs, wav_lens = batch.sig
-        
-        # check if OTTC mode is enabled
-        use_ottc = (
-            self.loss_manager.loss_type == 'ottc' and 
-            stage == sb.Stage.TRAIN and
-            getattr(self.hparams, "use_ottc", True)
-        )
-        
-        # Check if CR-CTC mode is enabled (requires augmentation)
-        use_crctc = (
-            self.loss_manager.loss_type == 'crctc' and 
-            stage == sb.Stage.TRAIN and
-            getattr(self.hparams, "use_crctc", True) and
-            hasattr(self.hparams, "augmentation")  # CR-CTC requires augmentation
-        )
-
-        # Check if CT-OTTC mode is enabled
-        use_crottc = (
-            self.loss_manager.loss_type == 'crottc' and
-            stage == sb.Stage.TRAIN and
-            getattr(self.hparams, "use_crottc", True) and
-            hasattr(self.hparams, "augmentation")  # OTTC requires augmentation
-        )
-        
-        # Apply augmentation in training,
-        if stage == sb.Stage.TRAIN:
-            if hasattr(self.hparams, "speed_augmentation"):
-                wavs = self.hparams.speed_augmentation(wavs)
-            
-            # Essential Augmentation for for CR-CTC / CR-OTTC
-            if use_crctc or use_crottc:
-                # CR-CTC: Apply augmentation twice to get two different views
-                wavs_1, wav_lens_1 = self.hparams.augmentation.forward(wavs, lengths=wav_lens)
-                wavs_2, wav_lens_2 = self.hparams.augmentation.forward(wavs, lengths=wav_lens)
-                
-                # Extract SSL features for both augmented versions
-                feats_1 = self.modules.perceived_ssl(wavs_1)
-                feats_2 = self.modules.perceived_ssl(wavs_2)
-                
-                # Concatenate both versions: [2*B, T, D]
-                feats = torch.cat([feats_1, feats_2], dim=0)
-                wav_lens = wav_lens.repeat(2)
-            else:
-                # Standard augmentation (non-CR-CTC)
-                if hasattr(self.hparams, "augmentation"):
-                    wavs = self.hparams.augmentation(wavs)
-                
-                # Extract SSL features
-                feats = self.modules.perceived_ssl(wavs)
-        else:
-            # Extract SSL features (no augmentation)
-            feats = self.modules.perceived_ssl(wavs)
-        
-        # Encode features
-        x, encoder_extras = self.encoder_manager(feats, wav_lens)
-        
-        # import pdb; pdb.set_trace()
-        
-        canonicals, canonical_lens = batch.phn_encoded_canonical
-        
-        cano_emb = self.modules.phn_emb(canonicals)
-        from speechbrain.nnet.attention import RelPosEncXL, RelPosMHAXL, RoPEMHA
-        from speechbrain.lobes.models.transformer.Transformer import PositionalEncoding
-        
-        # Apply positional encoding BEFORE doubling to maintain consistent positions (0-T for both copies)
-        # pos_enc = RelPosEncXL(emb_dim=self.hparams.dnn_neurons)(cano_emb).to(self.device)
-        # RoPEMHA(emb_dim=self.hparams.dnn_neurons, n_heads=8)
-        PosEnc = PositionalEncoding(input_size=self.hparams.dnn_neurons, max_len=5000).to(self.device)
-        # import pdb; pdb.set_trace()
-        # cano_emb = RoPEMHA(emb_dim=self.hparams.dnn_neurons, n_heads=8)(cano_emb).to(self.device)
-        cano_emb = cano_emb + PosEnc(cano_emb)
-        
-        if use_crctc or use_crottc and stage == sb.Stage.TRAIN:
-            # Double cano_emb: [B, T, D] -> [2*B, T, D]
-            # Both copies share the same position encoding (0-T) since they represent the same canonical sequence
-            cano_emb = torch.cat([cano_emb, cano_emb], dim=0)
-        
-            # canonical_lens = canonical_lens.repeat(2)
-        
-        # cano_emb = cano_emb.transpose(1, 2)  # (B, D, T)
-        # x, gated_interaction = self.modules.textgate(q=x, k=cano_emb.transpose(1, 2), v=cano_emb.transpose(1, 2))
-        x, gated_interaction = self.modules.textgate(q_audio=x, k_text=cano_emb, v_text=cano_emb)
-        
-        # CTC output layer
-        logits = self.modules.ctc_lin(x)
-        p_ctc = self.hparams.log_softmax(logits)
-        
-        # Handle OTTC-specific outputs
-        if use_crottc or use_ottc:
-            # 支持 labeled 数据（真实标签）和 unlabeled 数据（伪标签）
-            if hasattr(self.modules, "lm_weight") and stage != sb.Stage.TEST:
-                # 获取标签（真实或伪标签）
-                if hasattr(batch, 'phn_encoded_target') and batch.phn_encoded_target is not None:
-                    # Labeled data: 使用真实标签
-                    targets, target_lens = batch.phn_encoded_target
-                elif pseudo_labels is not None:
-                    # Unlabeled data: 使用伪标签（从 teacher model 生成）
-                    targets = pseudo_labels
-                    target_lens = pseudo_label_lens
-                else:
-                    # 没有任何标签，跳过 OTTC 权重计算
-                    targets = None
-                
-                if targets is not None:
-                    labels_mask = (targets != self.hparams.blank_index).float()
-                    
-                    weights_logits = self.modules.lm_weight(x)
-                    lens_abs = (wav_lens * feats.shape[-2]).int()
-                    output_mask = self.create_attention_mask_from_input_sequence(lens_abs)
-                    
-                    import torch.nn.functional as F
-                    # Optimize: use in-place operations and avoid unnecessary copies
-                    weights_logits = weights_logits.squeeze()
-                    weights_logits = weights_logits.masked_fill(output_mask == 0, -torch.inf)
-                    weights_logits = F.softmax(weights_logits, dim=-1)
-                    
-                    # Optimize: use clamp to avoid division by zero without sync
-                    label_sums = labels_mask.sum(dim=1, keepdim=True).clamp(min=1e-8)
-                    weights_labels = labels_mask / label_sums
-                    
-                    return p_ctc, logits, weights_logits, weights_labels, wav_lens
-        
-        # Handle RVQ outputs
-        if 'commitment_loss' in encoder_extras:
-            return (p_ctc, wav_lens, 
-                    encoder_extras['commitment_loss'], 
-                    encoder_extras['codebook_loss'])
-        
-        # Handle CR-CTC outputs
-        if use_crctc:
-            return p_ctc, wav_lens, None, True  # True indicates CR-CTC mode
-        
-        # Standard output
-        return p_ctc, wav_lens
-    
-    def inference_batch(
-        self,
-        batch,
-        compute_metrics: bool = True
-    ) -> List[InferenceResult]:
-        """
-        Run inference on a batch using TextGate fusion.
-        
-        Input batch should contain:
-            - batch.sig: (wavs, wav_lens)
-            - batch.phn_encoded_canonical: canonical phoneme sequences
-            - batch.id: utterance IDs
-            - Optionally: batch.phn_encoded_target, batch.phn_encoded_perceived (for metrics)
-        
-        Args:
-            batch: SpeechBrain batch object with audio and canonical phonemes
-            compute_metrics: Whether to compute metrics if reference available
-        
-        Returns:
-            List of InferenceResult objects
-        """
-        self.modules.eval()
-        
-        with torch.no_grad():
-            batch = batch.to(self.device)
-            wavs, wav_lens = batch.sig
-            ids = batch.id
-            canonicals, canonical_lens = batch.phn_encoded_canonical
-            
-            # Extract SSL features
-            feats = self.modules.perceived_ssl(wavs)
-            
-            # Encode audio features
-            x, _ = self.encoder_manager(feats, wav_lens)
-            
-            # Get canonical phoneme embeddings
-            cano_emb = self.modules.phn_emb(canonicals)
-            
-            # Apply positional encoding
-            from speechbrain.lobes.models.transformer.Transformer import PositionalEncoding
-            PosEnc = PositionalEncoding(input_size=self.hparams.dnn_neurons, max_len=5000).to(self.device)
-            cano_emb = cano_emb + PosEnc(cano_emb)
-            
-            # Apply TextGate fusion
-            x, _ = self.modules.textgate(q_audio=x, k_text=cano_emb, v_text=cano_emb)
-            
-            # CTC decoding
-            logits = self.modules.ctc_lin(x)
-            p_ctc = self.hparams.log_softmax(logits)
-            
-            # Decode sequences
-            sequences = sb.decoders.ctc_greedy_decode(
-                p_ctc, wav_lens, blank_id=self.hparams.blank_index
-            )
-        
-        results = []
-        
-        # Check what reference data is available
-        has_target = hasattr(batch, 'phn_encoded_target') and batch.phn_encoded_target is not None
-        has_perceived = hasattr(batch, 'phn_encoded_perceived') and batch.phn_encoded_perceived is not None
-        
-        # Get reference data if available
-        targets = None
-        target_lens = None
-        perceiveds = None
-        perceived_lens = None
-        
-        if has_target:
-            targets, target_lens = batch.phn_encoded_target
-        if has_perceived:
-            perceiveds, perceived_lens = batch.phn_encoded_perceived
-        
-        for i, (seq_id, seq) in enumerate(zip(ids, sequences)):
-            pred_str = self._decode_sequence(seq)
-            
-            result = InferenceResult(
-                id=seq_id,
-                prediction=pred_str
-            )
-            
-            # Add canonical phonemes
-            result.canonical = self._decode_tensor(canonicals[i], canonical_lens[i] if canonical_lens is not None else None)
-            
-            # Add perceived if available
-            if has_perceived and perceiveds is not None:
-                result.perceived = self._decode_tensor(perceiveds[i], perceived_lens[i] if perceived_lens is not None else None)
-            
-            # Add target if available
-            if has_target and targets is not None:
-                result.target = self._decode_tensor(targets[i], target_lens[i] if target_lens is not None else None)
-                
-                # Compute PER if target available and metrics requested
-                if compute_metrics:
-                    result.per = self._compute_per(pred_str, result.target)
-            
-            # Compute MPD if canonical and perceived available
-            if compute_metrics and has_perceived:
-                result.mpd_result = self._compute_mpd_single(
-                    pred_str,
-                    result.canonical,
-                    result.perceived
-                )
-            
-            results.append(result)
-        
-        return results
-    
-    def inference_dataset(
-        self,
-        dataloader,
-        output_csv: Optional[str] = None,
-        compute_metrics: bool = True,
-        show_progress: bool = True
-    ) -> TestResults:
-        """
-        Run inference on entire dataset with TextGate fusion and optionally save to CSV.
-        
-        Args:
-            dataloader: PyTorch DataLoader with batches containing:
-                - batch.sig: (wavs, wav_lens)
-                - batch.phn_encoded_canonical: canonical phoneme sequences
-                - batch.id: utterance IDs
-                - Optionally: batch.phn_encoded_target, batch.phn_encoded_perceived
-            output_csv (str, optional): File path to save inference results
-            compute_metrics (bool): Whether to compute metrics if reference available
-            show_progress (bool): Whether to show progress bar
-        
-        Returns:
-            TestResults object containing all inference results
-        """
-        test_results = TestResults()
-        
-        iterator = dataloader
-        if show_progress:
-            from tqdm import tqdm
-            iterator = tqdm(dataloader, desc="Inferencing", dynamic_ncols=True)
-        
-        for batch in iterator:
-            batch_results = self.inference_batch(batch, compute_metrics=compute_metrics)
-            test_results.results.extend(batch_results)
-        
-        # Compute summary statistics
-        if compute_metrics:
-            # Check if we have metrics to compute
-            has_per = any(r.per is not None for r in test_results.results)
-            has_mpd = any(r.mpd_result is not None for r in test_results.results)
-            
-            if has_per:
-                per_scores = [r.per for r in test_results.results if r.per is not None]
-                test_results.overall_per = sum(per_scores) / len(per_scores) if per_scores else None
-            
-            if has_mpd:
-                mpd_f1_scores = [r.mpd_result['f1'] for r in test_results.results if r.mpd_result is not None]
-                test_results.overall_mpd_f1 = sum(mpd_f1_scores) / len(mpd_f1_scores) if mpd_f1_scores else None
-        
-        # Write CSV results if specified
-        if output_csv:
-            writer = ResultWriter(output_csv)
-            writer.write(test_results)
-            logging.info(f"Inference results saved to: {output_csv}")
-        
-        return test_results
-    
-    def inference(
-        self,
-        test_set,
-        test_loader_kwargs=None,
-        max_key=None,
-        min_key=None,
-        output_file=None
-    ):
-        """
-        Run inference on entire dataset with TextGate fusion.
-        
-        This is the main entry point matching train.py expectations.
-        
-        Args:
-            test_set: Dataset for inference (batch must contain canonical phonemes and audio)
-            test_loader_kwargs (dict, optional): Kwargs for DataLoader creation
-            max_key (str, optional): Key to maximize for best model selection (e.g., 'mpd_f1')
-            min_key (str, optional): Key to minimize for best model selection (e.g., 'PER')
-            output_file (str, optional): File path to save CSV results
-            
-        Returns:
-            TestResults: All inference results containing predictions and metrics
-        """
-        # Load best checkpoint if specified
-        
-        if max_key is not None or min_key is not None:
-            logging.info(f"Loading best checkpoint with max_key={max_key}, min_key={min_key}")
-            self.checkpointer.recover_if_possible(max_key=max_key, min_key=min_key)
-        
-        # Setup inference dataloader
-        if test_loader_kwargs is None:
-            test_loader_kwargs = {}
-        
-        logging.info(f"Creating test dataloader with kwargs: {test_loader_kwargs}")
-        test_dataloader = self.make_dataloader(test_set, stage=sb.Stage.TEST, **test_loader_kwargs)
-        
-        # Run inference on dataset
-        logging.info("Starting inference on full dataset...")
-        test_results = self.inference_dataset(
-            dataloader=test_dataloader,
-            output_csv=output_file,
-            compute_metrics=True,
-            show_progress=True
-        )
-        
-        # Log summary
-        logging.info("\n" + "="*70)
-        logging.info("Inference Results Summary")
-        logging.info("="*70)
-        logging.info(f"Total samples: {len(test_results.results)}")
-        if test_results.overall_per is not None:
-            logging.info(f"Average PER: {test_results.overall_per:.4f}")
-        if test_results.overall_mpd_f1 is not None:
-            logging.info(f"Average MPD F1: {test_results.overall_mpd_f1:.4f}")
-        if output_file:
-            logging.info(f"Results saved to: {output_file}")
-        logging.info("="*70)
-        
-        return test_results
-    
-    def on_fit_start(self):
-        """Gets called at the beginning of ``fit()``, on multiple processes
-        if ``distributed_count > 0`` and backend is ddp.
-
-        Default implementation compiles the jit modules, initializes
-        optimizers, and loads the latest checkpoint to resume training.
-        """
-        # Run this *after* starting all processes since jit modules cannot be
-        # pickled.
-        self._compile()
-
-        # Wrap modules with parallel backend after jit
-        self._wrap_distributed()
-
-        # Initialize optimizers after parameters are configured
-        self.init_optimizers()
-
-        # if self.checkpointer is not None:
-        #     # TODO: support recover best on PER or mpd_f1 or averaged model of best PER and mpd_f1
-        #     self.checkpointer.recover_if_possible(
-        #         max_key="mpd_f1_seq",
-        #         # max_key="mpd_f1",
-        #         # importance_keys=[
-        #         #     lambda ckpt: (-ckpt.meta.get("PER_seq", 1e6), ckpt.meta.get("mpd_f1_seq", 0), -ckpt.meta.get("PER", 1e6), ckpt.meta.get("mpd_f1", 0)),
-        #         # ]
-        #     )
-        
-        # For CTC Head init, usually means training from scratch.
-        
-        pretrainer = getattr(self.hparams, 'pretrainer', None)
-        if pretrainer is not None and getattr(self.hparams, 'resume_from_folder', False):
-            paths = pretrainer.collect_files(default_source=self.hparams.resume_from_folder)
-            pretrainer.load_collected()
-            # pdb.set_trace()
-            # self.modules.perceived_ssl.model.state_dict()['encoder.layers.23.final_layer_norm.bias']== pretrainer.loadables['perceived_ssl'].state_dict()['model.encoder.layers.23.final_layer_norm.bias']
-            # self.modules.enc.state_dict()["1.bias"] = pretrainer.loadables['model'][0].state_dict()["1.bias"]
-            # self.modules.ConformerEncoder.state_dict()['layers.0.convolution_module.conv.weight'] == pretrainer.loadables['model'].state_dict()['1.layers.0.convolution_module.conv.weight']
-            
-        # Load pretrained components if specified
-        # if getattr(self.hparams, 'load_pretrained_components', False):
-        #     pretrained_path = getattr(self.hparams, 'pretrained_model_path', '')
-        #     components = getattr(self.hparams, 'components_to_load', ['ssl', 'enc', "ctc_head"])
-        #     freeze_loaded = getattr(self.hparams, 'freeze_loaded_components', True)
-            
-        #     if pretrained_path and os.path.exists(pretrained_path):
-        #         try:
-        #             self.load_pretrained_components(
-        #                 checkpoint_path=pretrained_path,
-        #                 components_to_load=components,
-        #                 freeze_loaded=freeze_loaded
-        #             )
-        #         except Exception as e:
-        #             print(f"❌ Failed to load pretrained components: {e}")
-        #             print("   Continuing with random initialization...")
-        #     else:
-        #         print(f"⚠️  Pretrained model path not found: {pretrained_path}")
-        #         print("   Continuing with random initialization...")
-        # Load latest checkpoint to resume training if interrupted
-        ## NOTE: make sure to use the "best" model to continual training
-        ## so we set the `min_key` argument
-        
-        # TODO For resume training or VALID or TESTING use this head
-        
-        
-        if self.checkpointer is not None:
-            # TODO: support recover best on PER or mpd_f1 or averaged model of best PER and mpd_f1
-            self.checkpointer.recover_if_possible(
-                # max_key="mpd_f1_seq",
-                max_key="mpd_f1",
-                # importance_keys=[
-                #     lambda ckpt: (-ckpt.meta.get("PER_seq", 1e6), ckpt.meta.get("mpd_f1_seq", 0), -ckpt.meta.get("PER", 1e6), ckpt.meta.get("mpd_f1", 0)),
-                # ]
-            )

@@ -38,9 +38,7 @@ import numpy as np
 from utils.layers.utils import make_pad_mask
 from utils.plot.plot_attn import plot_attention
 
-import logging
-
-class Trans_IFMDD_ConPCO_ver2(sb.Brain):
+class Trans_IFMDD_ConPCO_ver2_proj(sb.Brain):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # self.        super().__init__(*args, **kwargs)
@@ -575,16 +573,15 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
             # pdb.set_trace()
             
             if allow_ASR_hidden:
-                enc_out, hidden_outs, dec_out = outs
+                enc_out, enc_proj, hidden_outs, dec_out = outs
             else:
-                enc_out, dec_out = outs
+                enc_out, enc_proj, dec_out = outs
         
-
 
             # ==================== Train: Fuse canonical embeddings with audio features ====================
             if "enc" in self.hparams.fuse_enc_or_dec:
                 memory = enc_out
-                memory = self.modules.mem_proj(memory)  # [B, T_s, D]
+                # memory = self.modules.mem_proj(memory)  # [B, T_s, D]
                 # project post encoder
                 if self.hparams.post_encoder_reduction_factor >= 1:
                     # 使用Conv1d在时间维度降采样，保持D维度不变
@@ -605,7 +602,7 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
             if "dec" in self.hparams.fuse_enc_or_dec:
                 memory = dec_out
                 # LayerNorm and Positional Embedding
-                memory = self.modules.mem_proj_dec(memory)  # [B, T_p, D]
+                # memory = self.modules.mem_proj_dec(memory)  # [B, T_p, D]
                 # tgt_causal_mask = get_lookahead_mask(Cano_emb)
                 fuse_feat_dec, _,  fuse_attn_dec = self.modules.fuse_net_dec(
                     tgt=Cano_emb,
@@ -711,14 +708,14 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
                     )
                     
                     if allow_ASR_hidden:
-                        enc_out, hidden_outs, dec_out = outs
+                        enc_out, enc_proj, hidden_outs, dec_out = outs
                     else:
-                        enc_out, dec_out = outs
+                        enc_out, enc_proj, dec_out = outs
                     
                     # ==================== Validation: Fuse canonical embeddings with audio features ====================
                     if "enc" in self.hparams.fuse_enc_or_dec:
                         memory = enc_out
-                        memory = self.modules.mem_proj(memory)  # [B, T_s, D]
+                        # memory = self.modules.mem_proj(memory)  # [B, T_s, D]
                         
                         if self.hparams.post_encoder_reduction_factor >= 1:
                             memory = self.modules.mem_proj_cnn_post_enc(memory)
@@ -734,7 +731,7 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
 
                     if "dec" in self.hparams.fuse_enc_or_dec:
                         memory = dec_out
-                        memory = self.modules.mem_proj_dec(memory)  # [B, T_p, D]
+                        # memory = self.modules.mem_proj_dec(memory)  # [B, T_p, D]
                         fuse_feat_dec, _,  fuse_attn_dec = self.modules.fuse_net_dec(
                             tgt=Cano_emb,
                             memory=memory,
@@ -769,7 +766,7 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
                     p_seq_logits = self.hparams.log_softmax(h_seq_feat)
 
                     # ==================== Validation: Get greedy hypothesis ====================
-                    if self.hparams.valid_search_interval > 0 and (current_epoch % self.hparams.valid_search_interval == 0) and self.hparams.valid_decode_mode == "AR":
+                    if self.hparams.valid_search_interval > 0 and (current_epoch % self.hparams.valid_search_interval == 0):
                         # AR decoding
                         hyps, top_lengths, top_scores, top_log_probs = self.hparams.valid_search(
                                 enc_out.detach(), wav_lens
@@ -778,7 +775,7 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
                         # hyps = p_seq_logits.argmax(dim=-1)  # [B, T_p+1]
                         # from speechbrain.utils.data_utils import undo_padding
                         # hyps = undo_padding(hyps, target_lens_bos)
-                    elif self.hparams.valid_decode_mode == "teacher_forcing":
+                    else:
                         # fallback to teacher forcing decoding
                         hyps = p_seq_logits.argmax(dim=-1)  # [B, T_p+1]
                         from speechbrain.utils.data_utils import undo_padding
@@ -852,16 +849,17 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
                                 wav_len=wav_lens,
                                 pad_idx=0,
                         )
+                        # import pdb; pdb.set_trace()
                         
                         if allow_ASR_hidden:
-                            enc_out, hidden_outs, dec_out = outs
+                            enc_out, enc_proj, hidden_outs, dec_out = outs
                         else:
-                            enc_out, dec_out = outs
+                            enc_out, enc_proj, dec_out = outs
                         
                         # ==================== TEST: Fuse canonical embeddings with audio features ====================
                         if "enc" in self.hparams.fuse_enc_or_dec:
                             memory = enc_out
-                            memory = self.modules.mem_proj(memory)  # [B, T_s, D]
+                            # memory = self.modules.mem_proj(memory)  # [B, T_s, D]
                             
                             if self.hparams.post_encoder_reduction_factor >= 1:
                                 
@@ -880,7 +878,7 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
 
                         if "dec" in self.hparams.fuse_enc_or_dec:
                             memory = dec_out
-                            memory = self.modules.mem_proj_dec(memory)  # [B, T_p, D]
+                            # memory = self.modules.mem_proj_dec(memory)  # [B, T_p, D]
                             fuse_feat_dec, _,  fuse_attn_dec = self.modules.fuse_net_dec(
                                 tgt=Cano_emb,
                                 memory=memory,
@@ -1528,26 +1526,62 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
         # Initialize optimizers after parameters are configured
         self.init_optimizers()
 
-
-        # TODO support resume whole model then acoustic model
-        # This allow better LM model for decoding
-        if self.checkpointer is not None:
-            # TODO: support recover best on PER or mpd_f1 or averaged model of best PER and mpd_f1
-            self.checkpointer.recover_if_possible(
-                max_key="mpd_f1_seq",
-            )
+        # if self.checkpointer is not None:
+        #     # TODO: support recover best on PER or mpd_f1 or averaged model of best PER and mpd_f1
+        #     self.checkpointer.recover_if_possible(
+        #         max_key="mpd_f1_seq",
+        #         # max_key="mpd_f1",
+        #         # importance_keys=[
+        #         #     lambda ckpt: (-ckpt.meta.get("PER_seq", 1e6), ckpt.meta.get("mpd_f1_seq", 0), -ckpt.meta.get("PER", 1e6), ckpt.meta.get("mpd_f1", 0)),
+        #         # ]
+        #     )
         
-        # recover acoustic model
+        # For CTC Head init, usually means training from scratch.
+        
         pretrainer = getattr(self.hparams, 'pretrainer', None)
         if pretrainer is not None and getattr(self.hparams, 'resume_from_folder', False):
             paths = pretrainer.collect_files(default_source=self.hparams.resume_from_folder)
             pretrainer.load_collected()
-            logging.info(f"✅Loaded pretrained model from {self.hparams.resume_from_folder}", )
             # pdb.set_trace()
             # self.modules.perceived_ssl.model.state_dict()['encoder.layers.23.final_layer_norm.bias']== pretrainer.loadables['perceived_ssl'].state_dict()['model.encoder.layers.23.final_layer_norm.bias']
             # self.modules.enc.state_dict()["1.bias"] = pretrainer.loadables['model'][0].state_dict()["1.bias"]
             # self.modules.ConformerEncoder.state_dict()['layers.0.convolution_module.conv.weight'] == pretrainer.loadables['model'].state_dict()['1.layers.0.convolution_module.conv.weight']
+            
+        # Load pretrained components if specified
+        # if getattr(self.hparams, 'load_pretrained_components', False):
+        #     pretrained_path = getattr(self.hparams, 'pretrained_model_path', '')
+        #     components = getattr(self.hparams, 'components_to_load', ['ssl', 'enc', "ctc_head"])
+        #     freeze_loaded = getattr(self.hparams, 'freeze_loaded_components', True)
+            
+        #     if pretrained_path and os.path.exists(pretrained_path):
+        #         try:
+        #             self.load_pretrained_components(
+        #                 checkpoint_path=pretrained_path,
+        #                 components_to_load=components,
+        #                 freeze_loaded=freeze_loaded
+        #             )
+        #         except Exception as e:
+        #             print(f"❌ Failed to load pretrained components: {e}")
+        #             print("   Continuing with random initialization...")
+        #     else:
+        #         print(f"⚠️  Pretrained model path not found: {pretrained_path}")
+        #         print("   Continuing with random initialization...")
+        # Load latest checkpoint to resume training if interrupted
+        ## NOTE: make sure to use the "best" model to continual training
+        ## so we set the `min_key` argument
         
+        # TODO For resume training or VALID or TESTING use this head
+        
+        
+        if self.checkpointer is not None:
+            # TODO: support recover best on PER or mpd_f1 or averaged model of best PER and mpd_f1
+            self.checkpointer.recover_if_possible(
+                max_key="mpd_f1_seq",
+                # max_key="mpd_f1",
+                # importance_keys=[
+                #     lambda ckpt: (-ckpt.meta.get("PER_seq", 1e6), ckpt.meta.get("mpd_f1_seq", 0), -ckpt.meta.get("PER", 1e6), ckpt.meta.get("mpd_f1", 0)),
+                # ]
+            )
 
     def on_stage_end(self, stage, stage_loss, epoch):
         current_stage = self.hparams.epoch_counter.current
@@ -1744,21 +1778,21 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
         #     for p in self.modules.ctc_lin.parameters():
         #         p.requires_grad = False
         # # 
-        # if self.checkpointer is not None:
-        #     # if self.hparams.perceived_ssl is not None and not self.hparams.perceived_ssl.freeze:
-        #     self.checkpointer.add_recoverable("adam_opt", self.adam_optimizer)
-        #     # self.checkpointer.add_recoverable("pretrained_opt", self.pretrained_opt_class)
-        #     # Add recoverable for freezing states
-        #     self.checkpointer.add_recoverable("encoder_frozen", self)
-        #     self.checkpointer.add_recoverable("ssl_frozen", self)
-        #     self.checkpointer.add_recoverable("best_ctc_loss", self)
-        #     self.checkpointer.add_recoverable("ctc_no_improve_epochs", self)
-        #     self.checkpointer.add_recoverable("ctc_loss_history", self)
-        #     self.checkpointer.add_recoverable("best_valid_per", self)
-        #     self.checkpointer.add_recoverable("best_valid_f1", self)
-        #     self.checkpointer.add_recoverable("metric_no_improve_epochs", self)
-        #     self.checkpointer.add_recoverable("per_history", self)
-        #     self.checkpointer.add_recoverable("f1_history", self)
+        if self.checkpointer is not None:
+            # if self.hparams.perceived_ssl is not None and not self.hparams.perceived_ssl.freeze:
+            self.checkpointer.add_recoverable("adam_opt", self.adam_optimizer)
+            # self.checkpointer.add_recoverable("pretrained_opt", self.pretrained_opt_class)
+            # Add recoverable for freezing states
+            self.checkpointer.add_recoverable("encoder_frozen", self)
+            self.checkpointer.add_recoverable("ssl_frozen", self)
+            self.checkpointer.add_recoverable("best_ctc_loss", self)
+            self.checkpointer.add_recoverable("ctc_no_improve_epochs", self)
+            self.checkpointer.add_recoverable("ctc_loss_history", self)
+            self.checkpointer.add_recoverable("best_valid_per", self)
+            self.checkpointer.add_recoverable("best_valid_f1", self)
+            self.checkpointer.add_recoverable("metric_no_improve_epochs", self)
+            self.checkpointer.add_recoverable("per_history", self)
+            self.checkpointer.add_recoverable("f1_history", self)
             
     def on_evaluate_start(self, max_key=None, min_key=None):
         return super().on_evaluate_start(max_key, min_key)

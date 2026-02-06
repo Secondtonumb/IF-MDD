@@ -31,6 +31,7 @@ from datetime import datetime
 # from models.phn_mono_ssl_model import PhnMonoSSLModel, PhnMonoSSLModel_DualCTCHead, PhnMonoSSLModel_RVQforBoth
 # from models.phn_mono_ssl_model import PhnMonoSSLModel_CRCTC
 from models.phn_mono_ssl_model_v3_refactored import *
+from models.phn_mono_ssl_model_v3_refactored_IF import PhnMonoSSLModel_IF
 
 from models.Transformer import TransformerMDD
 from models.Transformer_TP import TransformerMDD_TP
@@ -38,6 +39,7 @@ from models.Transformer_TP_fuse_errclass import TransformerMDD_TP_encdec_errclas
 from models.Transformer_TP_fuse_errclass_ConPCO import TransformerMDD_TP_encdec_errclass_ConPCO
 from models.Trans_IFMDD_ConPCO import Trans_IFMDD_ConPCO
 from models.Trans_IFMDD_ConPCO_ver2 import Trans_IFMDD_ConPCO_ver2
+from models.Trans_IFMDD_ConPCO_ver2_proj import Trans_IFMDD_ConPCO_ver2_proj
 
 # from models.SSL_LLM import SSL_LLM
 from models.SSL_LLM_origin import SSL_LLM_origin
@@ -100,6 +102,10 @@ if __name__ == "__main__":
     # Model Selection
     if hparams["feature_fusion"] == "PhnMonoSSL":
         asr_brain_class = PhnMonoSSLModel
+    elif hparams["feature_fusion"] == "PhnMonoSSL_IF":
+        asr_brain_class = PhnMonoSSLModel_IF
+    elif hparams["feature_fusion"] == "PhnMonoSSL_TextGate":
+        asr_brain_class = PhnMonoSSLModel_TextGate
     elif hparams["feature_fusion"] == "TransformerMDD":
         asr_brain_class = TransformerMDD
     elif hparams["feature_fusion"] == "TransformerMDD_TP":
@@ -112,6 +118,8 @@ if __name__ == "__main__":
         asr_brain_class = Trans_IFMDD_ConPCO
     elif hparams["feature_fusion"] == "Trans_IFMDD_ConPCO_ver2":
         asr_brain_class = Trans_IFMDD_ConPCO_ver2
+    elif hparams["feature_fusion"] == "Trans_IFMDD_ConPCO_ver2_proj":
+        asr_brain_class = Trans_IFMDD_ConPCO_ver2_proj
     elif hparams["feature_fusion"] == "SSL_LLM_MultiTarget_ver1":
         asr_brain_class = SSL_LLM_MultiTarget_ver1
     elif hparams["feature_fusion"] == "SSL_LLM_MultiTarget_ver2":
@@ -132,7 +140,7 @@ if __name__ == "__main__":
     #     asr_brain_class = SSL_LLM_origin_ver2_expand_tok
     # if asr_brain_class == SSL_LLM:
 #         DataPrep  = LLMDataIOPrep_ver3(hparams)
-    if asr_brain_class == TransformerMDD_TP_encdec_errclass:
+    if asr_brain_class == TransformerMDD_TP_encdec_errclass or asr_brain_class == PhnMonoSSLModel_IF:
         DataPrep  = LLMDataIOPrep_ver2(hparams)
     else:
         DataPrep  = LLMDataIOPrep(hparams)
@@ -141,8 +149,16 @@ if __name__ == "__main__":
     
     # Infer Data prep, return id, sig only
     if args.mode == "infer" and hparams.get("infer_annotation", False):
-        InferDataPrep  = InferDataIOPrep(hparams)
-        infer_data = InferDataPrep.prepare()
+        if hparams.get("inference_prompt_mode") == "canonical_only":
+            # canonical aware inference
+            from utils.DataPrepIO import InferDataIOPrep_with_cano
+            InferDataIOPrep_cano = InferDataIOPrep_with_cano(hparams)
+            infer_data = InferDataIOPrep_cano.prepare()
+        else:
+            # default inference
+            InferDataPrep  = InferDataIOPrep(hparams)
+            infer_data = InferDataPrep.prepare()
+        
 
     logger.info(f"Using ASR brain class: {asr_brain_class.__name__}")
     
