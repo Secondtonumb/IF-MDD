@@ -38,6 +38,8 @@ import numpy as np
 from utils.layers.utils import make_pad_mask
 from utils.plot.plot_attn import plot_attention
 
+import logging
+
 class Trans_IFMDD_ConPCO_ver2(sb.Brain):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -1526,63 +1528,26 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
         # Initialize optimizers after parameters are configured
         self.init_optimizers()
 
-        # if self.checkpointer is not None:
-        #     # TODO: support recover best on PER or mpd_f1 or averaged model of best PER and mpd_f1
-        #     self.checkpointer.recover_if_possible(
-        #         max_key="mpd_f1_seq",
-        #         # max_key="mpd_f1",
-        #         # importance_keys=[
-        #         #     lambda ckpt: (-ckpt.meta.get("PER_seq", 1e6), ckpt.meta.get("mpd_f1_seq", 0), -ckpt.meta.get("PER", 1e6), ckpt.meta.get("mpd_f1", 0)),
-        #         # ]
-        #     )
-        
-        # For CTC Head init, usually means training from scratch.
-        
-        pretrainer = getattr(self.hparams, 'pretrainer', None)
-        if pretrainer is not None and getattr(self.hparams, 'resume_from_folder', False):
-            paths = pretrainer.collect_files(default_source=self.hparams.resume_from_folder)
-            pretrainer.load_collected()
-            # pdb.set_trace()
-            # self.modules.perceived_ssl.model.state_dict()['encoder.layers.23.final_layer_norm.bias']== pretrainer.loadables['perceived_ssl'].state_dict()['model.encoder.layers.23.final_layer_norm.bias']
-            # self.modules.enc.state_dict()["1.bias"] = pretrainer.loadables['model'][0].state_dict()["1.bias"]
-            # self.modules.ConformerEncoder.state_dict()['layers.0.convolution_module.conv.weight'] == pretrainer.loadables['model'].state_dict()['1.layers.0.convolution_module.conv.weight']
-            
-        # Load pretrained components if specified
-        # if getattr(self.hparams, 'load_pretrained_components', False):
-        #     pretrained_path = getattr(self.hparams, 'pretrained_model_path', '')
-        #     components = getattr(self.hparams, 'components_to_load', ['ssl', 'enc', "ctc_head"])
-        #     freeze_loaded = getattr(self.hparams, 'freeze_loaded_components', True)
-            
-        #     if pretrained_path and os.path.exists(pretrained_path):
-        #         try:
-        #             self.load_pretrained_components(
-        #                 checkpoint_path=pretrained_path,
-        #                 components_to_load=components,
-        #                 freeze_loaded=freeze_loaded
-        #             )
-        #         except Exception as e:
-        #             print(f"❌ Failed to load pretrained components: {e}")
-        #             print("   Continuing with random initialization...")
-        #     else:
-        #         print(f"⚠️  Pretrained model path not found: {pretrained_path}")
-        #         print("   Continuing with random initialization...")
-        # Load latest checkpoint to resume training if interrupted
-        ## NOTE: make sure to use the "best" model to continual training
-        ## so we set the `min_key` argument
-        
-        # TODO For resume training or VALID or TESTING use this head
-        
-        
+
+        # TODO support resume whole model then acoustic model
+        # This allow better LM model for decoding
         if self.checkpointer is not None:
             # TODO: support recover best on PER or mpd_f1 or averaged model of best PER and mpd_f1
             self.checkpointer.recover_if_possible(
                 max_key="mpd_f1_seq",
-                # max_key="mpd_f1",
-                # importance_keys=[
-                #     lambda ckpt: (-ckpt.meta.get("PER_seq", 1e6), ckpt.meta.get("mpd_f1_seq", 0), -ckpt.meta.get("PER", 1e6), ckpt.meta.get("mpd_f1", 0)),
-                # ]
             )
-            
+        
+        # recover acoustic model
+        pretrainer = getattr(self.hparams, 'pretrainer', None)
+        if pretrainer is not None and getattr(self.hparams, 'resume_from_folder', False):
+            paths = pretrainer.collect_files(default_source=self.hparams.resume_from_folder)
+            pretrainer.load_collected()
+            logging.info(f"✅Loaded pretrained model from {self.hparams.resume_from_folder}", )
+            # pdb.set_trace()
+            # self.modules.perceived_ssl.model.state_dict()['encoder.layers.23.final_layer_norm.bias']== pretrainer.loadables['perceived_ssl'].state_dict()['model.encoder.layers.23.final_layer_norm.bias']
+            # self.modules.enc.state_dict()["1.bias"] = pretrainer.loadables['model'][0].state_dict()["1.bias"]
+            # self.modules.ConformerEncoder.state_dict()['layers.0.convolution_module.conv.weight'] == pretrainer.loadables['model'].state_dict()['1.layers.0.convolution_module.conv.weight']
+        
 
     def on_stage_end(self, stage, stage_loss, epoch):
         current_stage = self.hparams.epoch_counter.current
@@ -1779,21 +1744,21 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
         #     for p in self.modules.ctc_lin.parameters():
         #         p.requires_grad = False
         # # 
-        if self.checkpointer is not None:
-            # if self.hparams.perceived_ssl is not None and not self.hparams.perceived_ssl.freeze:
-            self.checkpointer.add_recoverable("adam_opt", self.adam_optimizer)
-            # self.checkpointer.add_recoverable("pretrained_opt", self.pretrained_opt_class)
-            # Add recoverable for freezing states
-            self.checkpointer.add_recoverable("encoder_frozen", self)
-            self.checkpointer.add_recoverable("ssl_frozen", self)
-            self.checkpointer.add_recoverable("best_ctc_loss", self)
-            self.checkpointer.add_recoverable("ctc_no_improve_epochs", self)
-            self.checkpointer.add_recoverable("ctc_loss_history", self)
-            self.checkpointer.add_recoverable("best_valid_per", self)
-            self.checkpointer.add_recoverable("best_valid_f1", self)
-            self.checkpointer.add_recoverable("metric_no_improve_epochs", self)
-            self.checkpointer.add_recoverable("per_history", self)
-            self.checkpointer.add_recoverable("f1_history", self)
+        # if self.checkpointer is not None:
+        #     # if self.hparams.perceived_ssl is not None and not self.hparams.perceived_ssl.freeze:
+        #     self.checkpointer.add_recoverable("adam_opt", self.adam_optimizer)
+        #     # self.checkpointer.add_recoverable("pretrained_opt", self.pretrained_opt_class)
+        #     # Add recoverable for freezing states
+        #     self.checkpointer.add_recoverable("encoder_frozen", self)
+        #     self.checkpointer.add_recoverable("ssl_frozen", self)
+        #     self.checkpointer.add_recoverable("best_ctc_loss", self)
+        #     self.checkpointer.add_recoverable("ctc_no_improve_epochs", self)
+        #     self.checkpointer.add_recoverable("ctc_loss_history", self)
+        #     self.checkpointer.add_recoverable("best_valid_per", self)
+        #     self.checkpointer.add_recoverable("best_valid_f1", self)
+        #     self.checkpointer.add_recoverable("metric_no_improve_epochs", self)
+        #     self.checkpointer.add_recoverable("per_history", self)
+        #     self.checkpointer.add_recoverable("f1_history", self)
             
     def on_evaluate_start(self, max_key=None, min_key=None):
         return super().on_evaluate_start(max_key, min_key)
