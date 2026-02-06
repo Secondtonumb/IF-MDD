@@ -6,7 +6,7 @@ speechbrain_path = "/home/kevingenghaopeng/MDD/IF-MDD/speechbrain"
 if Path(speechbrain_path).exists():
     sys.path.insert(0, str(speechbrain_path))
 
-from speechbrain.inference.ASR import EncoderASR
+from speechbrain.inference.ASR import EncoderASR, EncoderDecoderASR
 from speechbrain.decoders.ctc import TorchAudioCTCPrefixBeamSearcher
 from speechbrain.decoders.ctc import CTCHypothesis
 from speechbrain.decoders.ctc import CTCBeam
@@ -66,6 +66,79 @@ class MyEncoderASR(EncoderASR):
             else:
                 predicted_words = [hyp[0].text for hyp in predictions]
         return predicted_words, predictions
+
+class MyEncoderDecoderASR(EncoderDecoderASR):
+    def transcribe_batch(self, wavs, wav_lens):
+        """Transcribes the input audio into a sequence of words
+
+        The waveforms should already be in the model's desired format.
+        You can call:
+        ``normalized = EncoderASR.normalizer(signal, sample_rate)``
+        to get a correctly converted signal in most cases.
+
+        Arguments
+        ---------
+        wavs : torch.Tensor
+            Batch of waveforms [batch, time, channels] or [batch, time]
+            depending on the model.
+        wav_lens : torch.Tensor
+            Lengths of the waveforms relative to the longest one in the
+            batch, tensor of shape [batch]. The longest one should have
+            relative length 1.0 and others len(waveform) / max_length.
+            Used for ignoring padding.
+
+        Returns
+        -------
+        list
+            Each waveform in the batch transcribed.
+        tensor
+            Each predicted token id.
+        """
+        with torch.no_grad():
+            wav_lens = wav_lens.to(self.device)
+            encoder_out = self.encode_batch(wavs, wav_lens)
+            
+            encoder_out = self.encode_batch(wavs, wav_lens)
+            if self.transducer_beam_search:
+                inputs = [encoder_out]
+            else:
+                inputs = [encoder_out, wav_lens]
+            predicted_tokens, _, _, _ = self.mods.decoder(*inputs)
+            # frame level logits.
+            is_ctc_text_encoder_tokenizer = isinstance(
+                self.tokenizer, speechbrain.dataio.encoder.CTCTextEncoder
+            )
+            is_text_encoder_tokenizer = isinstance(
+                self.tokenizer, speechbrain.dataio.encoder.TextEncoder
+            )
+            
+            if is_ctc_text_encoder_tokenizer or is_text_encoder_tokenizer:
+                predicted_words = [
+                    " ".join(self.tokenizer.decode_ndim(token_seq))
+                    for token_seq in predicted_tokens
+                ]
+            else:
+                predicted_words = [
+                    self.tokenizer.decode_ids(token_seq)
+                    for token_seq in predicted_tokens
+                ]
+
+                
+        # with torch.no_grad():
+        #     wav_lens = wav_lens.to(self.device)
+        #     encoder_out = self.encode_batch(wavs, wav_lens)
+        #     if self.transducer_beam_search:
+        #         inputs = [encoder_out]
+        #     else:
+        #         inputs = [encoder_out, wav_lens]
+        #     predicted_tokens, _, _, _ = self.mods.decoder(*inputs)
+            
+        #     predicted_words = [
+        #         self.tokenizer.decode_ids(token_seq)
+        #         for token_seq in predicted_tokens
+        #     ]
+        # return predicted_words, predicted_tokens
+        return predicted_words, predicted_tokens
 
 class MyCTCPrefixBeamSearcher(TorchAudioCTCPrefixBeamSearcher):
     def decode_beams(self, log_probs, wav_len):
