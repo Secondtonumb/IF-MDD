@@ -766,9 +766,24 @@ class PhnMonoSSLModel(sb.Brain):
                     weights_logits = weights_logits.masked_fill(output_mask == 0, -torch.inf)
                     weights_logits = F.softmax(weights_logits, dim=-1)
                     
-                    # Optimize: use clamp to avoid division by zero without sync
-                    label_sums = labels_mask.sum(dim=1, keepdim=True).clamp(min=1e-8)
-                    weights_labels = labels_mask / label_sums
+                    # 计算 label weights: 支持预定义权重或 uniform 权重
+                    # import pdb; pdb.set_trace()
+                    if hasattr(self.hparams, 'label_importance_weights') and self.hparams.label_importance_weights is not None:
+                        # 使用预定义的标签重要性权重
+                        # label_importance_weights 应该是一个 Tensor: [vocab_size]
+                        # 从 targets 中提取每个位置的权重
+                        importance_weights = self.hparams.label_importance_weights.to(targets.device)
+                        # 根据 target token 索引获取权重: [B, T]
+                        token_weights = importance_weights[targets.long()]
+                        # 只保留非 blank 的权重
+                        token_weights = token_weights * labels_mask
+                        # 归一化每个样本的权重和为 1
+                        weight_sums = token_weights.sum(dim=1, keepdim=True).clamp(min=1e-8)
+                        weights_labels = token_weights / weight_sums
+                    else:
+                        # 使用 uniform 权重 (原始方法)
+                        label_sums = labels_mask.sum(dim=1, keepdim=True).clamp(min=1e-8)
+                        weights_labels = labels_mask / label_sums
                     
                     return p_ctc, logits, weights_logits, weights_labels, wav_lens
         
