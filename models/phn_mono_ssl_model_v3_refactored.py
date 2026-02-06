@@ -19,6 +19,121 @@ from speechbrain.nnet.loss.guidedattn_loss import GuidedAttentionLoss
 import re
 from utils.EncoderManager import EncoderManager
 from utils.LossManager import CTCLossManager
+import matplotlib
+import matplotlib.pyplot as plt
+from pathlib import Path
+
+
+# ============================================================================
+# Forced Alignment Helper Functions
+# ============================================================================
+
+def compute_ground_truth_alignment(p_ctc_sample, targets_sample_no_pad, actual_target_len, 
+                                   actual_input_len, blank_index, device, sample_id, stage):
+    """
+    计算地面真实强制对齐
+    
+    Arguments
+    ---------
+    p_ctc_sample : torch.Tensor
+        单个样本的CTC对数概率 [1, T, C]
+    targets_sample_no_pad : torch.Tensor
+        去除填充的目标序列
+    actual_target_len : int
+        实际目标长度
+    actual_input_len : int
+        实际输入长度
+    blank_index : int
+        空白索引
+    device : torch.device
+        运算设备
+    sample_id : str
+        样本ID
+    stage : sb.Stage
+        训练阶段
+    
+    Returns
+    -------
+    aligned_tokens_gt : list or None
+        对齐的令牌
+    scores : torch.Tensor or None
+        对齐分数
+    """
+    from torchaudio.functional import forced_align, merge_tokens
+    
+    try:
+        forced_alignments, scores = forced_align(
+            log_probs=p_ctc_sample,
+            targets=targets_sample_no_pad,
+            target_lengths=torch.tensor([actual_target_len], dtype=torch.int32, device=device),
+            input_lengths=torch.tensor([actual_input_len], dtype=torch.int32, device=device),
+            blank=blank_index
+        )
+        forced_alignments = forced_alignments[0]
+        scores = scores[0].exp()
+        aligned_tokens_gt = merge_tokens(forced_alignments, scores)
+        
+    except Exception as e:
+        if stage == sb.Stage.TEST:
+            print(f"⚠️  [{sample_id}] Forced alignment failed: {e}")
+        aligned_tokens_gt = None
+        scores = None
+    
+    return aligned_tokens_gt, scores
+
+
+def compute_predicted_alignment(p_ctc_sample, predict_target_sample, actual_input_len, 
+                                blank_index, device, sample_id, stage):
+    """
+    计算预测强制对齐
+    
+    Arguments
+    ---------
+    p_ctc_sample : torch.Tensor
+        单个样本的CTC对数概率 [1, T, C]
+    predict_target_sample : list
+        预测的目标序列
+    actual_input_len : int
+        实际输入长度
+    blank_index : int
+        空白索引
+    device : torch.device
+        运算设备
+    sample_id : str
+        样本ID
+    stage : sb.Stage
+        训练阶段
+    
+    Returns
+    -------
+    aligned_tokens_pred : list or None
+        对齐的令牌
+    p_scores : torch.Tensor or None
+        对齐分数
+    """
+    from torchaudio.functional import forced_align, merge_tokens
+    
+    aligned_tokens_pred = None
+    p_scores = None
+    
+    if len(predict_target_sample) > 0:
+        predict_target_tensor = torch.tensor([predict_target_sample], dtype=torch.int32, device=device)
+        try:
+            p_forced_alignments, p_scores = forced_align(
+                log_probs=p_ctc_sample,
+                targets=predict_target_tensor,
+                target_lengths=torch.tensor([len(predict_target_sample)], dtype=torch.int32, device=device),
+                input_lengths=torch.tensor([actual_input_len], dtype=torch.int32, device=device),
+                blank=blank_index
+            )
+            p_forced_alignments = p_forced_alignments[0]
+            p_scores = p_scores[0].exp()
+            aligned_tokens_pred = merge_tokens(p_forced_alignments, p_scores)
+        except Exception as e:
+            if stage == sb.Stage.TEST:
+                print(f"⚠️  [{sample_id}] Predicted alignment failed: {e}")
+    
+    return aligned_tokens_pred, p_scores
 
 
 # ============================================================================
@@ -264,6 +379,285 @@ class PhnMonoSSLModel(sb.Brain):
             return False
         return True
     
+    def plot_scores(self, word_spans, scores):
+        """Plot alignment scores for a single sequence"""
+        fig, ax = plt.subplots()
+        span_xs, span_hs = [], []
+        ax.axvspan(word_spans[0].start - 0.05, word_spans[-1].end + 0.05, 
+                   facecolor="paleturquoise", edgecolor="none", zorder=-1)
+        
+        for span in word_spans:
+            for t in range(span.start, span.end):
+                span_xs.append(t + 0.5)
+                span_hs.append(scores[t].item())
+            ax.annotate(self.label_encoder.decode_ndim(span.token), (span.start, -0.07))
+            ax.axvspan(span.start - 0.05, span.end + 0.05, 
+                       facecolor="mistyrose", edgecolor="none", zorder=-1)
+        
+        ax.bar(span_xs, span_hs, color="lightsalmon", edgecolor="coral")
+        ax.set_title("Frame-level scores and word segments")
+        ax.set_ylim(-0.1, None)
+        ax.grid(True, axis="y")
+        ax.axhline(0, color="black")
+        fig.tight_layout()
+        return fig
+    
+    def plot_alignment_comparison(self, word_spans_gt, scores_gt, word_spans_pred, scores_pred, 
+                                  title="GT vs Predicted"):
+        """
+        Plot GT and Predicted alignment side by side for comparison.
+        
+        Arguments
+        ---------
+        word_spans_gt : list of namedtuples
+            Ground truth word/token spans
+        scores_gt : tensor
+            Ground truth alignment scores
+        word_spans_pred : list of namedtuples or None
+            Predicted word/token spans
+        scores_pred : tensor or None
+            Predicted alignment scores
+        title : str
+            Title for the figure
+            
+        Returns
+        -------
+        fig : matplotlib figure
+            Figure with comparison plots
+        """
+        matplotlib.use('Agg')  # Non-interactive backend
+        
+        # Determine layout
+        if word_spans_pred is not None and len(word_spans_pred) > 0:
+            fig, axes = plt.subplots(2, 1, figsize=(14, 8))
+        else:
+            fig, axes = plt.subplots(1, 1, figsize=(14, 4))
+            axes = [axes]
+        
+        # Plot GT alignment
+        ax = axes[0]
+        span_xs, span_hs = [], []
+        if len(word_spans_gt) > 0:
+            ax.axvspan(word_spans_gt[0].start - 0.05, word_spans_gt[-1].end + 0.05, 
+                       facecolor="paleturquoise", edgecolor="none", zorder=-1)
+            for span in word_spans_gt:
+                for t in range(span.start, span.end):
+                    span_xs.append(t + 0.5)
+                    span_hs.append(scores_gt[t].item())
+                token_name = self.label_encoder.decode_ndim(span.token)
+                ax.annotate(token_name, (span.start, -0.07), fontsize=8)
+                ax.axvspan(span.start - 0.05, span.end + 0.05, 
+                           facecolor="mistyrose", edgecolor="none", zorder=-1)
+        ax.bar(span_xs, span_hs, color="lightsalmon", edgecolor="coral", alpha=0.8)
+        ax.set_title("🎯 Ground Truth Alignment", fontsize=11, fontweight='bold')
+        ax.set_ylabel("Score", fontsize=10)
+        ax.set_ylim(-0.1, None)
+        ax.grid(True, axis="y", alpha=0.3)
+        ax.axhline(0, color="black", linewidth=0.8)
+        
+        # Plot Predicted alignment (if available)
+        if len(axes) > 1:
+            ax = axes[1]
+            if word_spans_pred is not None and len(word_spans_pred) > 0 and scores_pred is not None:
+                span_xs_pred, span_hs_pred = [], []
+                ax.axvspan(word_spans_pred[0].start - 0.05, word_spans_pred[-1].end + 0.05, 
+                           facecolor="lightgreen", edgecolor="none", zorder=-1, alpha=0.5)
+                for span in word_spans_pred:
+                    for t in range(span.start, span.end):
+                        span_xs_pred.append(t + 0.5)
+                        span_hs_pred.append(scores_pred[t].item())
+                    token_name = self.label_encoder.decode_ndim(span.token)
+                    ax.annotate(token_name, (span.start, -0.07), fontsize=8)
+                    ax.axvspan(span.start - 0.05, span.end + 0.05, 
+                               facecolor="lightcyan", edgecolor="none", zorder=-1)
+                ax.bar(span_xs_pred, span_hs_pred, color="lightgreen", edgecolor="green", alpha=0.8)
+                ax.set_title("📊 Predicted Alignment", fontsize=11, fontweight='bold')
+                ax.set_ylabel("Score", fontsize=10)
+                ax.set_xlabel("Frame Index", fontsize=10)
+                ax.set_ylim(-0.1, None)
+                ax.grid(True, axis="y", alpha=0.3)
+                ax.axhline(0, color="black", linewidth=0.8)
+            else:
+                ax.text(0.5, 0.5, "❌ Predicted alignment unavailable\n(empty or failed)", 
+                       ha='center', va='center', fontsize=12, transform=ax.transAxes)
+                ax.set_xticks([])
+                ax.set_yticks([])
+        
+        fig.suptitle(title, fontsize=13, fontweight='bold', y=0.995)
+        plt.tight_layout()
+        return fig
+    
+    def process_alignment_sample(self, batch, real_batch_idx, p_ctc, wav_lens, 
+                                 output_dir, output_base, stage, stage_label):
+        """
+        处理单个样本的对齐计算和可视化
+        包含：样本提取、长度计算、对齐计算、图表保存
+        
+        Arguments
+        ---------
+        batch : object
+            批次数据
+        real_batch_idx : int
+            批次中的真实样本索引
+        p_ctc : torch.Tensor
+            CTC对数概率 [B, T, C]
+        wav_lens : torch.Tensor
+            波形长度
+        output_dir : str
+            输出目录
+        output_base : str
+            输出基础路径
+        stage : sb.Stage
+            训练阶段
+        stage_label : str
+            阶段标签（用于图表标题）
+        
+        Returns
+        -------
+        dict
+            包含测试阶段的记录数据（用于JSON保存）或None
+        """
+        sample_id = batch.id[real_batch_idx]
+        
+        # ==================== 样本提取和长度处理 ====================
+        # 提取单个样本
+        p_ctc_sample = p_ctc[real_batch_idx:real_batch_idx+1]  # [1, T, C]
+        wav_lens_sample = wav_lens[real_batch_idx:real_batch_idx+1]  # [1]
+        
+        # 获取目标序列
+        targets, target_lens = batch.phn_encoded_target
+        targets_sample = targets[real_batch_idx:real_batch_idx+1]
+        target_lens_sample = target_lens[real_batch_idx:real_batch_idx+1]
+        
+        # 移除填充（获取实际长度）
+        actual_target_len = int(target_lens_sample[0].item() * targets_sample.shape[-1])
+        targets_sample_no_pad = targets_sample[:, :actual_target_len]
+        
+        # 计算实际输入长度
+        actual_input_len = int(wav_lens_sample[0].item() * p_ctc_sample.shape[1])
+        
+        # 贪心解码预测
+        predict_target = sb.decoders.ctc_greedy_decode(
+            p_ctc_sample, wav_lens_sample, blank_id=self.hparams.blank_index
+        )
+        
+        # 准备输出文件名
+        sample_stem = Path(sample_id).stem
+        
+        # ==================== 对齐计算 ====================
+        # 地面真实对齐
+        aligned_tokens_gt, scores = compute_ground_truth_alignment(
+            p_ctc_sample=p_ctc_sample,
+            targets_sample_no_pad=targets_sample_no_pad,
+            actual_target_len=actual_target_len,
+            actual_input_len=actual_input_len,
+            blank_index=self.hparams.blank_index,
+            device=self.device,
+            sample_id=sample_id,
+            stage=stage
+        )
+        
+        # 预测对齐
+        predict_target_sample = predict_target[0] if predict_target else []
+        aligned_tokens_pred, p_scores = compute_predicted_alignment(
+            p_ctc_sample=p_ctc_sample,
+            predict_target_sample=predict_target_sample,
+            actual_input_len=actual_input_len,
+            blank_index=self.hparams.blank_index,
+            device=self.device,
+            sample_id=sample_id,
+            stage=stage
+        )
+        
+        # ==================== 保存图表 ====================
+        if stage == sb.Stage.VALID:
+            # VALID阶段：保存GT和Pred的分离图表
+            if aligned_tokens_gt is not None and scores is not None:
+                try:
+                    fig_gt = self.plot_scores(aligned_tokens_gt, scores)
+                    fig_gt.suptitle(f"GT Alignment - {sample_stem} ({stage_label})")
+                    gt_path = os.path.join(output_dir, f"gt_alignment_{sample_stem}.png")
+                    fig_gt.savefig(gt_path, dpi=150, bbox_inches='tight')
+                    plt.close(fig_gt)
+                except Exception as e:
+                    print(f"⚠️  [{sample_id}] Failed to save GT plot: {e}")
+            
+            if aligned_tokens_pred is not None and p_scores is not None:
+                try:
+                    fig_pred = self.plot_scores(aligned_tokens_pred, p_scores)
+                    fig_pred.suptitle(f"Pred Alignment - {sample_stem} ({stage_label})")
+                    pred_path = os.path.join(output_dir, f"pred_alignment_{sample_stem}.png")
+                    fig_pred.savefig(pred_path, dpi=150, bbox_inches='tight')
+                    plt.close(fig_pred)
+                except Exception as e:
+                    print(f"⚠️  [{sample_id}] Failed to save pred plot: {e}")
+        
+        elif stage == sb.Stage.TEST:
+            # TEST阶段：保存对比图表
+            if aligned_tokens_gt is not None and scores is not None:
+                try:
+                    # 从sample_id提取speaker (例如: "/path/L2-ARCTIC/TLV/..." -> "TLV")
+                    speaker_id = "unknown"
+                    if "/" in sample_id:
+                        parts = sample_id.split("/")
+                        # 查找已知的模式: L2-ARCTIC/SPEAKER_ID
+                        for i, part in enumerate(parts):
+                            if part in ["L2-ARCTIC", "L2ARCTIC"] and i+1 < len(parts):
+                                speaker_id = parts[i+1]
+                                break
+                    
+                    comparison_title = f"🎤 {speaker_id} - {sample_stem}\n GT vs Predicted Alignment"
+                    
+                    fig_compare = self.plot_alignment_comparison(
+                        aligned_tokens_gt, scores,
+                        aligned_tokens_pred if aligned_tokens_pred is not None else [],
+                        p_scores if p_scores is not None else None,
+                        title=comparison_title
+                    )
+                    compare_path = os.path.join(output_dir, f"alignment_compare_{sample_stem}.png")
+                    fig_compare.savefig(compare_path, dpi=150, bbox_inches='tight')
+                    plt.close(fig_compare)
+                    print(f"💾 Saved comparison plot: {compare_path}")
+                except Exception as e:
+                    print(f"⚠️  [{sample_id}] Failed to save comparison plot: {e}")
+        
+        # ==================== TEST阶段：保存JSON记录 ====================
+        test_record = None
+        if stage == sb.Stage.TEST:
+            # 解码序列
+            decoded_seq = self.label_encoder.decode_ndim(predict_target_sample) if len(predict_target_sample) > 0 else ""
+            
+            # 加载目标和标准发音
+            try:
+                canonicals, canonical_lens = batch.phn_encoded_canonical
+                perceiveds, perceived_lens = batch.phn_encoded_perceived
+                canonical_sample = canonicals[real_batch_idx:real_batch_idx+1]
+                perceived_sample = perceiveds[real_batch_idx:real_batch_idx+1]
+                canonical_len = canonical_lens[real_batch_idx].item()
+                perceived_len = perceived_lens[real_batch_idx].item()
+                
+                canonical_decoded = self.label_encoder.decode_ndim(canonical_sample[0, :int(canonical_len*canonical_sample.shape[-1])].tolist())
+                perceived_decoded = self.label_encoder.decode_ndim(perceived_sample[0, :int(perceived_len*perceived_sample.shape[-1])].tolist())
+            except:
+                canonical_decoded = ""
+                perceived_decoded = ""
+            
+            # 创建测试记录
+            test_record = {
+                "sample_id": sample_id,
+                "predicted": decoded_seq,
+                "canonical": canonical_decoded,
+                "perceived": perceived_decoded,
+                "num_predicted": len(predict_target_sample),
+            }
+            
+            # 保存JSON文件
+            json_path = os.path.join(output_dir, f"decode_{sample_stem}.json")
+            with open(json_path, 'w', encoding='utf-8') as f:
+                json.dump(test_record, f, ensure_ascii=False, indent=2)
+        
+        return test_record
+    
     def compute_forward(self, batch, stage, pseudo_labels=None, pseudo_label_lens=None):
         """
         Unified forward pass supporting all configurations.
@@ -387,6 +781,68 @@ class PhnMonoSSLModel(sb.Brain):
         # Handle CR-CTC outputs
         if use_crctc:
             return p_ctc, wav_lens, None, True  # True indicates CR-CTC mode
+        
+        # ==================== Forced Alignment for VALID/TEST ====================
+        # Support decoding and alignment monitoring for VALID and TEST stages
+        if stage == sb.Stage.VALID or stage == sb.Stage.TEST:
+            # Check if alignment monitoring is enabled
+            enable_alignment = getattr(self.hparams, 'enable_alignment_monitoring', False)
+            
+            if enable_alignment:
+                # For VALID: monitor a fixed sample across epochs
+                # For TEST: save alignments for all samples
+                if stage == sb.Stage.VALID:
+                    # Initialize fixed sample ID if not exists (use first batch's first ID)
+                    if not hasattr(self, '_fixed_sample_id'):
+                        self._fixed_sample_id = batch.id[0]
+                        print(f"📌 VALID 固定监控样本 ID: {self._fixed_sample_id}")
+                    
+                    # Only process if current batch contains the fixed sample ID
+                    if self._fixed_sample_id not in batch.id:
+                        if 'commitment_loss' in encoder_extras:
+                            return (p_ctc, wav_lens, 
+                                    encoder_extras['commitment_loss'], 
+                                    encoder_extras['codebook_loss'])
+                        return p_ctc, wav_lens
+                    
+                    sample_indices = [batch.id.index(self._fixed_sample_id)]
+                    epoch = self.hparams.epoch_counter.current
+                    alignment_dir = os.path.join(self.hparams.output_folder, "alignment_monitoring")
+                    output_base = os.path.join(alignment_dir, f"epoch_{epoch:03d}")
+                    stage_label = f"VALID-Epoch{epoch}"
+                    
+                else:  # TEST stage
+                    # Process all samples in the batch
+                    sample_indices = list(range(len(batch.id)))
+                    alignment_dir = os.path.join(self.hparams.output_folder, "test_decoding")
+                    output_base = alignment_dir
+                    stage_label = "TEST"
+                
+                # Create output directory
+                os.makedirs(output_base, exist_ok=True)
+                
+                # Initialize list for collecting all predictions (for TEST stage)
+                if stage == sb.Stage.TEST:
+                    if not hasattr(self, '_test_predictions'):
+                        self._test_predictions = []
+                
+                # Process selected samples
+                for loop_idx, real_batch_idx in enumerate(sample_indices):
+                    # 调用统一的样本处理函数
+                    test_record = self.process_alignment_sample(
+                        batch=batch,
+                        real_batch_idx=real_batch_idx,
+                        p_ctc=p_ctc,
+                        wav_lens=wav_lens,
+                        output_dir=output_base,
+                        output_base=output_base,
+                        stage=stage,
+                        stage_label=stage_label
+                    )
+                    
+                    # 如果是TEST阶段，将记录添加到预测列表
+                    if stage == sb.Stage.TEST and test_record is not None:
+                        self._test_predictions.append(test_record)
         
         # Standard output
         return p_ctc, wav_lens
@@ -1161,6 +1617,24 @@ class PhnMonoSSLModel(sb.Brain):
                                    os.path.join(self.hparams.output_folder, 'test_results.csv'))
                 writer = ResultWriter(csv_path)
                 writer.write(self.test_results_for_csv)
+            
+            # Save aggregated test decoding results from forced alignment
+            if hasattr(self, '_test_predictions') and len(self._test_predictions) > 0:
+                test_decoding_dir = os.path.join(self.hparams.output_folder, "test_decoding")
+                os.makedirs(test_decoding_dir, exist_ok=True)
+                
+                # Save aggregated results as JSON
+                test_summary_path = os.path.join(test_decoding_dir, "test_decoding_summary.json")
+                test_summary = {
+                    "total_samples": len(self._test_predictions),
+                    "predictions": self._test_predictions
+                }
+                with open(test_summary_path, 'w', encoding='utf-8') as f:
+                    json.dump(test_summary, f, ensure_ascii=False, indent=2)
+                
+                logging.info(f"💾 Test decoding results saved to: {test_decoding_dir}")
+                logging.info(f"   Total samples: {len(self._test_predictions)}")
+                logging.info(f"   Summary file: {test_summary_path}")
     
     def fit_batch(self, batch):
         """Fit one batch"""
@@ -1288,6 +1762,8 @@ class PhnMonoSSLModel(sb.Brain):
                     for param in self.modules.ctc_lin.parameters():
                         param.requires_grad = False
                     print("   🔒 CTC head frozen")
+
+
 
 
 # ============================================================================
