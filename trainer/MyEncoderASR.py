@@ -67,6 +67,7 @@ class MyEncoderASR(EncoderASR):
                 predicted_words = [hyp[0].text for hyp in predictions]
         return predicted_words, predictions
 
+
 class MyEncoderDecoderASR(EncoderDecoderASR):
     def transcribe_batch(self, wavs, wav_lens):
         """Transcribes the input audio into a sequence of words
