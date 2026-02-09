@@ -219,8 +219,11 @@ class ResultWriter:
             logging.warning("No results to write")
             return
         
+        # Sort results by ID
+        results = sorted(results, key=lambda r: r.id)
+        
         # Determine columns based on available data
-        columns = ['id', 'prediction']
+        columns = ['id', 'Labels']
         
         if has_canonical:
             columns.append('canonical')
@@ -242,9 +245,11 @@ class ResultWriter:
             writer.writeheader()
             
             for result in results:
+                # Extract stem from ID (e.g. '/path/to/00000_00034.wav' -> '00000_00034')
+                stem_id = os.path.splitext(os.path.basename(result.id))[0]
                 row = {
-                    'id': result.id,
-                    'prediction': result.prediction
+                    'id': stem_id,
+                    'Labels': result.prediction
                 }
                 
                 if has_canonical:
@@ -918,6 +923,17 @@ class PhnMonoSSLModel(sb.Brain):
         
         # Compute loss (only if targets available)
         if targets is not None:
+            # Pass canonical/perceived info for contrastive loss
+            if self.loss_manager.use_contrastive:
+                if extras is None:
+                    extras = {}
+                if has_canonical and canonicals is not None:
+                    extras['canonicals'] = canonicals
+                    extras['canonical_lens'] = canonical_lens
+                if has_perceived and perceiveds is not None:
+                    extras['perceiveds'] = perceiveds
+                    extras['perceived_lens'] = perceived_lens
+            
             loss, loss_dict = self.loss_manager.compute_loss(
                 p_ctc, targets, wav_lens, target_lens, stage, extras
             )
@@ -926,7 +942,7 @@ class PhnMonoSSLModel(sb.Brain):
             loss = torch.tensor(0.0, device=self.device)
             loss_dict = {}
         
-        # Track CR-CTC / CR-OTTC losses for epoch-level logging (keep on GPU)
+        # Track CR-CTC / CR-OTTC / Contrastive losses for epoch-level logging (keep on GPU)
         if stage == sb.Stage.TRAIN:
             if 'cr_loss' in loss_dict:
                 self.cr_loss_sum += loss_dict['cr_loss'].item()
@@ -937,6 +953,12 @@ class PhnMonoSSLModel(sb.Brain):
             if 'ottc_loss' in loss_dict:
                 self.ctc_loss_sum += loss_dict['ottc_loss'].item()
                 self.ctc_loss_count += 1
+            if 'contrastive_loss' in loss_dict:
+                if not hasattr(self, 'contrastive_loss_sum'):
+                    self.contrastive_loss_sum = 0.0
+                    self.contrastive_loss_count = 0
+                self.contrastive_loss_sum += loss_dict['contrastive_loss'].item()
+                self.contrastive_loss_count += 1
         
         # Add RVQ losses if present
         if 'commitment_loss' in extras:
@@ -1486,6 +1508,8 @@ class PhnMonoSSLModel(sb.Brain):
             self.cr_loss_count = 0
             self.ctc_loss_sum = 0.0
             self.ctc_loss_count = 0
+            self.contrastive_loss_sum = 0.0
+            self.contrastive_loss_count = 0
         
         if stage != sb.Stage.TRAIN:
             self.per_metrics = self.hparams.per_stats()
@@ -1507,6 +1531,14 @@ class PhnMonoSSLModel(sb.Brain):
                                    if self.cr_loss_count > 0 else 0.0)
                 self.avg_ctc_loss_train = (self.ctc_loss_sum / max(1, self.ctc_loss_count)
                                           if self.ctc_loss_count > 0 else 0.0)
+            
+            # Compute average contrastive loss for the epoch
+            if getattr(self, 'contrastive_loss_count', 0) > 0:
+                self.avg_contrastive_loss = (
+                    self.contrastive_loss_sum / self.contrastive_loss_count
+                )
+            else:
+                self.avg_contrastive_loss = 0.0
         else:
             per = self.per_metrics.summarize("error_rate")
             mpd_f1 = self.mpd_metrics.summarize("mpd_f1")
@@ -1517,6 +1549,8 @@ class PhnMonoSSLModel(sb.Brain):
             if self.loss_manager.loss_type == 'crctc' or self.loss_manager.loss_type == 'crottc':
                 train_stats["ctc_loss"] = getattr(self, 'avg_ctc_loss_train', 0.0)
                 train_stats["cr_loss"] = getattr(self, 'avg_cr_loss', 0.0)
+            if getattr(self, 'avg_contrastive_loss', 0.0) > 0:
+                train_stats["contrastive_loss"] = self.avg_contrastive_loss
             
             # Prepare valid stats
             valid_stats = {
@@ -1584,6 +1618,8 @@ class PhnMonoSSLModel(sb.Brain):
             if self.loss_manager.loss_type == 'crctc' or self.loss_manager.loss_type == 'crottc':
                 wandb_dict["train_ctc_loss"] = getattr(self, 'avg_ctc_loss_train', 0.0)
                 wandb_dict["train_cr_loss"] = getattr(self, 'avg_cr_loss', 0.0)
+            if getattr(self, 'avg_contrastive_loss', 0.0) > 0:
+                wandb_dict["train_contrastive_loss"] = self.avg_contrastive_loss
             
             wandb.log(wandb_dict, step=epoch)
             
@@ -2075,8 +2111,6 @@ class PhnMonoSSLModel_TextGate(PhnMonoSSLModel):
         
             # canonical_lens = canonical_lens.repeat(2)
         
-        # cano_emb = cano_emb.transpose(1, 2)  # (B, D, T)
-        # x, gated_interaction = self.modules.textgate(q=x, k=cano_emb.transpose(1, 2), v=cano_emb.transpose(1, 2))
         x, gated_interaction = self.modules.textgate(q_audio=x, k_text=cano_emb, v_text=cano_emb)
         
         # CTC output layer
@@ -2319,9 +2353,23 @@ class PhnMonoSSLModel_TextGate(PhnMonoSSLModel):
         """
         # Load best checkpoint if specified
         
+        # Load best checkpoint and get epoch number
+        loaded_epoch = None
         if max_key is not None or min_key is not None:
             logging.info(f"Loading best checkpoint with max_key={max_key}, min_key={min_key}")
             self.checkpointer.recover_if_possible(max_key=max_key, min_key=min_key)
+        
+        # Try to get epoch from loaded checkpoint
+        if hasattr(self, 'checkpointer') and self.checkpointer is not None:
+            try:
+                loaded_epoch = self.hparams.epoch_counter.current
+            except Exception:
+                loaded_epoch = None
+        
+        # Add epoch to output filename if available
+        if output_file and loaded_epoch is not None:
+            base, ext = os.path.splitext(output_file)
+            output_file = f"{base}_epoch{loaded_epoch}{ext}"
         
         # Setup inference dataloader
         if test_loader_kwargs is None:
@@ -2331,7 +2379,7 @@ class PhnMonoSSLModel_TextGate(PhnMonoSSLModel):
         test_dataloader = self.make_dataloader(test_set, stage=sb.Stage.TEST, **test_loader_kwargs)
         
         # Run inference on dataset
-        logging.info("Starting inference on full dataset...")
+        logging.info(f"Starting inference on full dataset... (epoch={loaded_epoch})")
         test_results = self.inference_dataset(
             dataloader=test_dataloader,
             output_csv=output_file,
@@ -2341,7 +2389,7 @@ class PhnMonoSSLModel_TextGate(PhnMonoSSLModel):
         
         # Log summary
         logging.info("\n" + "="*70)
-        logging.info("Inference Results Summary")
+        logging.info(f"Inference Results Summary (epoch={loaded_epoch})")
         logging.info("="*70)
         logging.info(f"Total samples: {len(test_results.results)}")
         if test_results.overall_per is not None:
@@ -2417,7 +2465,6 @@ class PhnMonoSSLModel_TextGate(PhnMonoSSLModel):
         
         # TODO For resume training or VALID or TESTING use this head
         
-        
         if self.checkpointer is not None:
             # TODO: support recover best on PER or mpd_f1 or averaged model of best PER and mpd_f1
             self.checkpointer.recover_if_possible(
@@ -2427,3 +2474,190 @@ class PhnMonoSSLModel_TextGate(PhnMonoSSLModel):
                 #     lambda ckpt: (-ckpt.meta.get("PER_seq", 1e6), ckpt.meta.get("mpd_f1_seq", 0), -ckpt.meta.get("PER", 1e6), ckpt.meta.get("mpd_f1", 0)),
                 # ]
             )
+        
+
+    
+    def compute_objectives(self, predictions, batch, stage):
+        """Unified objective computation with flexible reference handling"""
+        # Parse predictions based on type
+        if len(predictions) == 2:
+            p_ctc, wav_lens = predictions
+            extras = {}
+        elif len(predictions) == 4:
+            if isinstance(predictions[3], bool):  # CR-CTC
+                p_ctc, wav_lens, time_mask, is_crctc_mode = predictions
+                extras = {'time_mask': time_mask, 'is_crctc_mode': is_crctc_mode}
+            else:  # RVQ
+                p_ctc, wav_lens, commitment_loss, codebook_loss = predictions
+                extras = {'commitment_loss': commitment_loss, 'codebook_loss': codebook_loss}
+        elif len(predictions) == 5:  # OTTC or CR-OTTC
+            p_ctc, logits, weights_logits, weights_labels, wav_lens = predictions
+            extras = {'logits': logits, 'weights_logits': weights_logits, 'weights_labels': weights_labels}
+            if self.loss_manager.loss_type == 'crottc':
+                extras['is_crottc_mode'] = True
+        else:
+            raise ValueError(f"Unexpected predictions format: {len(predictions)} elements")
+    
+        # Get batch IDs
+        ids = batch.id
+        
+        # Check what reference data is available
+        has_target = hasattr(batch, 'phn_encoded_target')
+        has_canonical = hasattr(batch, 'phn_encoded_canonical')
+        has_perceived = hasattr(batch, 'phn_encoded_perceived')
+        
+        # Get targets (required for loss computation in training)
+        targets = None
+        target_lens = None
+        canonicals = None
+        canonical_lens = None
+        perceiveds = None
+        perceived_lens = None
+        
+        if has_target:
+            targets, target_lens = batch.phn_encoded_target
+        if has_canonical:
+            canonicals, canonical_lens = batch.phn_encoded_canonical
+        if has_perceived:
+            perceiveds, perceived_lens = batch.phn_encoded_perceived
+        
+        # Handle target selection (canonical/perceived/target)
+        if stage != sb.Stage.TRAIN and has_target:
+            training_target = getattr(self.hparams, 'training_target', 'target')
+            if training_target == "canonical" and has_canonical:
+                targets = canonicals
+                target_lens = canonical_lens
+            elif training_target == "perceived" and has_perceived:
+                targets = perceiveds
+                target_lens = perceived_lens
+        
+        # Compute loss (only if targets available)
+        if targets is not None:
+            # Pass canonical/perceived info for contrastive loss
+            # import pdb; pdb.set_trace()
+            if self.loss_manager.use_contrastive:
+                if extras is None:
+                    extras = {}
+                if has_canonical and canonicals is not None:
+                    extras['canonicals'] = canonicals
+                    extras['canonical_lens'] = canonical_lens
+                if has_perceived and perceiveds is not None:
+                    extras['perceiveds'] = perceiveds
+                    extras['perceived_lens'] = perceived_lens
+            
+            loss, loss_dict = self.loss_manager.compute_loss(
+                p_ctc, targets, wav_lens, target_lens, stage, extras
+            )
+        else:
+            # No targets available - return dummy loss for inference-only mode
+            loss = torch.tensor(0.0, device=self.device)
+            loss_dict = {}
+        
+        # Track CR-CTC / CR-OTTC / Contrastive losses for epoch-level logging (keep on GPU)
+        if stage == sb.Stage.TRAIN:
+            if 'cr_loss' in loss_dict:
+                self.cr_loss_sum += loss_dict['cr_loss'].item()
+                self.cr_loss_count += 1
+            if 'ctc_loss' in loss_dict:
+                self.ctc_loss_sum += loss_dict['ctc_loss'].item()
+                self.ctc_loss_count += 1
+            if 'ottc_loss' in loss_dict:
+                self.ctc_loss_sum += loss_dict['ottc_loss'].item()
+                self.ctc_loss_count += 1
+            if 'contrastive_loss' in loss_dict:
+                if not hasattr(self, 'contrastive_loss_sum'):
+                    self.contrastive_loss_sum = 0.0
+                    self.contrastive_loss_count = 0
+                self.contrastive_loss_sum += loss_dict['contrastive_loss'].item()
+                self.contrastive_loss_count += 1
+        
+        # Add RVQ losses if present
+        if 'commitment_loss' in extras:
+            loss = loss + extras['commitment_loss'] + extras['codebook_loss']
+            loss_dict['commitment_loss'] = extras['commitment_loss'].detach()
+            loss_dict['codebook_loss'] = extras['codebook_loss'].detach()
+        
+        # Evaluation metrics (validation/test stage)
+        if stage != sb.Stage.TRAIN:
+            # For CR-CTC, use first half for evaluation
+            if extras.get('is_crctc_mode', False):
+                p_ctc_eval = p_ctc[:len(ids)]
+                wav_lens_eval = wav_lens[:len(ids)]
+            else:
+                p_ctc_eval = p_ctc
+                wav_lens_eval = wav_lens
+            
+            # Decode predictions
+            sequence = sb.decoders.ctc_greedy_decode(
+                p_ctc_eval, wav_lens_eval, blank_id=self.hparams.blank_index
+            )
+            
+            # CTC metrics (only if targets available)
+            if has_target and targets is not None:
+                from utils.losses.CTCLossWithLabelPriors import CTCLossWithLabelPriors
+                if isinstance(self.hparams.ctc_cost, CTCLossWithLabelPriors):
+                    try:
+                        self.ctc_metrics.append(
+                            ids,
+                            log_probs=p_ctc_eval.permute(1, 0, 2),
+                            targets=targets,
+                            input_lengths=(wav_lens_eval * p_ctc_eval.shape[1]).to(torch.int32),
+                            target_lengths=(target_lens * targets.shape[1]).to(torch.int32)
+                        )
+                    except:
+                        self.ctc_metrics.append(ids, p_ctc_eval, targets, wav_lens_eval, target_lens)
+                else:
+                    self.ctc_metrics.append(ids, p_ctc_eval, targets, wav_lens_eval, target_lens)
+                
+                # PER metrics
+                # Remove token ID 70 from sequences
+                sequence = [[token for token in seq if token != 70] for seq in sequence]
+                        
+                self.per_metrics.append(
+                    ids=ids,
+                    predict=sequence,
+                    target=targets,
+                    predict_len=None,
+                    target_len=target_lens,
+                    ind2lab=self.label_encoder.decode_ndim,
+                )
+            
+            # MPD metrics (only if canonical and perceived available)
+            if has_canonical and has_perceived and canonicals is not None and perceiveds is not None:
+                self.mpd_metrics.append(
+                    ids=ids,
+                    predict=sequence,
+                    canonical=canonicals,
+                    perceived=perceiveds,
+                    predict_len=None,
+                    canonical_len=canonical_lens,
+                    perceived_len=perceived_lens,
+                    ind2lab=self.label_encoder.decode_ndim,
+                )
+            
+            # Collect results for CSV output in TEST stage
+            if stage == sb.Stage.TEST:
+                if not hasattr(self, 'test_results_for_csv'):
+                    self.test_results_for_csv = TestResults()
+                
+                for i, (seq_id, seq) in enumerate(zip(ids, sequence)):
+                    pred_str = self._decode_sequence(seq)
+                    
+                    result = InferenceResult(
+                        id=seq_id,
+                        prediction=pred_str
+                    )
+                    
+                    if has_canonical and canonicals is not None:
+                        result.canonical = self._decode_tensor(canonicals[i], canonical_lens[i] if canonical_lens is not None else None)
+                    
+                    if has_perceived and perceiveds is not None:
+                        result.perceived = self._decode_tensor(perceiveds[i], perceived_lens[i] if perceived_lens is not None else None)
+                    
+                    if has_target and targets is not None:
+                        result.target = self._decode_tensor(targets[i], target_lens[i] if target_lens is not None else None)
+                        result.per = self._compute_per(pred_str, result.target)
+                    
+                    self.test_results_for_csv.add_result(result)
+        
+        return loss

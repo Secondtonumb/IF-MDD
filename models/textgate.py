@@ -11,20 +11,21 @@ class TextGate(nn.Module):
         self.audio_gate_net = nn.Sequential(nn.Linear(dim, dim), nn.Sigmoid())
         # 这是一个简单的 Attention 用来把 Text 对齐到 Audio 长度
         # 实际论文中可能使用更复杂的 MFA 对齐结果直接 expand
-        # self.attn_layer = nn.MultiheadAttention(embed_dim=dim, num_heads=4, batch_first=True)
+        self.attn_layer = nn.MultiheadAttention(embed_dim=dim, num_heads=4, batch_first=True)
 
-    def forward(self, q_audio, k_text, v_text):
+    def forward(self, q_audio, k_text, v_text, record_attention=False):
         """
         q_audio: [Batch, 100, Dim] (长)
         k_text:  [Batch, 10, Dim]  (短)
         v_text:  [Batch, 10, Dim]
+        record_attention: 是否返回 attention weights
         """
         
         # --- 步骤 1: 对齐 (Alignment) ---
         # 利用标准 Attention 把 Text "拉伸" 成 Audio 的长度
         # Q=Audio, K=Text, V=Text
         # 输出 context 的形状会变成 [Batch, 100, Dim]，和 q_audio 一样长
-        aligned_text, _ = self.attn_layer(query=q_audio, key=k_text, value=v_text)
+        aligned_text, attn_weights = self.attn_layer(query=q_audio, key=k_text, value=v_text)
         
         # 现在我们可以把 aligned_text 当作图里的 K 和 V (或者分开处理)
         # 为了对应图示，我们要用对齐后的文本特征
@@ -45,7 +46,10 @@ class TextGate(nn.Module):
         # 残差 (可以相加了，因为长度都是 100)
         output = q_audio + gated_interaction
         
-        return output, gated_interaction
+        if record_attention:
+            return output, gated_interaction, attn_weights
+        else:
+            return output, gated_interaction
 
 # fuse_net_layers: 2
 
@@ -75,11 +79,12 @@ class TextGate_TransDec(nn.Module):
             causal=True
         )
 
-    def forward(self, q_audio, k_text, v_text, q_audio_lens=None, k_text_lens=None):
+    def forward(self, q_audio, k_text, v_text, q_audio_lens=None, k_text_lens=None, record_attention=False):
         """
         q_audio: [Batch, 100, Dim] (长)
         k_text:  [Batch, 10, Dim]  (短)
         v_text:  [Batch, 10, Dim]
+        record_attention: 是否返回 attention weights
         """
         
         # --- 步骤 1: 对齐 (Alignment) ---
@@ -114,4 +119,7 @@ class TextGate_TransDec(nn.Module):
         # 残差 (可以相加了，因为长度都是 100)
         output = q_audio + gated_interaction
         
-        return output, gated_interaction
+        if record_attention:
+            return output, gated_interaction, fuse_attn
+        else:
+            return output, gated_interaction
