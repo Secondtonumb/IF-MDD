@@ -22,3 +22,13 @@ __pycache__/
 *.o[0-9]*
 
 .vscode
+
+*.csv
+hparams*/
+*.md
+utils/*json
+
+voting_results/
+test*py
+run*sh
+*sample*/
