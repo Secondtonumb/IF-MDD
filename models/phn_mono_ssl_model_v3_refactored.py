@@ -2108,10 +2108,54 @@ class PhnMonoSSLModel_TextGate(PhnMonoSSLModel):
             # Double cano_emb: [B, T, D] -> [2*B, T, D]
             # Both copies share the same position encoding (0-T) since they represent the same canonical sequence
             cano_emb = torch.cat([cano_emb, cano_emb], dim=0)
+            canonical_lens = canonical_lens.repeat(2)
         
             # canonical_lens = canonical_lens.repeat(2)
-        
-        x, gated_interaction = self.modules.textgate(q_audio=x, k_text=cano_emb, v_text=cano_emb)
+            
+        if getattr(self.hparams, "record_attention", False):
+            x, gated_interaction, attention_weights = self.modules.textgate(q_audio=x,
+                                        k_text=cano_emb,
+                                        v_text=cano_emb,
+                                        q_audio_lens=wav_lens,
+                                        k_text_lens=canonical_lens,
+                                        use_textgate_as_residual=getattr(self.hparams, "use_textgate_as_residual", True),
+                                        record_attention=True
+                                        )
+        else:
+            x, gated_interaction = self.modules.textgate(q_audio=x,
+                                                        k_text=cano_emb,
+                                                        v_text=cano_emb,
+                                                        q_audio_lens=wav_lens,
+                                                        k_text_lens=canonical_lens,
+                                                        use_textgate_as_residual=getattr(self.hparams, "use_textgate_as_residual", True),
+                                                        record_attention=False
+                                                        )
+        from utils.plot.plot_attn import plot_attention
+        # if VALID for TEST and if VALID, %plot_interval ==0 then plot
+        # only plot first sample in the batch
+        # attention_plot_folder = save_folder/attention_plots/stage/<batch>.id[0]_attn.png
+        current_epoch = self.hparams.epoch_counter.current
+        if stage == sb.Stage.VALID or stage == sb.Stage.TEST:
+            if getattr(self.hparams, "record_attention", False) and current_epoch % self.hparams.plot_attention_interval == 0:
+                # attention_plot_folder = os.path.join(self.hparams.output_folder, "attention_plots", str(stage).lower())
+                attention_plot_folder = os.path.join(self.hparams.output_folder, "attention_plots", str(stage).lower(), f"epoch_{current_epoch:03d}")
+                os.makedirs(attention_plot_folder, exist_ok=True)
+                # if trans decoder, attention_weights is list of tensors, only use the last layer
+                if isinstance(attention_weights, list):
+                    attention_weights = attention_weights[-1]
+                    from pathlib import Path
+                    plot_attention(attention_weights=attention_weights[0].detach().cpu().numpy(),
+                                multi_head=getattr(self.hparams, "heads", 8),
+                                id=Path(batch.id[0]).stem, 
+                                save_path=attention_plot_folder,
+                    )
+                else:
+                    from pathlib import Path
+                    plot_attention(attention_weights=attention_weights.detach().cpu().numpy(),
+                                multi_head=1,
+                                id=Path(batch.id[0]).stem, 
+                                save_path=attention_plot_folder,
+                    )
         
         # CTC output layer
         logits = self.modules.ctc_lin(x)
@@ -2476,7 +2520,6 @@ class PhnMonoSSLModel_TextGate(PhnMonoSSLModel):
             )
         
 
-    
     def compute_objectives(self, predictions, batch, stage):
         """Unified objective computation with flexible reference handling"""
         # Parse predictions based on type
