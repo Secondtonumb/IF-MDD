@@ -523,7 +523,10 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
         # check why enc_out -> ctc get's lower performance than original ctc path
         # with torch.no_grad():
         feats_ssl_proj = self.modules.enc(feats)
-        enc_out_ssl_proj, _ = self.modules.ConformerEncoder(feats_ssl_proj)
+        if hasattr(self.modules, 'ConformerEncoder'):
+            enc_out_ssl_proj, _ = self.modules.ConformerEncoder(feats_ssl_proj)
+        else:
+            enc_out_ssl_proj = feats_ssl_proj
             
         
         # ==================== Initialize all output variables ====================
@@ -563,23 +566,30 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
             # Forward through TransASR encoder+decoder
             allow_ASR_hidden = getattr(self.hparams, "output_ASR_hidden_state", False)
             
+            # import pdb; pdb.set_trace()
             outs = self.modules.TransASR(
                     src=feats,
                     tgt=targets_bos,
                     wav_len=wav_lens,
                     pad_idx=self.hparams.blank_index,
             )
-
+            
+            
             # self.modules.TransASR.encoder.state_dict()['norm.norm.bias']
             # self.hparams.pretrainer.loadables['model'][1].state_dict()['norm.norm.bias']
             # pdb.set_trace()
             
             if allow_ASR_hidden:
-                enc_out, hidden_outs, dec_out = outs
+                if getattr(self.modules, "projector", None) is not None and getattr(self.hparams, "post_encoder_reduction_factor", None) > 1:
+                    enc_out, enc_proj, hidden_outs, dec_out = outs
+                else:
+                    enc_out, hidden_outs, dec_out = outs
             else:
-                enc_out, dec_out = outs
+                if getattr(self.modules, "projector", None) is not None and getattr(self.hparams, "post_encoder_reduction_factor", None) > 1:
+                    enc_out, enc_proj, dec_out = outs
+                else:
+                    enc_out, dec_out = outs
         
-
 
             # ==================== Train: Fuse canonical embeddings with audio features ====================
             if "enc" in self.hparams.fuse_enc_or_dec:
@@ -711,9 +721,15 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
                     )
                     
                     if allow_ASR_hidden:
-                        enc_out, hidden_outs, dec_out = outs
+                        if getattr(self.modules, "projector", None) is not None and getattr(self.hparams, "post_encoder_reduction_factor", None) > 1:
+                            enc_out, enc_proj, hidden_outs, dec_out = outs
+                        else:
+                            enc_out, hidden_outs, dec_out = outs
                     else:
-                        enc_out, dec_out = outs
+                        if getattr(self.modules, "projector", None) is not None and getattr(self.hparams, "post_encoder_reduction_factor", None) > 1:
+                            enc_out, enc_proj, dec_out = outs
+                        else:
+                            enc_out, dec_out = outs
                     
                     # ==================== Validation: Fuse canonical embeddings with audio features ====================
                     if "enc" in self.hparams.fuse_enc_or_dec:
@@ -835,7 +851,10 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
                         # ==================== TEST with GT: Use GT for evaluation ====================
                         # Compute SSL projection in test stage
                         feats_ssl_proj = self.modules.enc(feats)
-                        enc_out_ssl_proj, _ = self.modules.ConformerEncoder.forward(feats_ssl_proj)
+                        if hasattr(self.modules, 'ConformerEncoder'):
+                            enc_out_ssl_proj, _ = self.modules.ConformerEncoder.forward(feats_ssl_proj)
+                        else:
+                            enc_out_ssl_proj = feats_ssl_proj
                         
                         # Create canonical embeddings for evaluation
                         Cano_emb = self.modules.phn_emb(canonicals)  # [B, T_c, D]
@@ -854,9 +873,15 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
                         )
                         
                         if allow_ASR_hidden:
-                            enc_out, hidden_outs, dec_out = outs
+                            if getattr(self.modules, "projector", None) is not None and getattr(self.hparams, "post_encoder_reduction_factor", None) > 1:
+                                enc_out, enc_proj, hidden_outs, dec_out = outs
+                            else:
+                                enc_out, hidden_outs, dec_out = outs
                         else:
-                            enc_out, dec_out = outs
+                            if getattr(self.modules, "projector", None) is not None and getattr(self.hparams, "post_encoder_reduction_factor", None) > 1:
+                                enc_out, enc_proj, dec_out = outs
+                            else:
+                                enc_out, dec_out = outs
                         
                         # ==================== TEST: Fuse canonical embeddings with audio features ====================
                         if "enc" in self.hparams.fuse_enc_or_dec:
@@ -916,8 +941,12 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
 
                         # ==================== TEST: Get greedy hypothesis from logits ====================
                         # hyps = p_seq_logits.argmax(dim=-1)  # [B, T_p+1]
+                        if getattr(self.modules, "projector", None) is not None and getattr(self.hparams, "post_encoder_reduction_factor", None) > 1:
+                            enc_out_for_decoding = enc_proj
+                        else:
+                            enc_out_for_decoding = enc_out
                         hyps, top_lengths, top_scores, top_log_probs = self.hparams.test_search(
-                            enc_out.detach(), wav_lens
+                            enc_out_for_decoding.detach(), wav_lens
                         )
                         # from speechbrain.utils.data_utils import undo_padding
                         # hyps = undo_padding(hyps, target_lens_bos)
