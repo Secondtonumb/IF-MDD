@@ -116,6 +116,7 @@ class ConPCO_TransformerASR(TransformerASR):
         if custom_encoder is not None:
             # import pdb; pdb.set_trace()
             self.encoder = custom_encoder
+
         if encoder_proj_decoder is not None:
             self.encoder_proj_decoder = encoder_proj_decoder
             self.post_encoder_reduction_factor = post_encoder_reduction_factor
@@ -189,25 +190,28 @@ class ConPCO_TransformerASR(TransformerASR):
             src = src + self.positional_encoding(src)
             pos_embs_encoder = None
         
-        
-        outputs = self.encoder(
-            src=src,
-            src_mask=src_mask,
-            src_key_padding_mask=src_key_padding_mask,
-            pos_embs=pos_embs_encoder,
-        )
-        
-
-        # if encoder only, we return the output of the encoder
-        if tgt is None:
-            return outputs
-        
-
-    
-        if self.output_hidden_states:
-            encoder_out, _, hidden_states = outputs
+        if getattr(self, "encoder", None) is None:
+            # if no encoder, just pass through with pos_embs
+            # outputs = src + self.positional_encoding(src)
+            outputs = src
+            encoder_out = src + self.positional_encoding(src)
+            
         else:
-            encoder_out, _ = outputs
+            outputs = self.encoder(
+                src=src,
+                src_mask=src_mask,
+                src_key_padding_mask=src_key_padding_mask,
+                pos_embs=pos_embs_encoder,
+            )
+        
+            # if encoder only, we return the output of the encoder
+            if tgt is None:
+                return outputs
+
+            if self.output_hidden_states:
+                encoder_out, _, hidden_states = outputs
+            else:
+                encoder_out, _ = outputs
         
         # add conv projector to decoder
         # import pdb; pdb.set_trace()
@@ -231,6 +235,7 @@ class ConPCO_TransformerASR(TransformerASR):
             pos_embs_target = None
             pos_embs_encoder = None
         # import pdb; pdb.set_trace()
+        
         if self.encoder_proj_decoder is not None:
             # apply new src_key_padding_mask, shirnked by post_encoder_reduction_factor
             if self.post_encoder_reduction_factor >= 1:
