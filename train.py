@@ -216,12 +216,12 @@ if __name__ == "__main__":
         tags=wandb_tags,
     )
     
-    # # limit train_data for quick debugging
-    # train_record = train_data.data_ids[:128]  # Select first 2048 for debugging
-    # valid_record = valid_data.data_ids[:16]  # Select first 128 for debugging
+    # # # limit train_data for quick debugging
+    # train_record = train_data.data_ids[:1024]  # Select first 2048 for debugging
+    # valid_record = valid_data.data_ids[:128]  # Select first 128 for debugging
     # train_data = train_data.filtered_sorted(key_test={"id": lambda x: x in train_record},)
     # valid_data = valid_data.filtered_sorted(key_test={"id": lambda x: x in valid_record},)
-    # test_record = test_data.data_ids[:16]
+    # test_record = test_data.data_ids[:128]
     # test_data = test_data.filtered_sorted(key_test={"id": lambda x: x in test_record},)  
     
     # Debug

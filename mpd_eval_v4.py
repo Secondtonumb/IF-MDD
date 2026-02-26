@@ -416,15 +416,13 @@ def mpd_summary(total_wer_details):
 
                 flag+=1
     # OLD metrics
-    precision_old = 1.0*total_tr / (total_fr + total_tr)
-    try:
-        recall_old = 1.0*total_tr / (total_fa + total_tr)
-    except:
-        recall_old = 0.0
-    try:
-        f1_old = 2.0 * precision_old * recall_old / (precision_old + recall_old)
-    except:
-        f1_old = 0.0
+    precision_old = 1.0 * total_tr / (total_fr + total_tr) if (total_fr + total_tr) > 0 else 0.0
+    recall_old = 1.0 * total_tr / (total_fa + total_tr) if (total_fa + total_tr) > 0 else 0.0
+    f1_old = (
+        2.0 * precision_old * recall_old / (precision_old + recall_old)
+        if (precision_old + recall_old) > 0
+        else 0.0
+    )
     # New metrics
     
     sum1 = cor_cor + cor_nocor + sub_sub + sub_sub1 + sub_nosub + ins_ins + ins_ins1 + ins_noins + del_del + del_del1 + del_nodel
@@ -438,8 +436,9 @@ def mpd_summary(total_wer_details):
     TOTAL_INS = ins_ins + ins_ins1 + ins_noins
     TOTAL_DEL = del_del + del_del1 + del_nodel
     
-    RECALL = TR/(TR+FA)
-    PRECISION = TR/(TR+FR)
+    RECALL = TR/(TR+FA) if (TR + FA) > 0 else 0.0
+    # import pdb; pdb.set_trace()
+    PRECISION = TR/(TR+FR) if (TR + FR) > 0 else 0.0
     F1 = 2*PRECISION*RECALL/(RECALL+PRECISION) if (RECALL + PRECISION) > 0 else 0.0
     # print("Recall: %.4f" %(recall_new))
     # print("Precision: %.4f" %(precision_new))
@@ -455,7 +454,7 @@ def mpd_summary(total_wer_details):
     # print("Error Diag: %.4f %d" %(Error_Diag/(Correct_Diag+Error_Diag), Error_Diag))
     FAR = 1-RECALL
     FRR = FR / (FR + TA) if (FR + TA) > 0 else 0.0
-    DER = Error_Diag / (Error_Diag + Correct_Diag)
+    DER = Error_Diag / (Error_Diag + Correct_Diag) if (Error_Diag + Correct_Diag) > 0 else 0.0
     # print("FAR: %.4f" %(FAR))
     # print("FRR: %.4f" %(FRR))
     # print("DER: %.4f" %(DER))
@@ -473,7 +472,7 @@ def mpd_summary(total_wer_details):
         "err_diag": total_err_diag,
         "precision_old": precision_old,
         "recall_old": recall_old,
-        "f1_old": 2.0 * precision_old * recall_old / (precision_old + recall_old),
+        "f1_old": 2.0 * precision_old * recall_old / (precision_old + recall_old) if (precision_old + recall_old) > 0 else 0.0,
 
         "SUM": sum1,
         "TOTAL_EQ": TOTAL_EQ,
@@ -561,6 +560,11 @@ def print_mpd_details(wer_details, mpd_stats, mpd_file):
         print("True Accept: {}, False Rejection: {}, False Accept: {}, True Reject: {}, Corr Diag: {}, Err Diag: {}".format(\
                 det["ta"], det["fr"], det["fa"], det["tr"], det["cor_diag"], det["err_diag"]), file=mpd_file)
 
+
+def _canonical_indices(alignment):
+    return [x[1] for x in alignment if x[1] is not None]
+
+
 def mpd_stats(align_c2p, align_c2h, c, p, h):
     """
     schema: [(operator, idx_i(None), idx_j(None))]
@@ -570,9 +574,12 @@ def mpd_stats(align_c2p, align_c2h, c, p, h):
     """
     cnt = 0
     ta, fr, fa, tr, cor_diag, err_diag = 0, 0, 0, 0, 0, 0
-    import pdb; pdb.set_trace()
     # cano_len = 1 + max(x[1] for x in align_c2p)
-    assert max(x[1] for x in align_c2p if x[1] is not None) ==  max(x[1] for x in align_c2h if x[1] is not None)
+    c2p_indices = _canonical_indices(align_c2p)
+    c2h_indices = _canonical_indices(align_c2h)
+    if not c2p_indices or not c2h_indices:
+        return ta, fr, fa, tr, cor_diag, err_diag
+    assert max(c2p_indices) == max(c2h_indices)
 
     i, j = 0, 0
     while i < len(align_c2p) and j < len(align_c2h):
@@ -625,7 +632,7 @@ def mpd_stats(align_c2p, align_c2h, c, p, h):
     if i == len(align_c2p) and j != len(align_c2h):
         fr += len(align_c2h[j:])
     if i != len(align_c2p) and j == len(align_c2h):
-        fa += len(align_c2p[j:])
+        fa += len(align_c2p[i:])
 
     return ta, fr, fa, tr, cor_diag, err_diag
 
@@ -639,7 +646,11 @@ def mpd_stats(align_c2p, align_c2h, c, p, h):
     cnt = 0
     ta, fr, fa, tr, cor_diag, err_diag = 0, 0, 0, 0, 0, 0
     # cano_len = 1 + max(x[1] for x in align_c2p)
-    assert max(x[1] for x in align_c2p if x[1] is not None) ==  max(x[1] for x in align_c2h if x[1] is not None)
+    c2p_indices = _canonical_indices(align_c2p)
+    c2h_indices = _canonical_indices(align_c2h)
+    if not c2p_indices or not c2h_indices:
+        return ta, fr, fa, tr, cor_diag, err_diag
+    assert max(c2p_indices) == max(c2h_indices)
 
     i, j = 0, 0
     while i < len(align_c2p) and j < len(align_c2h):
@@ -692,7 +703,7 @@ def mpd_stats(align_c2p, align_c2h, c, p, h):
     if i == len(align_c2p) and j != len(align_c2h):
         fr += len(align_c2h[j:])
     if i != len(align_c2p) and j == len(align_c2h):
-        fa += len(align_c2p[j:])
+        fa += len(align_c2p[i:])
 
     return ta, fr, fa, tr, cor_diag, err_diag
 

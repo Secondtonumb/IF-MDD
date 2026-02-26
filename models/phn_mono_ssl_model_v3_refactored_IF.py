@@ -19,6 +19,7 @@ from speechbrain.nnet.loss.guidedattn_loss import GuidedAttentionLoss
 import re
 from utils.EncoderManager import EncoderManager
 from utils.LossManager import CTCLossManager
+from utils.context_phone_metrics import make_context_phone_ind2lab, decode_ids_to_phone_string
 
 
 # ============================================================================
@@ -606,7 +607,7 @@ class PhnMonoSSLModel_IF(sb.Brain):
                     target=targets,
                     predict_len=None,
                     target_len=target_lens,
-                    ind2lab=self.label_encoder.decode_ndim,
+                    ind2lab=self._metric_ind2lab(),
                 )
             
             # MPD metrics (only if canonical and perceived available)
@@ -619,7 +620,7 @@ class PhnMonoSSLModel_IF(sb.Brain):
                     predict_len=None,
                     canonical_len=canonical_lens,
                     perceived_len=perceived_lens,
-                    ind2lab=self.label_encoder.decode_ndim,
+                    ind2lab=self._metric_ind2lab(),
                 )
             
             # Collect results for CSV output in TEST stage
@@ -872,13 +873,21 @@ class PhnMonoSSLModel_IF(sb.Brain):
         """Decode a sequence of token indices to string"""
         if hasattr(self, 'label_encoder') and self.label_encoder is not None:
             try:
-                decoded = self.label_encoder.decode_ndim(sequence)
-                if isinstance(decoded, list):
-                    return ' '.join(str(p) for p in decoded)
-                return str(decoded)
+                return decode_ids_to_phone_string(
+                    self.label_encoder.decode_ndim,
+                    sequence,
+                    getattr(self.hparams, "context_phone_mode", "mono"),
+                )
             except:
                 pass
         return ' '.join(str(idx) for idx in sequence)
+
+    def _metric_ind2lab(self):
+        """Return ind2lab for metrics, optionally projecting context phones."""
+        return make_context_phone_ind2lab(
+            self.label_encoder.decode_ndim,
+            getattr(self.hparams, "context_phone_mode", "mono"),
+        )
     
     def _decode_tensor(self, tensor: torch.Tensor, length: Optional[torch.Tensor] = None) -> str:
         """Decode a tensor of token indices to string"""

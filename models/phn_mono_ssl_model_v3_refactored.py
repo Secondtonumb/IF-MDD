@@ -19,6 +19,7 @@ from speechbrain.nnet.loss.guidedattn_loss import GuidedAttentionLoss
 import re
 from utils.EncoderManager import EncoderManager
 from utils.LossManager import CTCLossManager
+from utils.context_phone_metrics import make_context_phone_ind2lab, decode_ids_to_phone_string
 import matplotlib
 import matplotlib.pyplot as plt
 from pathlib import Path
@@ -630,7 +631,7 @@ class PhnMonoSSLModel(sb.Brain):
         test_record = None
         if stage == sb.Stage.TEST:
             # 解码序列
-            decoded_seq = self.label_encoder.decode_ndim(predict_target_sample) if len(predict_target_sample) > 0 else ""
+            decoded_seq = self._decode_sequence(predict_target_sample) if len(predict_target_sample) > 0 else ""
             
             # 加载目标和标准发音
             try:
@@ -641,8 +642,8 @@ class PhnMonoSSLModel(sb.Brain):
                 canonical_len = canonical_lens[real_batch_idx].item()
                 perceived_len = perceived_lens[real_batch_idx].item()
                 
-                canonical_decoded = self.label_encoder.decode_ndim(canonical_sample[0, :int(canonical_len*canonical_sample.shape[-1])].tolist())
-                perceived_decoded = self.label_encoder.decode_ndim(perceived_sample[0, :int(perceived_len*perceived_sample.shape[-1])].tolist())
+                canonical_decoded = self._decode_sequence(canonical_sample[0, :int(canonical_len*canonical_sample.shape[-1])].tolist())
+                perceived_decoded = self._decode_sequence(perceived_sample[0, :int(perceived_len*perceived_sample.shape[-1])].tolist())
             except:
                 canonical_decoded = ""
                 perceived_decoded = ""
@@ -1034,7 +1035,7 @@ class PhnMonoSSLModel(sb.Brain):
                     target=targets,
                     predict_len=None,
                     target_len=target_lens,
-                    ind2lab=self.label_encoder.decode_ndim,
+                    ind2lab=self._metric_ind2lab(),
                 )
             
             # MPD metrics (only if canonical and perceived available)
@@ -1047,7 +1048,7 @@ class PhnMonoSSLModel(sb.Brain):
                     predict_len=None,
                     canonical_len=canonical_lens,
                     perceived_len=perceived_lens,
-                    ind2lab=self.label_encoder.decode_ndim,
+                    ind2lab=self._metric_ind2lab(),
                 )
             
             # Collect results for CSV output in TEST stage
@@ -1300,13 +1301,21 @@ class PhnMonoSSLModel(sb.Brain):
         """Decode a sequence of token indices to string"""
         if hasattr(self, 'label_encoder') and self.label_encoder is not None:
             try:
-                decoded = self.label_encoder.decode_ndim(sequence)
-                if isinstance(decoded, list):
-                    return ' '.join(str(p) for p in decoded)
-                return str(decoded)
+                return decode_ids_to_phone_string(
+                    self.label_encoder.decode_ndim,
+                    sequence,
+                    getattr(self.hparams, "context_phone_mode", "mono"),
+                )
             except:
                 pass
         return ' '.join(str(idx) for idx in sequence)
+
+    def _metric_ind2lab(self):
+        """Return ind2lab for metrics, optionally projecting context phones."""
+        return make_context_phone_ind2lab(
+            self.label_encoder.decode_ndim,
+            getattr(self.hparams, "context_phone_mode", "mono"),
+        )
     
     def _decode_tensor(self, tensor: torch.Tensor, length: Optional[torch.Tensor] = None) -> str:
         """Decode a tensor of token indices to string"""
@@ -1678,12 +1687,14 @@ class PhnMonoSSLModel(sb.Brain):
             # Write detailed stats files if metrics available
             if has_per_metrics:
                 per_file = getattr(self.hparams, 'per_file', os.path.join(self.hparams.output_folder, 'per_stats.txt'))
+                os.makedirs(os.path.dirname(per_file) or ".", exist_ok=True)
                 with open(per_file, "w") as w:
                     self.per_metrics.write_stats(w)
                 logging.info(f"✅ PER stats written to: {per_file}")
             
             if has_mpd_metrics:
                 mpd_file = getattr(self.hparams, 'mpd_file', os.path.join(self.hparams.output_folder, 'mpd_stats.txt'))
+                os.makedirs(os.path.dirname(mpd_file) or ".", exist_ok=True)
                 with open(mpd_file, "w") as m:
                     self.mpd_metrics.write_stats(m)
                 logging.info(f"✅ MPD stats written to: {mpd_file}")
@@ -1925,7 +1936,7 @@ class PhnMonoSSLModel_DualCTCHead(PhnMonoSSLModel):
             self.per_metrics.append(
                 ids=ids, predict=sequence_cano, target=canonicals,
                 predict_len=None, target_len=canonical_lens,
-                ind2lab=self.label_encoder.decode_ndim,
+                ind2lab=self._metric_ind2lab(),
             )
             
             self.mpd_metrics.append(
@@ -1933,7 +1944,7 @@ class PhnMonoSSLModel_DualCTCHead(PhnMonoSSLModel):
                 canonical=canonicals, perceived=perceiveds,
                 predict_len=None,
                 canonical_len=canonical_lens, perceived_len=perceived_lens,
-                ind2lab=self.label_encoder.decode_ndim,
+                ind2lab=self._metric_ind2lab(),
             )
         
         return loss
@@ -2026,14 +2037,14 @@ class PhnMonoSSLModel_withcanoPhnEmb_HMA_CTC(PhnMonoSSLModel):
             self.per_metrics.append(
                 ids=ids, predict=sequence_out, target=targets,
                 predict_len=None, target_len=target_lens,
-                ind2lab=self.label_encoder.decode_ndim,
+                ind2lab=self._metric_ind2lab(),
             )
             self.mpd_metrics.append(
                 ids=ids, predict=sequence_out,
                 canonical=canonicals, perceived=perceiveds,
                 predict_len=None,
                 canonical_len=canonical_lens, perceived_len=perceived_lens,
-                ind2lab=self.label_encoder.decode_ndim,
+                ind2lab=self._metric_ind2lab(),
             )
         
         return loss
@@ -2688,7 +2699,7 @@ class PhnMonoSSLModel_TextGate(PhnMonoSSLModel):
                     target=targets,
                     predict_len=None,
                     target_len=target_lens,
-                    ind2lab=self.label_encoder.decode_ndim,
+                    ind2lab=self._metric_ind2lab(),
                 )
             
             # MPD metrics (only if canonical and perceived available)
@@ -2701,7 +2712,7 @@ class PhnMonoSSLModel_TextGate(PhnMonoSSLModel):
                     predict_len=None,
                     canonical_len=canonical_lens,
                     perceived_len=perceived_lens,
-                    ind2lab=self.label_encoder.decode_ndim,
+                    ind2lab=self._metric_ind2lab(),
                 )
             
             # Collect results for CSV output in TEST stage
