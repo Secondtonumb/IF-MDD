@@ -94,6 +94,42 @@ class SSL_LLM_PPATP(sb.Brain):
         valid_tokens = list(range(44))  # 0-43 是音素相关的token（包括blank, bos, eos）
         self.phoneme_bias[valid_tokens] = 0
     
+    @staticmethod
+    def pad_sequence_left(sequences, batch_first=True, padding_value=0):
+        """Left-pad a list of sequences to the same length (pad on the left side).
+        
+        Args:
+            sequences: List of 1D tensors of varying lengths
+            batch_first: If True, return [B, L], else [L, B]
+            padding_value: Value to use for padding
+            
+        Returns:
+            padded: Tensor of shape [B, max_len] or [max_len, B]
+        """
+        max_len = max(len(seq) for seq in sequences)
+        device = sequences[0].device
+        
+        padded_list = []
+        for seq in sequences:
+            if len(seq) < max_len:
+                # Add padding on the LEFT
+                pad_len = max_len - len(seq)
+                padded_seq = torch.cat([
+                    torch.full((pad_len,), padding_value, dtype=seq.dtype, device=device),
+                    seq
+                ], dim=0)
+            else:
+                padded_seq = seq
+            padded_list.append(padded_seq)
+        
+        # Stack to [B, L]
+        result = torch.stack(padded_list, dim=0)
+        
+        if not batch_first:
+            result = result.t()  # [L, B]
+        
+        return result
+    
     def load_confusion_matrix(self, confusion_path=None):
         """加载混淆矩阵用于生成潜在发音候选"""
         if confusion_path is None:
@@ -470,10 +506,9 @@ class SSL_LLM_PPATP(sb.Brain):
             prefix_lens.append(len(prefix_seq))
             suffix_lens.append(len(suffix_seq))
         
-        # ===== 6. Pad sequences到相同长度 =====
-        from torch.nn.utils.rnn import pad_sequence
-        prefix_ids = pad_sequence(prefix_ids_list, batch_first=True, padding_value=PAD_ID)  # [B, L_prefix]
-        suffix_ids = pad_sequence(suffix_ids_list, batch_first=True, padding_value=PAD_ID)  # [B, L_suffix]
+        # ===== 6. Pad sequences到相同长度 (LEFT PADDING) =====
+        prefix_ids = self.pad_sequence_left(prefix_ids_list, batch_first=True, padding_value=PAD_ID)  # [B, L_prefix]
+        suffix_ids = self.pad_sequence_left(suffix_ids_list, batch_first=True, padding_value=PAD_ID)  # [B, L_suffix]
         
         # 转换长度为tensor
         prefix_lens_tensor = torch.tensor(prefix_lens, dtype=torch.long, device=device)  # [B]
@@ -483,6 +518,27 @@ class SSL_LLM_PPATP(sb.Brain):
         prefix_embed = embed_fn(prefix_ids)  # [B, L_prefix, H]
         suffix_embed = embed_fn(suffix_ids)  # [B, L_suffix, H]
         
+        # ===== 8. Build attention mask for padding positions (LEFT PADDING) =====
+        # For left padding: padding is at the LEFT, so we mask [0:pad_len]
+        B, L_prefix_padded, H = prefix_embed.shape
+        _, L_suffix_padded, _ = suffix_embed.shape
+        
+        prefix_mask = torch.ones(B, L_prefix_padded, dtype=torch.long, device=device)
+        suffix_mask = torch.ones(B, L_suffix_padded, dtype=torch.long, device=device)
+        
+        for b in range(B):
+            actual_prefix_len = prefix_lens_tensor[b].item()
+            pad_len_prefix = L_prefix_padded - actual_prefix_len
+            if pad_len_prefix > 0:
+                # Mask LEFT padding positions
+                prefix_mask[b, :pad_len_prefix] = 0
+            
+            actual_suffix_len = suffix_lens_tensor[b].item()
+            pad_len_suffix = L_suffix_padded - actual_suffix_len
+            if pad_len_suffix > 0:
+                # Mask LEFT padding positions
+                suffix_mask[b, :pad_len_suffix] = 0
+        
         return {
             "prefix_embed": prefix_embed,
             "suffix_embed": suffix_embed,
@@ -490,6 +546,8 @@ class SSL_LLM_PPATP(sb.Brain):
             "suffix_lens_tensor": suffix_lens_tensor,
             "prefix_ids": prefix_ids,
             "suffix_ids": suffix_ids,
+            "prefix_mask": prefix_mask,  # [B, L_prefix]
+            "suffix_mask": suffix_mask,  # [B, L_suffix]
         }
 
     def _build_input_embeddings(self, B, Z, phn_embed, SEP_embed, BOS_embed, EOS_embed, 
@@ -692,6 +750,8 @@ class SSL_LLM_PPATP(sb.Brain):
             actual_suffix_lens = result["suffix_lens_tensor"]
             self.prefix_ids = result["prefix_ids"]
             self.suffix_ids = result["suffix_ids"]
+            self.prefix_mask = result.get("prefix_mask")  # [B, L_prefix] for left-padding
+            self.suffix_mask = result.get("suffix_mask")  # [B, L_suffix] for left-padding
         
         # ===== Build input embedding sequence =====
         inputs_embeds = self._build_input_embeddings(
@@ -725,30 +785,23 @@ class SSL_LLM_PPATP(sb.Brain):
             attention_mask = torch.ones(B, seq_len, dtype=torch.long, device=device)
             
             if has_split_prompt:
-                # For split prompt: [prefix_padded] [speech] [suffix_padded] [phn] [EOS]
-                # Need to mask padding in prefix, suffix, and phonemes
+                # For split prompt with LEFT PADDING: [prefix_padded] [speech] [suffix_padded] [phn] [EOS]
+                # Padding is on the LEFT, so mask [0:pad_len]
                 L_prefix_padded = self.prefix_ids.size(1)
                 L_suffix_padded = self.suffix_ids.size(1)
                 
-                for b in range(B):
-                    # Mask prefix padding
-                    actual_prefix_len = actual_prefix_lens[b].item()
-                    if actual_prefix_len < L_prefix_padded:
-                        attention_mask[b, actual_prefix_len:L_prefix_padded] = 0
-                    
-                    # Speech is always valid (no masking needed)
-                    
-                    # Mask suffix padding
-                    suffix_start = L_prefix_padded + Ts
-                    actual_suffix_len = actual_suffix_lens[b].item()
-                    if actual_suffix_len < L_suffix_padded:
-                        attention_mask[b, suffix_start + actual_suffix_len:suffix_start + L_suffix_padded] = 0
-                    
-                    # Mask phoneme padding
-                    text_start = suffix_start + L_suffix_padded
-                    num_phn = int(phn_mask[b].sum().item())
-                    if num_phn < L_phn:
-                        attention_mask[b, text_start + num_phn + 1:] = 0
+                # Use the masks computed during embedding
+                prefix_mask = self.prefix_mask  # [B, L_prefix]
+                suffix_mask = self.suffix_mask  # [B, L_suffix]
+                
+                # Assign prefix mask
+                attention_mask[:, :L_prefix_padded] = prefix_mask
+                
+                # Speech is always valid
+                
+                # Assign suffix mask (with offset)
+                suffix_start = L_prefix_padded + Ts
+                attention_mask[:, suffix_start:suffix_start + L_suffix_padded] = suffix_mask
             else:
                 # Mask out padding in phoneme sequence
                 # Sequence: [prompt(P)] [SEP(1)] [speech(Ts)] [BOS(1)] [phn(L_phn)] [EOS(1)]
@@ -822,7 +875,7 @@ class SSL_LLM_PPATP(sb.Brain):
             # llm_out.logits: [B, seq_len, 128000]
             # pdb.set_trace()
             loss = llm_out.loss  # CrossEntropyLoss if labels provided
-            logger.info(f"LLM Loss: {loss.item():.4f}")
+            # logger.info(f"LLM Loss: {loss.item():.4f}")
             # pdb.set_trace()
             # pdb.set_trace()
             ce_logits = llm_out.logits
@@ -846,27 +899,22 @@ class SSL_LLM_PPATP(sb.Brain):
                 attention_mask = torch.ones(B, seq_len, dtype=torch.long, device=device)
                 
                 if has_split_prompt:
-                    # For split prompt with variable-length prefix/suffix
+                    # For split prompt with LEFT PADDING: [prefix_padded] [speech] [suffix_padded] [phn] [EOS]
                     L_prefix_padded = self.prefix_ids.size(1)
                     L_suffix_padded = self.suffix_ids.size(1)
                     
-                    for b in range(B):
-                        # Mask prefix padding
-                        actual_prefix_len = actual_prefix_lens[b].item()
-                        if actual_prefix_len < L_prefix_padded:
-                            attention_mask[b, actual_prefix_len:L_prefix_padded] = 0
-                        
-                        # Mask suffix padding
-                        suffix_start = L_prefix_padded + Ts
-                        actual_suffix_len = actual_suffix_lens[b].item()
-                        if actual_suffix_len < L_suffix_padded:
-                            attention_mask[b, suffix_start + actual_suffix_len:suffix_start + L_suffix_padded] = 0
-                        
-                        # Mask phoneme padding
-                        text_start = suffix_start + L_suffix_padded
-                        num_phn = int(phn_mask[b].sum().item())
-                        if num_phn < L_phn:
-                            attention_mask[b, text_start + num_phn + 1:] = 0
+                    # Use the masks computed during embedding
+                    prefix_mask = self.prefix_mask  # [B, L_prefix]
+                    suffix_mask = self.suffix_mask  # [B, L_suffix]
+                    
+                    # Assign prefix mask
+                    attention_mask[:, :L_prefix_padded] = prefix_mask
+                    
+                    # Speech is always valid
+                    
+                    # Assign suffix mask (with offset)
+                    suffix_start = L_prefix_padded + Ts
+                    attention_mask[:, suffix_start:suffix_start + L_suffix_padded] = suffix_mask
                 else:
                     # Mask out padding in phoneme sequence
                     # Sequence: [prompt(P)] [SEP(1)] [speech(Ts)] [BOS(1)] [phn(L_phn)] [EOS(1)]
@@ -925,29 +973,26 @@ class SSL_LLM_PPATP(sb.Brain):
                 
                 if has_split_prompt:
                     # Use the enhanced prefix and suffix embeddings from training
-                    # These already have sample-specific PP context
+                    # These already have sample-specific PP context and LEFT PADDING
                     inputs_embeds_inference = torch.cat([
                         prefix_embed,  # [B, L_prefix, H] (already padded and embedded)
                         Z,             # [B, Ts, H]
                         suffix_embed_enhanced   # [B, L_suffix, H] (already padded and embedded)
                     ], dim=1)
                     
-                    # Build attention mask for inference (mask paddings)
+                    # Build attention mask for inference using the computed masks
                     attention_mask_inference = torch.ones(B, inputs_embeds_inference.size(1), dtype=torch.long, device=device)
                     L_prefix_padded = self.prefix_ids.size(1)
                     L_suffix_padded = self.suffix_ids.size(1)
                     
-                    for b in range(B):
-                        # Mask prefix padding
-                        actual_prefix_len = actual_prefix_lens[b].item()
-                        if actual_prefix_len < L_prefix_padded:
-                            attention_mask_inference[b, actual_prefix_len:L_prefix_padded] = 0
-                        
-                        # Mask suffix padding
-                        suffix_start = L_prefix_padded + Ts
-                        actual_suffix_len = actual_suffix_lens[b].item()
-                        if actual_suffix_len < L_suffix_padded:
-                            attention_mask_inference[b, suffix_start + actual_suffix_len:suffix_start + L_suffix_padded] = 0
+                    # Apply prefix mask (already handles LEFT PADDING)
+                    prefix_mask = self.prefix_mask  # [B, L_prefix]
+                    attention_mask_inference[:, :L_prefix_padded] = prefix_mask
+                    
+                    # Apply suffix mask (already handles LEFT PADDING)
+                    suffix_mask = self.suffix_mask  # [B, L_suffix]
+                    suffix_start = L_prefix_padded + Ts
+                    attention_mask_inference[:, suffix_start:suffix_start + L_suffix_padded] = suffix_mask
                 
                 elif prompt_embed_batch is not None:
                     inputs_embeds_inference = torch.cat([
@@ -985,7 +1030,7 @@ class SSL_LLM_PPATP(sb.Brain):
                     bos_token_id=BOS_ID,
                     do_sample=True,
                     use_cache=True,
-                    num_beams=1,
+                    num_beams=10,
                     # top_k = 71,
                     # top_p = 0.9,
                     max_new_tokens=L_phn + 10, 
@@ -1481,13 +1526,30 @@ class SSL_LLM_PPATP(sb.Brain):
                 prefix_lens.append(len(prefix_seq))
                 suffix_lens.append(len(suffix_seq))
             
-            # Pad sequences
-            from torch.nn.utils.rnn import pad_sequence
-            prefix_ids = pad_sequence(prefix_ids_list, batch_first=True, padding_value=PAD_ID)
-            suffix_ids = pad_sequence(suffix_ids_list, batch_first=True, padding_value=PAD_ID)
+            # Pad sequences (LEFT PADDING for inference)
+            prefix_ids = self.pad_sequence_left(prefix_ids_list, batch_first=True, padding_value=PAD_ID)
+            suffix_ids = self.pad_sequence_left(suffix_ids_list, batch_first=True, padding_value=PAD_ID)
             
             prefix_lens_tensor = torch.tensor(prefix_lens, dtype=torch.long, device=device)
             suffix_lens_tensor = torch.tensor(suffix_lens, dtype=torch.long, device=device)
+            
+            # Build padding masks for LEFT PADDING
+            L_prefix_padded = prefix_ids.size(1)
+            L_suffix_padded = suffix_ids.size(1)
+            
+            prefix_mask = torch.ones(B, L_prefix_padded, dtype=torch.long, device=device)
+            suffix_mask = torch.ones(B, L_suffix_padded, dtype=torch.long, device=device)
+            
+            for b in range(B):
+                actual_prefix_len = prefix_lens[b]
+                pad_len_prefix = L_prefix_padded - actual_prefix_len
+                if pad_len_prefix > 0:
+                    prefix_mask[b, :pad_len_prefix] = 0
+                
+                actual_suffix_len = suffix_lens[b]
+                pad_len_suffix = L_suffix_padded - actual_suffix_len
+                if pad_len_suffix > 0:
+                    suffix_mask[b, :pad_len_suffix] = 0
             
             # Embed
             prefix_embed = embed_fn(prefix_ids)  # [B, L_prefix, H]
@@ -1499,22 +1561,17 @@ class SSL_LLM_PPATP(sb.Brain):
                 suffix_embed
             ], dim=1)
             
-            # Build attention mask (mask padding positions)
+            # Build attention mask using LEFT PADDING masks
             attention_mask = torch.ones(B, inputs_embeds.size(1), dtype=torch.long, device=device)
             L_prefix_padded = prefix_ids.size(1)
             L_suffix_padded = suffix_ids.size(1)
             
-            for b in range(B):
-                # Mask prefix padding
-                actual_prefix_len = prefix_lens_tensor[b].item()
-                if actual_prefix_len < L_prefix_padded:
-                    attention_mask[b, actual_prefix_len:L_prefix_padded] = 0
-                
-                # Mask suffix padding
-                suffix_start = L_prefix_padded + Ts
-                actual_suffix_len = suffix_lens_tensor[b].item()
-                if actual_suffix_len < L_suffix_padded:
-                    attention_mask[b, suffix_start + actual_suffix_len:suffix_start + L_suffix_padded] = 0
+            # Apply prefix mask
+            attention_mask[:, :L_prefix_padded] = prefix_mask
+            
+            # Apply suffix mask (with offset)
+            suffix_start = L_prefix_padded + Ts
+            attention_mask[:, suffix_start:suffix_start + L_suffix_padded] = suffix_mask
         
         elif has_prompt:
             prompt_embed = self.prompt_embed
