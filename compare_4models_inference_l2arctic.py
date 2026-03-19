@@ -22,27 +22,6 @@ from huggingface_hub import hf_hub_download
 import importlib.util
 import librosa
 
-
-def perform_mfa_alignment(ctc_p, target_ids, blank_id):
-    """Run CTC forced alignment and return dense path, scores, and token spans."""
-    from torchaudio.functional import forced_align, merge_tokens
-
-    target_ids = list(target_ids)
-    forced_alignments, scores = forced_align(
-        log_probs=ctc_p,
-        targets=torch.tensor([target_ids], dtype=torch.int32, device=ctc_p.device),
-        input_lengths=torch.tensor([ctc_p.shape[-2]], dtype=torch.int32, device=ctc_p.device),
-        target_lengths=torch.tensor([len(target_ids)], dtype=torch.int32, device=ctc_p.device),
-        blank=blank_id,
-    )
-
-    forced_alignment = forced_alignments[0]
-    scores = scores[0].exp()
-    aligned_tokens = merge_tokens(forced_alignment, scores)
-
-    return forced_alignment, scores, aligned_tokens
-
-
 # ===== 配置 =====
 # file_path = "/home/m64000/work/dataset/data_iqra_extra_is26/wav/is26_sample_94.wav"
 # file_path = "/work/gm64/m64000/dataset/l2arctic_release_v5.0/TLV/wav/arctic_b0320.wav"
@@ -138,13 +117,21 @@ for idx, (model_name, model_path) in enumerate(models_config.items()):
         ctc_p = asr_model.encode_batch(batch, rel_length)
         
         # 强制对齐
+        from torchaudio.functional import forced_align, merge_tokens
         print(f"  Performing forced alignment...")
-        forced_alignments, scores, aligned_tokens_gt = perform_mfa_alignment(
-            ctc_p=ctc_p,
-            target_ids=x_id,
-            blank_id=asr_model.tokenizer.lab2ind["<blank>"],
+        
+        forced_alignments, scores = forced_align(
+            log_probs=ctc_p,
+            targets=torch.tensor([x_id], dtype=torch.int32, device=ctc_p.device),
+            input_lengths=torch.tensor([ctc_p.shape[-2]], dtype=torch.int32, device=ctc_p.device),
+            target_lengths=torch.tensor([len(x_id)], dtype=torch.int32, device=ctc_p.device),
+            blank=asr_model.tokenizer.lab2ind["<blank>"]
         )
-
+        
+        forced_alignments = forced_alignments[0]
+        scores = scores[0].exp()
+        aligned_tokens_gt = merge_tokens(forced_alignments, scores)
+        
         results[model_name] = {
             'asr_model': asr_model,
             'transcription': x,

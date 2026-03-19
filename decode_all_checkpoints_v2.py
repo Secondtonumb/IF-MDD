@@ -37,32 +37,6 @@ def extract_epoch_from_ckpt(ckpt_path):
     return None
 
 
-def copy_result_files(exp_output_folder, epoch_output_dir):
-    """Copy annotation-specific PER/MPD files while preserving their names."""
-    exp_output_folder = Path(exp_output_folder)
-    epoch_output_dir = Path(epoch_output_dir)
-    copied = []
-
-    result_files = sorted(exp_output_folder.glob("*_per.txt")) + sorted(
-        exp_output_folder.glob("*_mpd.txt")
-    )
-
-    # Backward-compatible fallback for older hparams that still write per.txt/mpd.txt.
-    if not result_files:
-        result_files = [p for p in [exp_output_folder / "per.txt", exp_output_folder / "mpd.txt"] if p.exists()]
-
-    for result_file in result_files:
-        dst = epoch_output_dir / result_file.name
-        shutil.copy(result_file, dst)
-        copied.append(dst)
-        logger.info(f"✓ Copied {result_file} -> {dst}")
-
-    if not copied:
-        logger.warning(f"No PER/MPD result files found in {exp_output_folder}")
-
-    return copied
-
-
 def decode_checkpoint(ckpt_path, save_dir, output_base_dir, hparams_file, prefix, decoded_dir):
     """
     Decode a single checkpoint by:
@@ -122,10 +96,23 @@ def decode_checkpoint(ckpt_path, save_dir, output_base_dir, hparams_file, prefix
         epoch_output_dir = Path(output_base_dir) / f"epoch_{epoch:03d}"
         epoch_output_dir.mkdir(parents=True, exist_ok=True)
         
-        # Find and copy annotation-specific PER/MPD files from experiment output folder.
+        # Find and copy per.txt and mpd.txt from experiment output folder
+        # Parse hparams to get output_folder
         exp_output_folder = Path(save_dir).parent  # e.g., exp_l2arctic/wavlm_large_None_PhnMonoSSL_ottc_frz_lm
-        copied_files = copy_result_files(exp_output_folder, epoch_output_dir)
-        result["result_files"] = [str(path) for path in copied_files]
+        per_file = exp_output_folder / "per.txt"
+        mpd_file = exp_output_folder / "mpd.txt"
+        
+        if per_file.exists():
+            shutil.copy(per_file, epoch_output_dir / "per.txt")
+            logger.info(f"✓ Copied {per_file} -> {epoch_output_dir / 'per.txt'}")
+        else:
+            logger.warning(f"per.txt not found at {per_file}")
+        
+        if mpd_file.exists():
+            shutil.copy(mpd_file, epoch_output_dir / "mpd.txt")
+            logger.info(f"✓ Copied {mpd_file} -> {epoch_output_dir / 'mpd.txt'}")
+        else:
+            logger.warning(f"mpd.txt not found at {mpd_file}")
         
         # Step 4: Move checkpoint to decoded directory
         logger.info(f"[4/4] Moving checkpoint to decoded directory...")

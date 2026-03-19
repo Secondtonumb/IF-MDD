@@ -92,10 +92,9 @@ def decode_checkpoint(asr_brain, test_data, ckpt_path, output_dir, hparams, test
     epoch_output_dir = Path(output_dir) / f"epoch_{epoch:03d}"
     epoch_output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Update output file paths while preserving the test annotation identifier
-    # from hparams, e.g. test_clean_per.txt / test_other_mpd.txt.
-    per_file = epoch_output_dir / Path(hparams["per_file"]).name
-    mpd_file = epoch_output_dir / Path(hparams["mpd_file"]).name
+    # Update output file paths
+    per_file = epoch_output_dir / "per.txt"
+    mpd_file = epoch_output_dir / "mpd.txt"
     
     # Temporarily override hparams for output files
     original_per_file = hparams["per_file"]
