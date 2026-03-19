@@ -13,6 +13,7 @@ import json
 from pathlib import Path
 from mpd_eval_v4 import MpdStats
 
+import re
 try:
     from peft import PeftModel, get_peft_model_state_dict, set_peft_model_state_dict
 except ImportError:
@@ -36,6 +37,51 @@ class PeftAdapterRecoverable:
 import logging
 logger = logging.getLogger(__name__)
 
+def pad_sequence_left(sequences, batch_first=True, padding_value=0):
+    """
+    Left padding for causal LLM (padding on the left side).
+    与 torch.nn.utils.rnn.pad_sequence 类似，但 padding 在左侧。
+    
+    For causal language models (like LLaMA), left padding ensures that:
+    - All actual content is right-aligned across samples in a batch
+    - The generation starting position (e.g., BOS token) has consistent
+      relative distance to the actual content across all samples
+    - Position encodings are not disrupted by variable-length padding
+    
+    Args:
+        sequences: List of 1D Tensors with variable lengths
+        batch_first: If True, output shape is [B, max_len]
+        padding_value: Value for padding positions (typically PAD_ID)
+        
+    Returns:
+        Padded tensor [B, max_len] if batch_first=True, else [max_len, B]
+        
+    Example:
+        Input:  [[1, 2, 3], [4, 5, 6, 7, 8]]
+        Output: [[0, 0, 1, 2, 3],
+                 [4, 5, 6, 7, 8]]  # Padding on LEFT, content RIGHT-aligned
+    """
+    max_len = max([s.size(0) for s in sequences])
+    padded_seqs = []
+    
+    for seq in sequences:
+        pad_len = max_len - seq.size(0)
+        if pad_len > 0:
+            # 关键：padding 在前面（左侧）
+            padding = torch.full(
+                (pad_len,), padding_value, 
+                dtype=seq.dtype, device=seq.device
+            )
+            padded_seq = torch.cat([padding, seq])
+        else:
+            padded_seq = seq
+        padded_seqs.append(padded_seq)
+    
+    if batch_first:
+        return torch.stack(padded_seqs, dim=0)
+    else:
+        return torch.stack(padded_seqs, dim=1)
+
 def phn_list_to_seq(batch):
     """
     Args:
@@ -48,7 +94,7 @@ def phn_list_to_seq(batch):
         result.append(" ".join(x for x in phn_list))
     return result
     
-class SSL_LLM_PPATP(sb.Brain):
+class SSL_LLM_CoT(sb.Brain):
     def __init__(self, *args, patience=20, **kwargs):
         super().__init__(*args, **kwargs)
         self.patience = patience
@@ -94,42 +140,6 @@ class SSL_LLM_PPATP(sb.Brain):
         valid_tokens = list(range(44))  # 0-43 是音素相关的token（包括blank, bos, eos）
         self.phoneme_bias[valid_tokens] = 0
     
-    @staticmethod
-    def pad_sequence_left(sequences, batch_first=True, padding_value=0):
-        """Left-pad a list of sequences to the same length (pad on the left side).
-        
-        Args:
-            sequences: List of 1D tensors of varying lengths
-            batch_first: If True, return [B, L], else [L, B]
-            padding_value: Value to use for padding
-            
-        Returns:
-            padded: Tensor of shape [B, max_len] or [max_len, B]
-        """
-        max_len = max(len(seq) for seq in sequences)
-        device = sequences[0].device
-        
-        padded_list = []
-        for seq in sequences:
-            if len(seq) < max_len:
-                # Add padding on the LEFT
-                pad_len = max_len - len(seq)
-                padded_seq = torch.cat([
-                    torch.full((pad_len,), padding_value, dtype=seq.dtype, device=device),
-                    seq
-                ], dim=0)
-            else:
-                padded_seq = seq
-            padded_list.append(padded_seq)
-        
-        # Stack to [B, L]
-        result = torch.stack(padded_list, dim=0)
-        
-        if not batch_first:
-            result = result.t()  # [L, B]
-        
-        return result
-    
     def load_confusion_matrix(self, confusion_path=None):
         """加载混淆矩阵用于生成潜在发音候选"""
         if confusion_path is None:
@@ -151,7 +161,7 @@ class SSL_LLM_PPATP(sb.Brain):
             logger.error(f"Error loading confusion matrix: {e}")
             self.confusion_matrix = {}
     
-    def generate_potential_pronunciations(self, canonical_phonemes, top_k=5):
+    def generate_potential_pronunciations(self, canonical_phonemes, top_k=10):
         """根据混淆矩阵为canonical音素序列生成潜在发音候选
         
         Args:
@@ -301,6 +311,41 @@ class SSL_LLM_PPATP(sb.Brain):
         if not hasattr(self, "_phn_token_embedder") or self._phn_token_embedder is None:
             self._phn_token_embedder = embed_fn
             print(f"[Lazy Init] Registered phoneme token embedder function")
+        
+        # ============ Ensure special tokens are registered (BOS, SEP) ============
+        # This must be done during initialization to ensure consistent vocab size
+        # between training and inference (prevents checkpoint loading errors)
+        # Set register_special_tokens=False in hparams when loading old checkpoints
+        register_tokens = getattr(self.hparams, "register_special_tokens", True)
+        
+        if register_tokens and (not hasattr(self, "_special_tokens_initialized") or not self._special_tokens_initialized):
+            tok = self.hparams.LLM_tokenizer
+            tokens_added = False
+            
+            # Add BOS token if not exists
+            if tok.bos_token is None or tok.bos_token_id is None:
+                num_added = tok.add_special_tokens({'bos_token': '<|im_start|>'})
+                if num_added > 0:
+                    logger.info(f"[Init] Added BOS token '<|im_start|>' to tokenizer (added {num_added} tokens)")
+                    tokens_added = True
+            
+            # Add SEP token if not exists
+            if tok.sep_token is None or tok.sep_token_id is None:
+                num_added = tok.add_special_tokens({'sep_token': '<|reserved_special_token_0|>'})
+                if num_added > 0:
+                    logger.info(f"[Init] Added SEP token '<|reserved_special_token_0|>' to tokenizer (added {num_added} tokens)")
+                    tokens_added = True
+            
+            # Resize embeddings if tokens were added
+            if tokens_added:
+                self.modules.LLM.resize_token_embeddings(len(tok))
+                logger.info(f"[Init] Resized LLM embeddings to {len(tok)} tokens")
+            
+            self._special_tokens_initialized = True
+            print(f"[Lazy Init] Special tokens initialized (vocab_size={len(tok)})")
+        elif not register_tokens:
+            self._special_tokens_initialized = True
+            print(f"[Lazy Init] Skipped special token registration (register_special_tokens=False)")
 
     def _build_dynamic_chat_embeddings(self, B, batch, device, tok, embed_fn, PAD_ID):
         """
@@ -365,7 +410,6 @@ class SSL_LLM_PPATP(sb.Brain):
                 # 根据 prompt_format 选择格式
                 if hasattr(batch, "phn_list_canonical") and batch.phn_list_canonical is not None and len(batch.phn_list_canonical) > b:
                     can_phn_list = batch.phn_list_canonical[b]
-                    
                     if prompt_format == "statllm":
                         # ===== STATLLM 格式：穿插的 mispronunciation hints =====
                         if isinstance(can_phn_list, list) and len(can_phn_list) > 0:
@@ -393,11 +437,11 @@ class SSL_LLM_PPATP(sb.Brain):
                                     if idx < len(perc_phn_list) and perc_phn_list[idx] == phn:
                                         # 该位置相同，不添加alternatives
                                         should_add_alternatives = False
-                                
+
                                 if should_add_alternatives:
                                     if self.confusion_matrix and phn in self.confusion_matrix:
                                         confusions = self.confusion_matrix[phn].get("confusions", [])
-                                        for item in confusions[:4]:
+                                        for item in confusions:
                                             confused_phn = item.get("phoneme")
                                             if confused_phn and confused_phn != phn:
                                                 alternatives.append(confused_phn)
@@ -426,7 +470,7 @@ class SSL_LLM_PPATP(sb.Brain):
                             pp_context_lines.append(f"Canonical sequence: {can_phn_str}")
                         
                         if isinstance(can_phn_list, list):
-                            potential_pron = self.generate_potential_pronunciations(can_phn_list, top_k=5)
+                            potential_pron = self.generate_potential_pronunciations(can_phn_list, top_k=10)
                         else:
                             potential_pron = can_phn_str
                         pp_context_lines.append(f"Potential pronunciation: {potential_pron}")
@@ -445,23 +489,23 @@ class SSL_LLM_PPATP(sb.Brain):
             if prompt_format == "slam":
                 # ===== SLAM 格式：无额外上下文 =====
                 user_content += "\nTranscribe the preceding speech into phonemes."
-                user_content += "\nReturn in CMUdict format with spaces between phonemes."
+                user_content += "\nReturn in format with spaces between phonemes."
             elif pp_context_lines:
                 if prompt_format == "statllm":
                     user_content += "\nHere is what the speaker read and the canonical phoneme sequence with potential mispronunciation hints:\n"
                     user_content += "\n".join(pp_context_lines)
                     user_content += "\n\nPlease predict the actual phonemes the speaker pronounced."
-                    user_content += "\nReturn in CMUdict format with spaces between phonemes."
+                    user_content += "\nReturn in format with spaces between phonemes."
                 elif prompt_format == "ppatp":
                     user_content += "\nHere I give you what the speaker read and the canonical phonemes, as well each canonical phonemes's potential pronunciations.\n"
                     user_content += "\n".join(pp_context_lines)
                     user_content += "\nYou need to predict what phoneme the speaker is actually said, rather than the canonical ones."
-                    user_content += "\nReturn in CMUdict format with spaces between phonemes."
+                    user_content += "\nReturn in format with spaces between phonemes."
                 elif prompt_format == "atp":
                     user_content += "\nHere is what the speaker read and the canonical phoneme sequence:\n"
                     user_content += "\n".join(pp_context_lines)
                     user_content += "\n\nPlease predict the actual phonemes the speaker pronounced."
-                    user_content += "\nReturn in CMUdict format with spaces between phonemes."
+                    user_content += "\nReturn in format with spaces between phonemes."
             else:
                 user_content += "\nTranscribe the preceding speech into phonemes."
             
@@ -506,9 +550,10 @@ class SSL_LLM_PPATP(sb.Brain):
             prefix_lens.append(len(prefix_seq))
             suffix_lens.append(len(suffix_seq))
         
-        # ===== 6. Pad sequences到相同长度 (LEFT PADDING) =====
-        prefix_ids = self.pad_sequence_left(prefix_ids_list, batch_first=True, padding_value=PAD_ID)  # [B, L_prefix]
-        suffix_ids = self.pad_sequence_left(suffix_ids_list, batch_first=True, padding_value=PAD_ID)  # [B, L_suffix]
+        # ===== 6. Pad sequences到相同长度 =====
+        from torch.nn.utils.rnn import pad_sequence
+        prefix_ids = pad_sequence(prefix_ids_list, batch_first=True, padding_value=PAD_ID)  # [B, L_prefix]
+        suffix_ids = pad_sequence(suffix_ids_list, batch_first=True, padding_value=PAD_ID)  # [B, L_suffix]
         
         # 转换长度为tensor
         prefix_lens_tensor = torch.tensor(prefix_lens, dtype=torch.long, device=device)  # [B]
@@ -518,26 +563,176 @@ class SSL_LLM_PPATP(sb.Brain):
         prefix_embed = embed_fn(prefix_ids)  # [B, L_prefix, H]
         suffix_embed = embed_fn(suffix_ids)  # [B, L_suffix, H]
         
-        # ===== 8. Build attention mask for padding positions (LEFT PADDING) =====
-        # For left padding: padding is at the LEFT, so we mask [0:pad_len]
-        B, L_prefix_padded, H = prefix_embed.shape
-        _, L_suffix_padded, _ = suffix_embed.shape
+        return {
+            "prefix_embed": prefix_embed,
+            "suffix_embed": suffix_embed,
+            "prefix_lens_tensor": prefix_lens_tensor,
+            "suffix_lens_tensor": suffix_lens_tensor,
+            "prefix_ids": prefix_ids,
+            "suffix_ids": suffix_ids,
+        }
+
+    def _build_dynamic_chat_embeddings_inference(self, B, batch, device, tok, embed_fn, PAD_ID):
+        """
+        为推理阶段构建动态Chat embeddings，使用LEFT PADDING以确保生成位置一致性。
+        这是 _build_dynamic_chat_embeddings 的推理版本。
+        """
+        # 复用训练版本的逻辑，只修改 padding 方式
+        PLACEHOLDER = "<<<SPEECH_EMBEDDING_HERE>>>"
         
-        prefix_mask = torch.ones(B, L_prefix_padded, dtype=torch.long, device=device)
-        suffix_mask = torch.ones(B, L_suffix_padded, dtype=torch.long, device=device)
+        prefix_ids_list = []
+        suffix_ids_list = []
+        prefix_lens = []
+        suffix_lens = []
         
+        sample_prompt_logged = getattr(self, "_sample_prompt_logged_inference", False)
         for b in range(B):
-            actual_prefix_len = prefix_lens_tensor[b].item()
-            pad_len_prefix = L_prefix_padded - actual_prefix_len
-            if pad_len_prefix > 0:
-                # Mask LEFT padding positions
-                prefix_mask[b, :pad_len_prefix] = 0
+            user_content = f"{PLACEHOLDER}"
+            pp_context_lines = []
             
-            actual_suffix_len = suffix_lens_tensor[b].item()
-            pad_len_suffix = L_suffix_padded - actual_suffix_len
-            if pad_len_suffix > 0:
-                # Mask LEFT padding positions
-                suffix_mask[b, :pad_len_suffix] = 0
+            prompt_format = getattr(self.hparams, "prompt_format", "statllm")
+            
+            if prompt_format != "slam":
+                include_wrd = getattr(self.hparams, "include_wrd_in_prompt", True)
+                if include_wrd and hasattr(batch, "wrd") and batch.wrd is not None and len(batch.wrd) > b:
+                    if isinstance(batch.wrd[b], list):
+                        words_str = " ".join(batch.wrd[b])
+                    else:
+                        words_str = str(batch.wrd[b])
+                    pp_context_lines.append(f"Word: {words_str}")
+                
+                if hasattr(batch, "phn_list_canonical") and batch.phn_list_canonical is not None and len(batch.phn_list_canonical) > b:
+                    can_phn_list = batch.phn_list_canonical[b]
+                    if prompt_format == "statllm":
+                        if isinstance(can_phn_list, list) and len(can_phn_list) > 0:
+                            interleaved_phonemes = []
+                            statllm_mode = getattr(self.hparams, "statllm_mode", "standard")
+                            
+                            perc_phn_list = None
+                            if statllm_mode == "err_pos_aware" and hasattr(batch, "phn_list_perceived") and batch.phn_list_perceived is not None and len(batch.phn_list_perceived) > b:
+                                perc_phn_list = batch.phn_list_perceived[b]
+                                if not isinstance(perc_phn_list, list):
+                                    perc_phn_list = [perc_phn_list]
+                            
+                            for idx, phn in enumerate(can_phn_list):
+                                phoneme_str = phn
+                                alternatives = []
+                                
+                                should_add_alternatives = True
+                                if statllm_mode == "err_pos_aware" and perc_phn_list is not None:
+                                    if idx < len(perc_phn_list) and perc_phn_list[idx] == phn:
+                                        should_add_alternatives = False
+                                
+                                if should_add_alternatives:
+                                    if self.confusion_matrix and phn in self.confusion_matrix:
+                                        confusions = self.confusion_matrix[phn].get("confusions", [])
+                                        for item in confusions:
+                                            confused_phn = item.get("phoneme")
+                                            if confused_phn and confused_phn != phn:
+                                                alternatives.append(confused_phn)
+                                
+                                if alternatives:
+                                    phoneme_str += f" ({', '.join(alternatives)})"
+                                interleaved_phonemes.append(phoneme_str)
+                            
+                            canonical_str = " ".join(interleaved_phonemes)
+                            pp_context_lines.append(f"Canonical sequence: {canonical_str}")
+                            if self.show_canonical_phn_length:
+                                pp_context_lines.append(f"Length: {len(can_phn_list)} phonemes")
+                        else:
+                            can_phn_str = " ".join(can_phn_list) if isinstance(can_phn_list, list) else str(can_phn_list)
+                            pp_context_lines.append(f"Canonical sequence: {can_phn_str}")
+                    
+                    elif prompt_format == "ppatp":
+                        can_phn_str = " ".join(can_phn_list) if isinstance(can_phn_list, list) else str(can_phn_list)
+                        can_phn_len = len(can_phn_list) if isinstance(can_phn_list, list) else 1
+                        
+                        if self.show_canonical_phn_length:
+                            pp_context_lines.append(f"Canonical sequence (length={can_phn_len}): {can_phn_str}")
+                        else:
+                            pp_context_lines.append(f"Canonical sequence: {can_phn_str}")
+                        
+                        if isinstance(can_phn_list, list):
+                            potential_pron = self.generate_potential_pronunciations(can_phn_list, top_k=10)
+                        else:
+                            potential_pron = can_phn_str
+                        pp_context_lines.append(f"Potential pronunciation: {potential_pron}")
+                    
+                    elif prompt_format == "atp":
+                        can_phn_str = " ".join(can_phn_list) if isinstance(can_phn_list, list) else str(can_phn_list)
+                        can_phn_len = len(can_phn_list) if isinstance(can_phn_list, list) else 1
+                        
+                        if self.show_canonical_phn_length:
+                            pp_context_lines.append(f"Canonical sequence (length={can_phn_len}): {can_phn_str}")
+                        else:
+                            pp_context_lines.append(f"Canonical sequence: {can_phn_str}")
+            
+            if prompt_format == "slam":
+                user_content += "\nTranscribe the preceding speech into phonemes."
+                user_content += "\nReturn in format with spaces between phonemes. Don't include any additional explanations."
+            elif pp_context_lines:
+                if prompt_format == "statllm":
+                    user_content += "\nHere is what the speaker read and the canonical phoneme sequence with potential mispronunciation hints:\n"
+                    user_content += "\n".join(pp_context_lines)
+                    user_content += "\n\nPlease predict the actual phonemes the speaker pronounced."
+                    user_content += "\nReturn in format with spaces between phonemes. Don't include any additional explanations."
+                elif prompt_format == "ppatp":
+                    user_content += "\nHere I give you what the speaker read and the canonical phonemes, as well each canonical phonemes's potential pronunciations.\n"
+                    user_content += "\n".join(pp_context_lines)
+                    user_content += "\nYou need to predict what phoneme the speaker is actually said, rather than the canonical ones."
+                    user_content += "\nReturn in format with spaces between phonemes. Don't include any additional explanations."
+                elif prompt_format == "atp":
+                    user_content += "\nHere is what the speaker read and the canonical phoneme sequence:\n"
+                    user_content += "\n".join(pp_context_lines)
+                    user_content += "\n\nPlease predict the actual phonemes the speaker pronounced."
+                    user_content += "\nReturn in format with spaces between phonemes. Don't include any additional explanations."
+            else:
+                user_content += "\nTranscribe the preceding speech into phonemes. Don't include any additional explanations."
+            
+            if b == 0 and not sample_prompt_logged:
+                logger.info("=" * 80)
+                logger.info(f"[Inference with LEFT PADDING] [Prompt Format: {prompt_format.upper()}] Sample user content:")
+                logger.info("-" * 80)
+                logger.info(user_content.replace(PLACEHOLDER, "[SPEECH_AUDIO]"))
+                logger.info("=" * 80)
+                self._sample_prompt_logged_inference = True
+            
+            chat_structure = [
+                {"role": "system", "content": "You are a phoneme transcriber."},
+                {"role": "user", "content": user_content}
+            ]
+            
+            full_prompt_str = tok.apply_chat_template(
+                chat_structure,
+                tokenize=False,
+                add_generation_prompt=True
+            )
+            
+            if PLACEHOLDER not in full_prompt_str:
+                raise ValueError("Chat template processing removed the placeholder!")
+            
+            prefix_str, suffix_str = full_prompt_str.split(PLACEHOLDER)
+            
+            prefix_tokens = tok(prefix_str, return_tensors="pt", add_special_tokens=False).to(device)
+            suffix_tokens = tok(suffix_str, return_tensors="pt", add_special_tokens=False).to(device)
+            
+            prefix_seq = prefix_tokens["input_ids"].squeeze(0)
+            suffix_seq = suffix_tokens["input_ids"].squeeze(0)
+            
+            prefix_ids_list.append(prefix_seq)
+            suffix_ids_list.append(suffix_seq)
+            prefix_lens.append(len(prefix_seq))
+            suffix_lens.append(len(suffix_seq))
+        
+        # 关键修改：使用 LEFT PADDING
+        prefix_ids = pad_sequence_left(prefix_ids_list, batch_first=True, padding_value=PAD_ID)
+        suffix_ids = pad_sequence_left(suffix_ids_list, batch_first=True, padding_value=PAD_ID)
+        
+        prefix_lens_tensor = torch.tensor(prefix_lens, dtype=torch.long, device=device)
+        suffix_lens_tensor = torch.tensor(suffix_lens, dtype=torch.long, device=device)
+        
+        prefix_embed = embed_fn(prefix_ids)
+        suffix_embed = embed_fn(suffix_ids)
         
         return {
             "prefix_embed": prefix_embed,
@@ -546,8 +741,385 @@ class SSL_LLM_PPATP(sb.Brain):
             "suffix_lens_tensor": suffix_lens_tensor,
             "prefix_ids": prefix_ids,
             "suffix_ids": suffix_ids,
-            "prefix_mask": prefix_mask,  # [B, L_prefix]
-            "suffix_mask": suffix_mask,  # [B, L_suffix]
+        }
+
+    def _parse_cot_output(self, generated_text):
+        """
+        解析 Qwen 原生 CoT 格式输出，提取结构化字段。
+        
+        期望格式（Qwen 原生）：
+        <think>
+        Step 1: Identify the intended word
+        INTENT_WORD: كِتَابٌ
+        
+        Step 2: Get canonical phoneme sequence
+        CANONICAL_PHONEME: k i t aa b u n
+        
+        Step 3: Analyze each phoneme for errors
+        ERROR_ANALYSIS: C C C S C C C
+        </think>
+        
+        k i t aa b u n
+        
+        Args:
+            generated_text: LLM 生成的完整文本字符串
+            
+        Returns:
+            dict: {
+                "intent_word": str,
+                "canonical_phoneme": str,
+                "error_analysis": str,
+                "phoneme_real": str,
+                "think_content": str,
+                "raw_output": str  # 原始输出，用于调试
+            }
+        """
+        import re
+        
+        result = {
+            "intent_word": "",
+            "canonical_phoneme": "",
+            "error_analysis": "",
+            "phoneme_real": "",
+            "think_content": "",
+            "raw_output": generated_text
+        }
+        
+        # 提取 <think> 内容
+        think_match = re.search(r"<think>\s*(.+?)\s*</think>", generated_text, re.DOTALL | re.IGNORECASE)
+        if think_match:
+            think_content = think_match.group(1)
+            result["think_content"] = think_content
+            
+            # 从 <think> 中提取各个字段
+            patterns = {
+                "intent_word": r"INTENT[_\s]*WORD:\s*(.+?)(?=\n|$)",
+                "canonical_phoneme": r"CANONICAL[_\s]*PHONEME:\s*(.+?)(?=\n|$)",
+                "error_analysis": r"ERROR[_\s]*ANALYSIS:\s*(.+?)(?=\n|$)"
+            }
+            
+            for field, pattern in patterns.items():
+                match = re.search(pattern, think_content, re.IGNORECASE)
+                if match:
+                    result[field] = match.group(1).strip()
+        
+        # 提取 </think> 之后的内容（Qwen 原生格式）
+        # </think> 后面直接是最终的音素序列
+        think_split = re.split(r"</think>", generated_text, flags=re.IGNORECASE)
+        if len(think_split) > 1:
+            after_think = think_split[1].strip()
+            # 提取第一行或第一个音素序列
+            lines = after_think.split('\n')
+            for line in lines:
+                line = line.strip()
+                if line and not line.startswith('<'):
+                    # 检查是否看起来像音素序列
+                    if re.match(r"^[a-z]{1,3}(?:\s+[a-z]{1,3})+$", line.lower()):
+                        result["phoneme_real"] = line
+                        break
+        
+        # 如果还没找到，尝试直接提取音素序列（容错）
+        if not result["phoneme_real"]:
+            phoneme_match = re.search(r"\b([a-z]{1,3}(?:\s+[a-z]{1,3}){2,})\b", generated_text.lower())
+            if phoneme_match:
+                result["phoneme_real"] = phoneme_match.group(1)
+        
+        return result
+
+    def _build_cot_training_target(self, batch, B):
+        """
+        构建 Qwen 原生 CoT 格式训练目标。
+        
+        格式（符合 Qwen chat template）：
+        <think>
+        Step 1: Identify the intended word
+        INTENT_WORD: 目标单词/句子
+        
+        Step 2: Get canonical phoneme sequence
+        CANONICAL_PHONEME: canonical 音素序列
+        
+        Step 3: Analyze each phoneme for errors
+        ERROR_ANALYSIS: phoneme-level 错误分析 (C/S/D/I 标签)
+        </think>
+        
+        实际发音的音素序列
+        
+        Args:
+            batch: 包含 wrd, phn_list_canonical, phn_list_perceived 的 batch
+            B: Batch size
+            
+        Returns:
+            list[str]: B 个 CoT 格式的目标字符串
+        """
+        cot_targets = []
+        
+        for b in range(B):
+            # 获取数据
+            wrd = batch.wrd[b] if hasattr(batch, "wrd") and batch.wrd is not None else "Unknown"
+            canonical = batch.phn_list_canonical[b] if hasattr(batch, "phn_list_canonical") else []
+            perceived = batch.phn_list_perceived[b] if hasattr(batch, "phn_list_perceived") else []
+            
+            # 转换为字符串
+            if isinstance(wrd, list):
+                wrd_str = " ".join(wrd)
+            else:
+                wrd_str = str(wrd)
+            
+            if isinstance(canonical, list):
+                canonical_str = " ".join(canonical)
+            else:
+                canonical_str = str(canonical)
+            
+            if isinstance(perceived, list):
+                perceived_str = " ".join(perceived)
+            else:
+                perceived_str = str(perceived)
+            
+            # Phoneme-level 错误分析
+            error_analysis = []
+            error_stats = {"correct": 0, "substitution": 0, "deletion": 0, "insertion": 0}
+            
+            if isinstance(canonical, list) and isinstance(perceived, list):
+                # 简单对齐：逐个比较（可以扩展为编辑距离对齐）
+                max_len = max(len(canonical), len(perceived))
+                
+                for idx in range(max_len):
+                    if idx < len(canonical) and idx < len(perceived):
+                        if canonical[idx] == perceived[idx]:
+                            error_analysis.append("C")  # Correct
+                            error_stats["correct"] += 1
+                        else:
+                            error_analysis.append("S")  # Substitution
+                            error_stats["substitution"] += 1
+                    elif idx < len(canonical):
+                        # Canonical 有但 perceived 没有 → Deletion
+                        error_analysis.append("D")
+                        error_stats["deletion"] += 1
+                    else:
+                        # Perceived 有但 canonical 没有 → Insertion
+                        error_analysis.append("I")
+                        error_stats["insertion"] += 1
+                
+                error_analysis_str = " ".join(error_analysis)
+            else:
+                error_analysis_str = "Unknown"
+            
+            # 构建 DECISION（错误统计）
+            total_errors = error_stats["substitution"] + error_stats["deletion"] + error_stats["insertion"]
+            if total_errors == 0:
+                decision = "All correct"
+            else:
+                decision_parts = []
+                if error_stats["substitution"] > 0:
+                    decision_parts.append(f"{error_stats['substitution']} substitution(s)")
+                if error_stats["deletion"] > 0:
+                    decision_parts.append(f"{error_stats['deletion']} deletion(s)")
+                if error_stats["insertion"] > 0:
+                    decision_parts.append(f"{error_stats['insertion']} insertion(s)")
+                decision = ", ".join(decision_parts)
+            
+            # 构建 Qwen 原生 CoT 格式目标
+            cot_target = "<think>\n"
+            cot_target += "Step 1: Identify the intended word\n"
+            cot_target += f"INTENT_WORD: {wrd_str}\n\n"
+            cot_target += "Step 2: Get canonical phoneme sequence\n"
+            cot_target += f"CANONICAL_PHONEME: {canonical_str}\n\n"
+            cot_target += "Step 3: Analyze each phoneme for errors\n"
+            cot_target += f"ERROR_ANALYSIS: {error_analysis_str}\n"
+            cot_target += "</think>\n\n"
+            cot_target += perceived_str  # Qwen 原生格式：</think> 之后直接输出
+            
+            cot_targets.append(cot_target)
+        
+        return cot_targets
+
+    def _build_cot_chat_embeddings(self, B, batch, device, tok, embed_fn, PAD_ID):
+        """
+        为 Chain-of-Thought 推理构建 prompt embeddings（Qwen 原生格式）。
+        
+        与 _build_dynamic_chat_embeddings 不同，这个函数：
+        1. 不包含 word、canonical phoneme 等上下文信息
+        2. 引导模型进行结构化的分步推理
+        3. 使用 Qwen 原生 CoT 格式：<think>推理过程</think> 直接输出答案
+        
+        Args:
+            B: Batch size
+            batch: 原始batch数据（这里主要用于获取 utterance ID，不使用 target 信息）
+            device: 计算设备
+            tok: LLM tokenizer
+            embed_fn: Token embedding函数
+            PAD_ID: Padding token ID
+            
+        Returns:
+            dict: {
+                "prefix_embed": [B, L_prefix, H],
+                "suffix_embed": [B, L_suffix, H],
+                "prefix_lens_tensor": [B],
+                "suffix_lens_tensor": [B],
+                "prefix_ids": [B, L_prefix],
+                "suffix_ids": [B, L_suffix]
+            }
+        """
+        PLACEHOLDER = "<<<SPEECH_EMBEDDING_HERE>>>"
+        
+        prefix_ids_list = []
+        suffix_ids_list = []
+        prefix_lens = []
+        suffix_lens = []
+        
+        # 日志记录标志
+        cot_prompt_logged = getattr(self, "_cot_prompt_logged", False)
+        
+        for b in range(B):
+            # ===== 构建 CoT user content =====
+            # 简化的指令：只有 audio 和基础的推理引导
+            user_content = f"{PLACEHOLDER}\n\n"
+            user_content += "Analyze the speech audio step by step:\n\n"
+            user_content += "Return in structured format:\n"
+            user_content += "<think>\n"
+            user_content += "Step 1: Identify the intended word\n"
+            user_content += "INTENT_WORD: <intended word or sentence>\n\n"
+            user_content += "Step 2: Get canonical phoneme sequence\n"
+            user_content += "CANONICAL_PHONEME: <canonical phoneme sequence>\n\n"
+            user_content += "Step 3: Analyze each phoneme for errors\n"
+            user_content += "ERROR_ANALYSIS: <C for correct, S for substitution, D for deletion, I for insertion>\n"
+            user_content += "</think>\n\n"
+            user_content += "<actual phonemes pronounced, space-separated>"
+            
+            # 日志记录：仅在第一次输出示例 prompt
+            if b == 0 and not cot_prompt_logged:
+                logger.info("=" * 80)
+                logger.info("[CoT Mode] Sample user content:")
+                logger.info("-" * 80)
+                logger.info(user_content.replace(PLACEHOLDER, "[SPEECH_AUDIO]"))
+                logger.info("=" * 80)
+                self._cot_prompt_logged = True
+            
+            # ===== 构建 chat 结构 =====
+            chat_structure = [
+                {
+                    "role": "system",
+                    "content": "You are an expert in pronunciation error detection. Analyze audio carefully to identify mispronunciations."
+                },
+                {
+                    "role": "user",
+                    "content": user_content
+                }
+            ]
+            
+            # ===== 应用 chat template =====
+            full_prompt_str = tok.apply_chat_template(
+                chat_structure,
+                tokenize=False,
+                add_generation_prompt=True
+            )
+            
+            if PLACEHOLDER not in full_prompt_str:
+                raise ValueError("Chat template processing removed the placeholder!")
+            
+            # ===== 分割 prefix 和 suffix =====
+            prefix_str, suffix_str = full_prompt_str.split(PLACEHOLDER)
+            
+            # ===== Tokenize =====
+            prefix_tokens = tok(prefix_str, return_tensors="pt", add_special_tokens=False).to(device)
+            suffix_tokens = tok(suffix_str, return_tensors="pt", add_special_tokens=False).to(device)
+            
+            prefix_seq = prefix_tokens["input_ids"].squeeze(0)
+            suffix_seq = suffix_tokens["input_ids"].squeeze(0)
+            
+            prefix_ids_list.append(prefix_seq)
+            suffix_ids_list.append(suffix_seq)
+            prefix_lens.append(len(prefix_seq))
+            suffix_lens.append(len(suffix_seq))
+        
+        # ===== Pad sequences =====
+        from torch.nn.utils.rnn import pad_sequence
+        prefix_ids = pad_sequence(prefix_ids_list, batch_first=True, padding_value=PAD_ID)
+        suffix_ids = pad_sequence(suffix_ids_list, batch_first=True, padding_value=PAD_ID)
+        
+        prefix_lens_tensor = torch.tensor(prefix_lens, dtype=torch.long, device=device)
+        suffix_lens_tensor = torch.tensor(suffix_lens, dtype=torch.long, device=device)
+        
+        # ===== Embed =====
+        prefix_embed = embed_fn(prefix_ids)
+        suffix_embed = embed_fn(suffix_ids)
+        
+        return {
+            "prefix_embed": prefix_embed,
+            "suffix_embed": suffix_embed,
+            "prefix_lens_tensor": prefix_lens_tensor,
+            "suffix_lens_tensor": suffix_lens_tensor,
+            "prefix_ids": prefix_ids,
+            "suffix_ids": suffix_ids,
+        }
+
+    def _build_cot_chat_embeddings_inference(self, B, batch, device, tok, embed_fn, PAD_ID):
+        """
+        为 CoT 推理阶段构建 prompt embeddings，使用LEFT PADDING。
+        这是 _build_cot_chat_embeddings 的推理版本。
+        """
+        PLACEHOLDER = "<<<SPEECH_EMBEDDING_HERE>>>"
+        
+        prefix_ids_list = []
+        suffix_ids_list = []
+        prefix_lens = []
+        suffix_lens = []
+        
+        for b in range(B):
+            user_content = f"{PLACEHOLDER}\n\n"
+            user_content += "Please analyze the speech step by step:\n"
+            user_content += "1. First, carefully listen to the pronunciation\n"
+            user_content += "2. Then, predict the phoneme sequence the speaker actually produced\n\n"
+            user_content += "Format your response as:\n"
+            user_content += "<think>\n"
+            user_content += "[Your analysis here]\n"
+            user_content += "</think>\n"
+            user_content += "[Predicted phoneme sequence with spaces between phonemes]"
+            
+            chat_structure = [
+                {"role": "system", "content": "You are an expert phonetician and speech analyst."},
+                {"role": "user", "content": user_content}
+            ]
+            
+            full_prompt_str = tok.apply_chat_template(
+                chat_structure,
+                tokenize=False,
+                add_generation_prompt=True
+            )
+            
+            if PLACEHOLDER not in full_prompt_str:
+                raise ValueError("Chat template processing removed the placeholder!")
+            
+            prefix_str, suffix_str = full_prompt_str.split(PLACEHOLDER)
+            
+            prefix_tokens = tok(prefix_str, return_tensors="pt", add_special_tokens=False).to(device)
+            suffix_tokens = tok(suffix_str, return_tensors="pt", add_special_tokens=False).to(device)
+            
+            prefix_seq = prefix_tokens["input_ids"].squeeze(0)
+            suffix_seq = suffix_tokens["input_ids"].squeeze(0)
+            
+            prefix_ids_list.append(prefix_seq)
+            suffix_ids_list.append(suffix_seq)
+            prefix_lens.append(len(prefix_seq))
+            suffix_lens.append(len(suffix_seq))
+        
+        # 关键修改：使用 LEFT PADDING
+        prefix_ids = pad_sequence_left(prefix_ids_list, batch_first=True, padding_value=PAD_ID)
+        suffix_ids = pad_sequence_left(suffix_ids_list, batch_first=True, padding_value=PAD_ID)
+        
+        prefix_lens_tensor = torch.tensor(prefix_lens, dtype=torch.long, device=device)
+        suffix_lens_tensor = torch.tensor(suffix_lens, dtype=torch.long, device=device)
+        
+        prefix_embed = embed_fn(prefix_ids)
+        suffix_embed = embed_fn(suffix_ids)
+        
+        return {
+            "prefix_embed": prefix_embed,
+            "suffix_embed": suffix_embed,
+            "prefix_lens_tensor": prefix_lens_tensor,
+            "suffix_lens_tensor": suffix_lens_tensor,
+            "prefix_ids": prefix_ids,
+            "suffix_ids": suffix_ids,
         }
 
     def _build_input_embeddings(self, B, Z, phn_embed, SEP_embed, BOS_embed, EOS_embed, 
@@ -670,12 +1242,48 @@ class SSL_LLM_PPATP(sb.Brain):
         embed_fn = self.modules.LLM.get_input_embeddings()
         
         # ===== Tokenize phoneme sequences =====
-        if self.hparams.training_target == "target":
-            phn_list_to_use = batch.phn_list_target
-        elif self.hparams.training_target == "perceived":
-            phn_list_to_use = batch.phn_list_perceived
-        phn_seq = phn_list_to_seq(phn_list_to_use)
-        phn_tokens = tok(phn_seq, return_tensors="pt", padding=True, add_special_tokens=False).to(device)
+        # 检查是否使用 CoT 训练模式
+        use_cot_training = getattr(self.hparams, "use_cot_training", False) and stage == sb.Stage.TRAIN
+        cot_training_prob = getattr(self.hparams, "cot_training_prob", 1.0)  # 默认 100% 使用 CoT
+        
+        # 根据概率决定是否使用 CoT
+        if use_cot_training and torch.rand(1).item() < cot_training_prob:
+            # CoT 训练模式：生成结构化的 CoT 目标
+            cot_targets = self._build_cot_training_target(batch, B)
+            phn_seq = cot_targets  # 直接使用 CoT 格式的字符串列表
+            phn_tokens = tok(phn_seq, return_tensors="pt", padding=True, add_special_tokens=False).to(device)
+            using_cot_format = True
+            
+            # 监控 CoT 训练目标（每50步输出一次第一个样本）
+            if not hasattr(self, "_cot_monitor_step"):
+                self._cot_monitor_step = 0
+            self._cot_monitor_step += 1
+            # pdb.set_trace()
+            
+            if self._cot_monitor_step % 50 == 0:
+                logger.info("=" * 80)
+                logger.info(f"[CoT Training Monitor] Step {self._cot_monitor_step}")
+                logger.info("-" * 80)
+                logger.info(f"Sample ID: {batch.id[0]}")
+                logger.info(f"Full CoT Target:\n{cot_targets[0]}")
+                logger.info("-" * 80)
+                # 提取并显示 <think> 部分
+                think_match = re.search(r"<think>\s*(.+?)\s*</think>", cot_targets[0], re.DOTALL)
+                if think_match:
+                    logger.info(f"Reasoning Process (<think>):\n{think_match.group(1)}")
+                    # 提取 </think> 之后的内容作为预期输出
+                    after_think = cot_targets[0].split("</think>")[1].strip()
+                    logger.info(f"\nExpected Final Output: {after_think}")
+                logger.info("=" * 80)
+        else:
+            # 标准训练模式：使用音素序列
+            if self.hparams.training_target == "target":
+                phn_list_to_use = batch.phn_list_target
+            elif self.hparams.training_target == "perceived":
+                phn_list_to_use = batch.phn_list_perceived
+            phn_seq = phn_list_to_seq(phn_list_to_use)
+            phn_tokens = tok(phn_seq, return_tensors="pt", padding=True, add_special_tokens=False).to(device)
+            using_cot_format = False
         # phn_tokens["input_ids"]: [B, L_phn]
         # phn_tokens["attention_mask"]: [B, L_phn]
         # tok.batch_decode(phn_tokens["input_ids"], skip_special_tokens=False)
@@ -685,14 +1293,12 @@ class SSL_LLM_PPATP(sb.Brain):
         L_phn = phn_ids.size(1)
         
         # ===== Prepare special tokens =====
-        BOS_ID = tok.bos_token_id
+        # Note: Special tokens are registered in _ensure_initialized() to avoid mismatch
+        # For loading old checkpoints without token registration, use fallback values
+        BOS_ID = tok.bos_token_id if tok.bos_token_id is not None else tok.eos_token_id
         EOS_ID = tok.eos_token_id
         PAD_ID = tok.pad_token_id if tok.pad_token_id is not None else 0
-        
-        # SEP token (use reserved special token if not defined)
-        if tok.sep_token is None or tok.sep_token_id is None:
-            tok.sep_token = "<|reserved_special_token_0|>"
-        SEP_ID = tok.sep_token_id
+        SEP_ID = tok.sep_token_id if tok.sep_token_id is not None else tok.eos_token_id
         
         def col_tokens(tok_id):
             """Create [B, 1] tensor of token ID"""
@@ -750,8 +1356,6 @@ class SSL_LLM_PPATP(sb.Brain):
             actual_suffix_lens = result["suffix_lens_tensor"]
             self.prefix_ids = result["prefix_ids"]
             self.suffix_ids = result["suffix_ids"]
-            self.prefix_mask = result.get("prefix_mask")  # [B, L_prefix] for left-padding
-            self.suffix_mask = result.get("suffix_mask")  # [B, L_suffix] for left-padding
         
         # ===== Build input embedding sequence =====
         inputs_embeds = self._build_input_embeddings(
@@ -785,23 +1389,30 @@ class SSL_LLM_PPATP(sb.Brain):
             attention_mask = torch.ones(B, seq_len, dtype=torch.long, device=device)
             
             if has_split_prompt:
-                # For split prompt with LEFT PADDING: [prefix_padded] [speech] [suffix_padded] [phn] [EOS]
-                # Padding is on the LEFT, so mask [0:pad_len]
+                # For split prompt: [prefix_padded] [speech] [suffix_padded] [phn] [EOS]
+                # Need to mask padding in prefix, suffix, and phonemes
                 L_prefix_padded = self.prefix_ids.size(1)
                 L_suffix_padded = self.suffix_ids.size(1)
                 
-                # Use the masks computed during embedding
-                prefix_mask = self.prefix_mask  # [B, L_prefix]
-                suffix_mask = self.suffix_mask  # [B, L_suffix]
-                
-                # Assign prefix mask
-                attention_mask[:, :L_prefix_padded] = prefix_mask
-                
-                # Speech is always valid
-                
-                # Assign suffix mask (with offset)
-                suffix_start = L_prefix_padded + Ts
-                attention_mask[:, suffix_start:suffix_start + L_suffix_padded] = suffix_mask
+                for b in range(B):
+                    # Mask prefix padding
+                    actual_prefix_len = actual_prefix_lens[b].item()
+                    if actual_prefix_len < L_prefix_padded:
+                        attention_mask[b, actual_prefix_len:L_prefix_padded] = 0
+                    
+                    # Speech is always valid (no masking needed)
+                    
+                    # Mask suffix padding
+                    suffix_start = L_prefix_padded + Ts
+                    actual_suffix_len = actual_suffix_lens[b].item()
+                    if actual_suffix_len < L_suffix_padded:
+                        attention_mask[b, suffix_start + actual_suffix_len:suffix_start + L_suffix_padded] = 0
+                    
+                    # Mask phoneme padding
+                    text_start = suffix_start + L_suffix_padded
+                    num_phn = int(phn_mask[b].sum().item())
+                    if num_phn < L_phn:
+                        attention_mask[b, text_start + num_phn + 1:] = 0
             else:
                 # Mask out padding in phoneme sequence
                 # Sequence: [prompt(P)] [SEP(1)] [speech(Ts)] [BOS(1)] [phn(L_phn)] [EOS(1)]
@@ -873,12 +1484,16 @@ class SSL_LLM_PPATP(sb.Brain):
                 return_dict=True,
             )
             # llm_out.logits: [B, seq_len, 128000]
-            # pdb.set_trace()
             loss = llm_out.loss  # CrossEntropyLoss if labels provided
             # logger.info(f"LLM Loss: {loss.item():.4f}")
             # pdb.set_trace()
             # pdb.set_trace()
             ce_logits = llm_out.logits
+            # decode_logits = llm_out.logits.argmax(dim=-1)
+            # for b in range(B):
+            #     decoded_seq = tok.decode(decode_logits[b], skip_special_tokens=False)
+            #     target_seq = tok.decode(labels_noshift[b][labels_noshift[b] != ignore_idx].tolist(), skip_special_tokens=False)
+            #     print(f"[DEBUG]
             
             # Debug: verify causal masking (only run once)
             if not hasattr(self, '_causal_check_done'):
@@ -886,6 +1501,15 @@ class SSL_LLM_PPATP(sb.Brain):
                 print(f"[INFO] LLM should use causal attention by default")
                 print(f"[INFO] Logits shape: {ce_logits.shape}")
                 self._causal_check_done = True
+            
+            # 记录 CoT 训练示例（仅第一次）
+            if using_cot_format and not hasattr(self, '_cot_training_logged'):
+                logger.info("=" * 80)
+                logger.info("[CoT Training] Sample target:")
+                logger.info("-" * 80)
+                logger.info(phn_seq[0])  # 显示第一个样本的 CoT 目标
+                logger.info("=" * 80)
+                self._cot_training_logged = True
 
             return p_ctc, ce_logits, {"labels": labels}, wav_lens
         
@@ -899,22 +1523,27 @@ class SSL_LLM_PPATP(sb.Brain):
                 attention_mask = torch.ones(B, seq_len, dtype=torch.long, device=device)
                 
                 if has_split_prompt:
-                    # For split prompt with LEFT PADDING: [prefix_padded] [speech] [suffix_padded] [phn] [EOS]
+                    # For split prompt with variable-length prefix/suffix
                     L_prefix_padded = self.prefix_ids.size(1)
                     L_suffix_padded = self.suffix_ids.size(1)
                     
-                    # Use the masks computed during embedding
-                    prefix_mask = self.prefix_mask  # [B, L_prefix]
-                    suffix_mask = self.suffix_mask  # [B, L_suffix]
-                    
-                    # Assign prefix mask
-                    attention_mask[:, :L_prefix_padded] = prefix_mask
-                    
-                    # Speech is always valid
-                    
-                    # Assign suffix mask (with offset)
-                    suffix_start = L_prefix_padded + Ts
-                    attention_mask[:, suffix_start:suffix_start + L_suffix_padded] = suffix_mask
+                    for b in range(B):
+                        # Mask prefix padding
+                        actual_prefix_len = actual_prefix_lens[b].item()
+                        if actual_prefix_len < L_prefix_padded:
+                            attention_mask[b, actual_prefix_len:L_prefix_padded] = 0
+                        
+                        # Mask suffix padding
+                        suffix_start = L_prefix_padded + Ts
+                        actual_suffix_len = actual_suffix_lens[b].item()
+                        if actual_suffix_len < L_suffix_padded:
+                            attention_mask[b, suffix_start + actual_suffix_len:suffix_start + L_suffix_padded] = 0
+                        
+                        # Mask phoneme padding
+                        text_start = suffix_start + L_suffix_padded
+                        num_phn = int(phn_mask[b].sum().item())
+                        if num_phn < L_phn:
+                            attention_mask[b, text_start + num_phn + 1:] = 0
                 else:
                     # Mask out padding in phoneme sequence
                     # Sequence: [prompt(P)] [SEP(1)] [speech(Ts)] [BOS(1)] [phn(L_phn)] [EOS(1)]
@@ -972,27 +1601,46 @@ class SSL_LLM_PPATP(sb.Brain):
                 # Model generates: [phn[0]] [phn[1]] ... [EOS]
                 
                 if has_split_prompt:
-                    # Use the enhanced prefix and suffix embeddings from training
-                    # These already have sample-specific PP context and LEFT PADDING
+                    # 推理阶段：使用 LEFT PADDING 版本重新构建 embeddings
+                    result_inference = self._build_dynamic_chat_embeddings_inference(
+                        B=B, 
+                        batch=batch, 
+                        device=device, 
+                        tok=self.hparams.LLM_tokenizer,
+                        embed_fn=embed_fn,
+                        PAD_ID=PAD_ID
+                    )
+                    prefix_embed_inf = result_inference["prefix_embed"]
+                    suffix_embed_inf = result_inference["suffix_embed"]
+                    actual_prefix_lens_inf = result_inference["prefix_lens_tensor"]
+                    actual_suffix_lens_inf = result_inference["suffix_lens_tensor"]
+                    prefix_ids_inf = result_inference["prefix_ids"]
+                    suffix_ids_inf = result_inference["suffix_ids"]
+                    
                     inputs_embeds_inference = torch.cat([
-                        prefix_embed,  # [B, L_prefix, H] (already padded and embedded)
-                        Z,             # [B, Ts, H]
-                        suffix_embed_enhanced   # [B, L_suffix, H] (already padded and embedded)
+                        prefix_embed_inf,  # [B, L_prefix, H] (LEFT padded)
+                        Z,                 # [B, Ts, H]
+                        suffix_embed_inf   # [B, L_suffix, H] (LEFT padded)
                     ], dim=1)
                     
-                    # Build attention mask for inference using the computed masks
+                    # Build attention mask for LEFT padding
                     attention_mask_inference = torch.ones(B, inputs_embeds_inference.size(1), dtype=torch.long, device=device)
-                    L_prefix_padded = self.prefix_ids.size(1)
-                    L_suffix_padded = self.suffix_ids.size(1)
+                    L_prefix_padded = prefix_ids_inf.size(1)
+                    L_suffix_padded = suffix_ids_inf.size(1)
                     
-                    # Apply prefix mask (already handles LEFT PADDING)
-                    prefix_mask = self.prefix_mask  # [B, L_prefix]
-                    attention_mask_inference[:, :L_prefix_padded] = prefix_mask
-                    
-                    # Apply suffix mask (already handles LEFT PADDING)
-                    suffix_mask = self.suffix_mask  # [B, L_suffix]
-                    suffix_start = L_prefix_padded + Ts
-                    attention_mask_inference[:, suffix_start:suffix_start + L_suffix_padded] = suffix_mask
+                    for b in range(B):
+                        # Mask prefix padding (LEFT padding: mask 左侧)
+                        actual_prefix_len = actual_prefix_lens_inf[b].item()
+                        pad_len_prefix = L_prefix_padded - actual_prefix_len
+                        if pad_len_prefix > 0:
+                            attention_mask_inference[b, :pad_len_prefix] = 0
+                        
+                        # Mask suffix padding (LEFT padding: mask 左侧)
+                        suffix_start = L_prefix_padded + Ts
+                        actual_suffix_len = actual_suffix_lens_inf[b].item()
+                        pad_len_suffix = L_suffix_padded - actual_suffix_len
+                        if pad_len_suffix > 0:
+                            attention_mask_inference[b, suffix_start:suffix_start + pad_len_suffix] = 0
                 
                 elif prompt_embed_batch is not None:
                     inputs_embeds_inference = torch.cat([
@@ -1336,13 +1984,12 @@ class SSL_LLM_PPATP(sb.Brain):
         llm_dtype = embed_fn.weight.dtype
         
         # Prepare special tokens
-        BOS_ID = tok.bos_token_id
+        # Note: Special tokens are registered in _ensure_initialized() to avoid mismatch
+        # For loading old checkpoints without token registration, use fallback values
+        BOS_ID = tok.bos_token_id if tok.bos_token_id is not None else tok.eos_token_id
         EOS_ID = tok.eos_token_id
         PAD_ID = tok.pad_token_id if tok.pad_token_id is not None else 0
-        
-        if tok.sep_token is None or tok.sep_token_id is None:
-            tok.sep_token = "<|reserved_special_token_0|>"
-        SEP_ID = tok.sep_token_id
+        SEP_ID = tok.sep_token_id if tok.sep_token_id is not None else tok.eos_token_id
         
         def col_tokens(tok_id):
             return torch.full((B, 1), tok_id, dtype=torch.long, device=device)
@@ -1431,7 +2078,7 @@ class SSL_LLM_PPATP(sb.Brain):
                                         if should_add_alternatives:
                                             if self.confusion_matrix and phn in self.confusion_matrix:
                                                 confusions = self.confusion_matrix[phn].get("confusions", [])
-                                                for item in confusions[:4]: 
+                                                for item in confusions:
                                                     confused_phn = item.get("phoneme")
                                                     if confused_phn and confused_phn != phn:
                                                         alternatives.append(confused_phn)
@@ -1459,7 +2106,7 @@ class SSL_LLM_PPATP(sb.Brain):
                                 pp_context_lines.append(f"Canonical sequence: {can_phn_str}")
                             
                             if isinstance(can_phn_list, list):
-                                potential_pron = self.generate_potential_pronunciations(can_phn_list, top_k=5)
+                                potential_pron = self.generate_potential_pronunciations(can_phn_list, top_k=10)
                             else:
                                 potential_pron = can_phn_str
                             pp_context_lines.append(f"Potential pronunciation: {potential_pron}")
@@ -1477,23 +2124,23 @@ class SSL_LLM_PPATP(sb.Brain):
                 # 构建完整的user content
                 if prompt_format == "slam":
                     user_content += "\nTranscribe the preceding speech into phonemes."
-                    user_content += "\nReturn in CMUdict format with spaces between phonemes."
+                    user_content += "\nReturn in format with spaces between phonemes."
                 elif pp_context_lines:
                     if prompt_format == "statllm":
                         user_content += "\nHere is what the speaker read and the canonical phoneme sequence with potential mispronunciation hints:\n"
                         user_content += "\n".join(pp_context_lines)
                         user_content += "\n\nPlease predict the actual phonemes the speaker pronounced."
-                        user_content += "\nReturn in CMUdict format with spaces between phonemes."
+                        user_content += "\nReturn in format with spaces between phonemes."
                     elif prompt_format == "ppatp":
                         user_content += "\nHere I give you what the speaker read and the canonical phonemes, as well each canonical phonemes's potential pronunciations.\n"
                         user_content += "\n".join(pp_context_lines)
                         user_content += "\nYou need to predict what phoneme the speaker is actually said, rather than the canonical ones."
-                        user_content += "\nReturn in CMUdict format with spaces between phonemes."
+                        user_content += "\nReturn in format with spaces between phonemes."
                     elif prompt_format == "atp":
                         user_content += "\nHere is what the speaker read and the canonical phoneme sequence:\n"
                         user_content += "\n".join(pp_context_lines)
                         user_content += "\n\nPlease predict the actual phonemes the speaker pronounced."
-                        user_content += "\nReturn in CMUdict format with spaces between phonemes."
+                        user_content += "\nReturn in format with spaces between phonemes."
                 else:
                     user_content += "\nTranscribe the preceding speech into phonemes."
                 # Construct chat structure
@@ -1526,30 +2173,13 @@ class SSL_LLM_PPATP(sb.Brain):
                 prefix_lens.append(len(prefix_seq))
                 suffix_lens.append(len(suffix_seq))
             
-            # Pad sequences (LEFT PADDING for inference)
-            prefix_ids = self.pad_sequence_left(prefix_ids_list, batch_first=True, padding_value=PAD_ID)
-            suffix_ids = self.pad_sequence_left(suffix_ids_list, batch_first=True, padding_value=PAD_ID)
+            # Pad sequences (使用 LEFT PADDING 用于推理)
+            # 关键：推理阶段使用 left padding 确保生成起始位置一致
+            prefix_ids = pad_sequence_left(prefix_ids_list, batch_first=True, padding_value=PAD_ID)
+            suffix_ids = pad_sequence_left(suffix_ids_list, batch_first=True, padding_value=PAD_ID)
             
             prefix_lens_tensor = torch.tensor(prefix_lens, dtype=torch.long, device=device)
             suffix_lens_tensor = torch.tensor(suffix_lens, dtype=torch.long, device=device)
-            
-            # Build padding masks for LEFT PADDING
-            L_prefix_padded = prefix_ids.size(1)
-            L_suffix_padded = suffix_ids.size(1)
-            
-            prefix_mask = torch.ones(B, L_prefix_padded, dtype=torch.long, device=device)
-            suffix_mask = torch.ones(B, L_suffix_padded, dtype=torch.long, device=device)
-            
-            for b in range(B):
-                actual_prefix_len = prefix_lens[b]
-                pad_len_prefix = L_prefix_padded - actual_prefix_len
-                if pad_len_prefix > 0:
-                    prefix_mask[b, :pad_len_prefix] = 0
-                
-                actual_suffix_len = suffix_lens[b]
-                pad_len_suffix = L_suffix_padded - actual_suffix_len
-                if pad_len_suffix > 0:
-                    suffix_mask[b, :pad_len_suffix] = 0
             
             # Embed
             prefix_embed = embed_fn(prefix_ids)  # [B, L_prefix, H]
@@ -1561,17 +2191,25 @@ class SSL_LLM_PPATP(sb.Brain):
                 suffix_embed
             ], dim=1)
             
-            # Build attention mask using LEFT PADDING masks
+            # Build attention mask for LEFT padding
+            # 关键：LEFT padding 需要 mask 左侧（开头）的 padding
             attention_mask = torch.ones(B, inputs_embeds.size(1), dtype=torch.long, device=device)
             L_prefix_padded = prefix_ids.size(1)
             L_suffix_padded = suffix_ids.size(1)
             
-            # Apply prefix mask
-            attention_mask[:, :L_prefix_padded] = prefix_mask
-            
-            # Apply suffix mask (with offset)
-            suffix_start = L_prefix_padded + Ts
-            attention_mask[:, suffix_start:suffix_start + L_suffix_padded] = suffix_mask
+            for b in range(B):
+                # Mask prefix padding (LEFT padding: mask 左侧)
+                actual_prefix_len = prefix_lens_tensor[b].item()
+                pad_len_prefix = L_prefix_padded - actual_prefix_len
+                if pad_len_prefix > 0:
+                    attention_mask[b, :pad_len_prefix] = 0
+                
+                # Mask suffix padding (LEFT padding: mask 左侧)
+                suffix_start = L_prefix_padded + Ts
+                actual_suffix_len = suffix_lens_tensor[b].item()
+                pad_len_suffix = L_suffix_padded - actual_suffix_len
+                if pad_len_suffix > 0:
+                    attention_mask[b, suffix_start:suffix_start + pad_len_suffix] = 0
         
         elif has_prompt:
             prompt_embed = self.prompt_embed
@@ -1627,6 +2265,192 @@ class SSL_LLM_PPATP(sb.Brain):
             "ctc_predictions": ctc_predictions,
         }
 
+    @torch.no_grad()
+    def inference_with_cot(self, batch, max_new_tokens=200, do_sample=True, temperature=0.7, top_k=50, top_p=0.9):
+        """
+        使用 Chain-of-Thought 进行推理（Qwen 原生格式）。
+        
+        与 inference_batch 的区别：
+        1. 使用简化的 prompt（无 word/canonical 信息）
+        2. 要求模型进行分步推理
+        3. 生成 Qwen 原生 CoT 格式：<think>分析</think> 直接输出音素
+        4. 使用更长的 max_new_tokens 以容纳 CoT 内容
+        
+        Args:
+            batch: 包含 id 和 sig 的 batch
+            max_new_tokens: 最大生成 token 数（CoT 需要更多）
+            do_sample: 是否使用 sampling
+            temperature: 采样温度
+            top_k: Top-k 采样参数
+            top_p: Top-p 采样参数
+            
+        Returns:
+            dict: {
+                "ids": list of utterance IDs,
+                "generated_tokens": [B, gen_len],
+                "generated_text": list of full CoT text,
+                "parsed_results": list of parsed structured results,
+                "ctc_predictions": list of CTC predictions (optional)
+            }
+        """
+        # 确保初始化
+        self._ensure_initialized()
+        
+        batch = batch.to(self.device)
+        wavs, wav_lens = batch.sig
+        ids = batch.id
+        
+        # ===== 音频编码 =====
+        try:
+            Z, _ = self.hparams.audio_encoder_modules(wavs)
+        except:
+            Z = self.hparams.audio_encoder_modules(wavs)
+        
+        # CTC 预测（可选，用于对比）
+        ctc_predictions = None
+        if hasattr(self.modules, "ctc_lin"):
+            ctc_logits = self.modules.ctc_lin(Z)
+            p_ctc = self.hparams.log_softmax(ctc_logits)
+            ctc_sequence = sb.decoders.ctc_greedy_decode(
+                p_ctc, wav_lens, blank_id=self.hparams.blank_index
+            )
+            ctc_predictions = []
+            for seq in ctc_sequence:
+                phn_list = self.label_encoder.decode_ndim(seq)
+                ctc_predictions.append(" ".join(phn_list))
+        
+        # Projector
+        if hasattr(self.modules, "projector") and self.modules.projector is not None:
+            Z = self.modules.projector(Z)
+        
+        B, Ts, H = Z.shape
+        device = self.device
+        tok = self.hparams.LLM_tokenizer
+        embed_fn = self.modules.LLM.get_input_embeddings()
+        llm_dtype = embed_fn.weight.dtype
+        
+        # ===== 准备特殊tokens =====
+        BOS_ID = tok.bos_token_id if tok.bos_token_id is not None else tok.eos_token_id
+        EOS_ID = tok.eos_token_id
+        PAD_ID = tok.pad_token_id if tok.pad_token_id is not None else 0
+        
+        # ===== 构建 CoT prompt embeddings =====
+        cot_result = self._build_cot_chat_embeddings(
+            B=B,
+            batch=batch,
+            device=device,
+            tok=tok,
+            embed_fn=embed_fn,
+            PAD_ID=PAD_ID
+        )
+        
+        prefix_embed = cot_result["prefix_embed"]  # [B, L_prefix, H]
+        suffix_embed = cot_result["suffix_embed"]  # [B, L_suffix, H]
+        prefix_lens = cot_result["prefix_lens_tensor"]  # [B]
+        suffix_lens = cot_result["suffix_lens_tensor"]  # [B]
+        prefix_ids = cot_result["prefix_ids"]  # [B, L_prefix]
+        suffix_ids = cot_result["suffix_ids"]  # [B, L_suffix]
+        
+        # ===== 构建 input embeddings: [prefix] [speech] [suffix] =====
+        inputs_embeds = torch.cat([
+            prefix_embed,  # [B, L_prefix, H]
+            Z,             # [B, Ts, H]
+            suffix_embed   # [B, L_suffix, H]
+        ], dim=1)
+        
+        # 对齐 dtype
+        if inputs_embeds.dtype != llm_dtype:
+            inputs_embeds = inputs_embeds.to(llm_dtype)
+        
+        # ===== 构建 attention mask（处理 padding）=====
+        seq_len = inputs_embeds.size(1)
+        attention_mask = torch.ones(B, seq_len, dtype=torch.long, device=device)
+        
+        L_prefix_padded = prefix_ids.size(1)
+        L_suffix_padded = suffix_ids.size(1)
+        
+        for b in range(B):
+            # Mask prefix padding
+            actual_prefix_len = prefix_lens[b].item()
+            if actual_prefix_len < L_prefix_padded:
+                attention_mask[b, actual_prefix_len:L_prefix_padded] = 0
+            
+            # Mask suffix padding
+            suffix_start = L_prefix_padded + Ts
+            actual_suffix_len = suffix_lens[b].item()
+            if actual_suffix_len < L_suffix_padded:
+                attention_mask[b, suffix_start + actual_suffix_len:suffix_start + L_suffix_padded] = 0
+        
+        # ===== 生成 CoT 输出 =====
+        logger.info(f"[CoT Inference] Generating with max_new_tokens={max_new_tokens}, temperature={temperature}")
+        
+        gen_kwargs = {
+            "inputs_embeds": inputs_embeds,
+            "attention_mask": attention_mask,
+            "max_new_tokens": max_new_tokens,
+            "num_return_sequences": 1,
+            "pad_token_id": PAD_ID,
+            "eos_token_id": EOS_ID,
+            "bos_token_id": BOS_ID,
+            "do_sample": do_sample,
+            "use_cache": True,
+        }
+        
+        if do_sample:
+            gen_kwargs.update({
+                "temperature": temperature,
+                "top_k": top_k,
+                "top_p": top_p,
+            })
+        
+        gen_out = self.modules.LLM.generate(**gen_kwargs)
+        
+        # ===== 解码生成的文本 =====
+        generated_text = tok.batch_decode(gen_out, skip_special_tokens=True)
+        
+        # ===== 解析结构化输出 =====
+        parsed_results = []
+        for b in range(B):
+            parsed = self._parse_cot_output(generated_text[b])
+            parsed["id"] = ids[b]
+            parsed_results.append(parsed)
+            
+            # 输出第一个样本的完整 CoT（用于调试）
+            if b == 0:
+                logger.info("=" * 80)
+                logger.info(f"[CoT Inference Monitor] ID: {ids[b]}")
+                logger.info("-" * 80)
+                logger.info(f"Full Generated Output:\n{generated_text[b]}")
+                logger.info("-" * 80)
+                
+                # 提取并高亮显示 <think> 部分
+                think_match = re.search(r"<think>\s*(.+?)\s*</think>", generated_text[b], re.DOTALL | re.IGNORECASE)
+                if think_match:
+                    logger.info(f"🧠 Reasoning Process (<think>):")
+                    logger.info(think_match.group(1))
+                    logger.info("-" * 80)
+                    # 提取 </think> 之后的内容
+                    after_think = re.split(r"</think>", generated_text[b], flags=re.IGNORECASE)[1].strip()
+                    logger.info(f"📝 Final Output (after </think>): {after_think}")
+                else:
+                    logger.info("⚠️ Warning: No <think> tags found in output")
+                
+                logger.info("-" * 80)
+                logger.info(f"Parsed Fields:")
+                logger.info(f"  INTENT_WORD: {parsed['intent_word']}")
+                logger.info(f"  CANONICAL_PHONEME: {parsed['canonical_phoneme']}")
+                logger.info(f"  ERROR_ANALYSIS: {parsed['error_analysis']}")
+                logger.info(f"  PHONEME_REAL: {parsed['phoneme_real']}")
+                logger.info("=" * 80)
+        
+        return {
+            "ids": ids,
+            "generated_tokens": gen_out,
+            "generated_text": generated_text,
+            "parsed_results": parsed_results,
+            "ctc_predictions": ctc_predictions
+        }
+
     def inference(
             self,
             test_set,
@@ -1640,6 +2464,7 @@ class SSL_LLM_PPATP(sb.Brain):
             top_k=50,
             top_p=0.9,
             output_file=None,
+            use_cot=False,
         ):
             """
             Iterate test_set and perform inference (no loss computation).
@@ -1671,6 +2496,8 @@ class SSL_LLM_PPATP(sb.Brain):
                 Top-p (nucleus) sampling parameter.
             output_file : str
                 Optional file path to save results.
+            use_cot : bool
+                If True, use Chain-of-Thought inference with structured reasoning.
 
             Returns
             -------
@@ -1706,17 +2533,29 @@ class SSL_LLM_PPATP(sb.Brain):
                     disable=not enable,
                     colour=self.tqdm_barcolor.get("test", "green"),
                 ):
-                    # Run inference
-                    result = self.inference_batch(
-                        batch,
-                        max_new_tokens=max_new_tokens,
-                        do_sample=do_sample,
-                        temperature=temperature,
-                        top_k=top_k,
-                        top_p=top_p,
-                        num_beams=3,
-                        inference_prompt_mode="with_alternatives",
-                    )
+                    # 根据 use_cot 选择推理方法
+                    if use_cot:
+                        # CoT 推理：使用更长的 max_new_tokens 和结构化输出
+                        result = self.inference_with_cot(
+                            batch,
+                            max_new_tokens=max(max_new_tokens, 200),  # CoT 至少需要 200 tokens
+                            do_sample=do_sample,
+                            temperature=temperature,
+                            top_k=top_k,
+                            top_p=top_p
+                        )
+                    else:
+                        # 标准推理
+                        result = self.inference_batch(
+                            batch,
+                            max_new_tokens=max_new_tokens,
+                            do_sample=do_sample,
+                            temperature=temperature,
+                            top_k=top_k,
+                            top_p=top_p,
+                            num_beams=3,
+                            inference_prompt_mode="with_alternatives",
+                        )
                     
                     # Collect results
                     for i, utt_id in enumerate(result["ids"]):
@@ -1726,6 +2565,11 @@ class SSL_LLM_PPATP(sb.Brain):
                         }
                         if result["ctc_predictions"] is not None:
                             item["ctc_prediction"] = result["ctc_predictions"][i]
+                        
+                        # CoT 特有的解析结果
+                        if use_cot and "parsed_results" in result:
+                            item["cot_parsed"] = result["parsed_results"][i]
+                        
                         all_results.append(item)
             # sort results by ID
             all_results = sorted(all_results, key=lambda x: x["id"])
@@ -1743,11 +2587,26 @@ class SSL_LLM_PPATP(sb.Brain):
                 llm_csv_path = os.path.join(output_dir, f"{base_name}_LLM.csv")
                 with open(llm_csv_path, "w", encoding="utf-8", newline="") as f:
                     writer = csv.writer(f)
-                    writer.writerow(["ID", "Labels"])
-                    for item in all_results:
-                        # Get file stem (filename without path and extension)
-                        file_stem = os.path.splitext(os.path.basename(str(item["id"])))[0]
-                        writer.writerow([file_stem, item["llm_prediction"]])
+                    
+                    # CoT 模式：添加额外的列
+                    if use_cot:
+                        writer.writerow(["ID", "Labels", "IntentWord", "CanonicalPhoneme", "ErrorAnalysis", "PhonemeReal"])
+                        for item in all_results:
+                            file_stem = os.path.splitext(os.path.basename(str(item["id"])))[0]
+                            cot = item.get("cot_parsed", {})
+                            writer.writerow([
+                                file_stem, 
+                                item["llm_prediction"],
+                                cot.get("intent_word", ""),
+                                cot.get("canonical_phoneme", ""),
+                                cot.get("error_analysis", ""),
+                                cot.get("phoneme_real", "")
+                            ])
+                    else:
+                        writer.writerow(["ID", "Labels"])
+                        for item in all_results:
+                            file_stem = os.path.splitext(os.path.basename(str(item["id"])))[0]
+                            writer.writerow([file_stem, item["llm_prediction"]])
                 print(f"LLM predictions saved to {llm_csv_path}")
                 
                 # Save CTC predictions to CSV (if available)
@@ -2117,6 +2976,10 @@ class SSL_LLM_PPATP(sb.Brain):
 
         self.init_optimizers()
         
+        # Initialize tokenizer and special tokens BEFORE loading checkpoint
+        # This ensures vocab size matches the checkpoint
+        self._ensure_initialized()
+        
         if self.checkpointer is not None:
             self.checkpointer.recover_if_possible(min_key="LLM_PER")
         
@@ -2141,6 +3004,22 @@ class SSL_LLM_PPATP(sb.Brain):
         else:
             print(f"⚠️  Pretrained model path not found: {pretrained_path}")
             print("   Continuing with random initialization...")
+    
+    def on_evaluate_start(self, max_key=None, min_key=None):
+        """Gets called at the beginning of ``evaluate()``
+        
+        Initialize tokenizer BEFORE loading checkpoint to ensure vocab size matches.
+        """
+        # Initialize tokenizer and special tokens BEFORE checkpoint loading
+        # This is critical for loading checkpoints with the correct embedding size
+        self._ensure_initialized()
+        
+        # Load best checkpoint for evaluation
+        if self.checkpointer is not None:
+            self.checkpointer.recover_if_possible(
+                max_key=max_key,
+                min_key=min_key,
+            )
    
     def init_optimizers(self):
         # Collect all trainable parameters

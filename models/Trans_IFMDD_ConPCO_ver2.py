@@ -44,7 +44,7 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # self.        super().__init__(*args, **kwargs)
-        self.patience = 20
+        self.patience = 100
         
         self.no_improve_epochs = 0
         self.last_improved_epoch = 0
@@ -799,7 +799,7 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
                         hyps = p_seq_logits.argmax(dim=-1)  # [B, T_p+1]
                         from speechbrain.utils.data_utils import undo_padding
                         hyps = undo_padding(hyps, target_lens_bos)
-                    # import pdb; pdb.set_trace()
+                        # import pdb; pdb.set_trace()
                     attn_map = None
                     
                     # ==================== Validation: Optional attention visualization ====================
@@ -945,6 +945,8 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
                             enc_out_for_decoding = enc_proj
                         else:
                             enc_out_for_decoding = enc_out
+                        # import pdb; pdb.set_trace()
+                        # [x for x in self.label_encoder.lab2ind.keys()]
                         hyps, top_lengths, top_scores, top_log_probs = self.hparams.test_search(
                             enc_out_for_decoding.detach(), wav_lens
                         )
@@ -1257,10 +1259,10 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
         loss = (
             self.hparams.ctc_weight * loss_ctc
             + (1 - self.hparams.ctc_weight) * loss_dec_out
-            + loss_mispro_all 
-            + loss_ga * 10
-            + loss_phn_pco
-            + loss_center_clap
+            + loss_mispro_all * getattr(self.hparams, "mispro_loss_weight", 1.0)
+            + loss_ga * getattr(self.hparams, "ga_loss_weight", 10.0)
+            + loss_phn_pco * getattr(self.hparams, "conpco_loss_weight", 1.0)
+            + loss_center_clap * getattr(self.hparams, "conpco_center_loss_weight", 0.0)
         )
         # loss = loss_ctc
         
@@ -1790,7 +1792,23 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
         #     self.checkpointer.add_recoverable("f1_history", self)
             
     def on_evaluate_start(self, max_key=None, min_key=None):
-        return super().on_evaluate_start(max_key, min_key)
+        # import pdb; pdb.set_trace()
+        if self.checkpointer is not None:
+            # TODO: support recover best on PER or mpd_f1 or averaged model of best PER and mpd_f1
+            self.checkpointer.recover_if_possible(
+                max_key="mpd_f1_seq",
+            )
+        pretrainer = getattr(self.hparams, 'pretrainer', None)
+        if pretrainer is not None and getattr(self.hparams, 'resume_from_folder', False):
+            paths = pretrainer.collect_files(default_source=self.hparams.resume_from_folder)
+            pretrainer.load_collected()
+            logging.info(f"✅Loaded pretrained model from {self.hparams.resume_from_folder}", )
+            # pdb.set_trace()
+            # self.modules.perceived_ssl.model.state_dict()['encoder.layers.23.final_layer_norm.bias']== pretrainer.loadables['perceived_ssl'].state_dict()['model.encoder.layers.23.final_layer_norm.bias']
+            # self.modules.enc.state_dict()["1.bias"] = pretrainer.loadables['model'][0].state_dict()["1.bias"]
+            # self.modules.ConformerEncoder.state_dict()['layers.0.convolution_module.conv.weight'] == pretrainer.loadables['model'].state_dict()['1.layers.0.convolution_module.conv.weight']
+        
+        # return super().on_evaluate_start(max_key, min_key)
 
     def on_fit_batch_end(self, batch, outputs, loss, should_step):
         """At the end of the optimizer step, apply noam annealing."""

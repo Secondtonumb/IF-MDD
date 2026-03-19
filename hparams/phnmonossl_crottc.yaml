@@ -1,16 +1,17 @@
 # Hyperparameters toggles
+# Hyperparameters toggles
 prefix: ""
 
-lab_enc_file: /home/kevingenghaopeng/MDD/IF-MDD/exp_l2arctic/wavlm_large_None_PhnMonoSSL_ottc_l2arctic/save/label_encoder.txt
-
-ctc_loss_type: "crottc"  # Options: "ctc", "ottc", "crctc", "crottc"
-encoder_type: None  # Options: None, "conformer", "zipformer", "rvq"
+lab_enc_file: /home/m64000/work/IF-MDD/exp_l2arctic/wavlm_large_None_PhnMonoSSL_ottc_confEnc_kernal/save/label_encoder.txt
+ctc_loss_type: "crottc"  # Options: "ctc", "ottc", "crctc"
+encoder_type: "conformer"  # Options: None, "conformer", "zipformer", "rvq"
 
 wandb_project: "l2arctic"
 # Wandb Tags
 tags:
     - PhnMonoSSL
-    - CROTTC
+    - crottc
+    - ConformerEncoder
     - l2arctic
 
 ## SSL features Selection
@@ -237,7 +238,7 @@ seed: 3047
 __set_seed: !apply:torch.manual_seed [!ref <seed>]
 
 # training parameters
-number_of_epochs: 100
+number_of_epochs: 150
 batch_size: 16
 lr: 0.0003
 sorting: ascending
@@ -261,7 +262,7 @@ valid_dataloader_opts:
     
 
 test_dataloader_opts:
-    batch_size: 1
+    batch_size: !ref <batch_size>
 
 pretrainer: !new:speechbrain.utils.parameter_transfer.Pretrainer
     collect_in: !ref <save_folder>/
@@ -280,3 +281,6 @@ decoding_function: !name:speechbrain.decoders.ctc_greedy_decode
 
 tokenizer: !new:speechbrain.dataio.encoder.TextEncoder
     load_from_file: utils/label_encoder.txt
+
+freeze_lm_weight: True
+blank_insertion: False

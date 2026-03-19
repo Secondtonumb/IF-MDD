@@ -1,6 +1,17 @@
 # Hyperparameters toggles
 prefix: ""
+lab_enc_file: /home/m64000/work/IF-MDD/exp_l2arctic/wavlm_large_None_PhnMonoSSL_ottc_confEnc_kernal/save/label_encoder.txt
+ctc_loss_type: "ottc"  # Options: "ctc", "ottc", "crctc"
+encoder_type: "none"  # Options: None, "conformer", "zipformer", "rvq"
 
+wandb_project: "l2arctic"
+# Wandb Tags
+tags:
+    - PhnMonoSSL
+    - ottc
+    - None
+    - l2arctic
+    
 ## SSL features Selection
 pretrained_models_path: pretrained_models/
 # pretrained_models:
@@ -31,7 +42,7 @@ canonical_ssl_model: Null
 ENCODER_DIM: 1024
 
 # # How to fuse the features
-feature_fusion: "mono"        # Options: "mono" for single ssl, "dual_ssl_enc" for dual ssl encoder, "dual_loss" for single SSL dual ssl loss
+feature_fusion: "PhnMonoSSL"        # Options: "mono" for single ssl, "dual_ssl_enc" for dual ssl encoder, "dual_loss" for single SSL dual ssl loss
 blend_alpha: 0.5              # If using "blend" fusion
 
 # Input files
@@ -39,16 +50,20 @@ blend_alpha: 0.5              # If using "blend" fusion
 data_folder_save: "./data"
 train_annotation: !ref <data_folder_save>/train-train.json
 valid_annotation: !ref <data_folder_save>/train-dev.json
-test_annotation: !ref <data_folder_save>/test.json
+# test_annotation: !ref <data_folder_save>/test.json
+# test_annotation: "/home/m64000/work/IF-MDD/erj_data/test.json"
+test_annotation: "/home/m64000/work/dataset/speechocean762_orig_spk_open/test.json"
+
 # Extra data
 train_annotation_extra: !ref <data_folder_save>/train-train_with_extra.json
 use_extra_train_data: False
 
-evaluate_key: "PER" # use "mpd_f1_seq" for Transformer decoder path best mpd f1
+# evaluate_key: "PER" # use "mpd_f1_seq" for Transformer decoder path best mpd f1
+evaluate_key: "mpd_f1"   # use "mpd_f1_seq" for Transformer decoder path best mpd f1
                             # "PER_seq" for Transformer decoder's best error rate
                             # "PER" for ctc path best error rate
                             # "mpd_f1" for ctc path best mpd f1
-max_save_models: 3 # Maximum number of saved models for each metrics 
+max_save_models: 50 # Maximum number of saved models for each metrics 
 # generate training id for output folder
 # generate_training_id: !apply:trainer.generate_training_id.generate_training_id [!ref <perceived_ssl_model_id>, !ref <canonical_ssl_model_id>, !ref <feature_fusion>, !ref <prefix>]
 
@@ -191,12 +206,14 @@ seed: 3047
 __set_seed: !apply:torch.manual_seed [!ref <seed>]
 
 # training parameters
-number_of_epochs: 100
+number_of_epochs: 150
 batch_size: 16
-lr: 0.0003
-sorting: ascending
+lr: 0.0001
+# sorting: ascending
+# sorting: descending
+sorting: random
 sample_rate: 16000
-gradient_accumulation: 2
+gradient_accumulation: 1
 lr_pretrained: 0.00001
 
 # Mix-Precision Training
@@ -215,7 +232,7 @@ valid_dataloader_opts:
     
 
 test_dataloader_opts:
-    batch_size: 1
+    batch_size: !ref <batch_size>
 
 pretrainer: !new:speechbrain.utils.parameter_transfer.Pretrainer
     collect_in: !ref <save_folder>/
@@ -234,3 +251,7 @@ decoding_function: !name:speechbrain.decoders.ctc_greedy_decode
 
 tokenizer: !new:speechbrain.dataio.encoder.TextEncoder
     load_from_file: utils/label_encoder.txt
+
+freeze_lm_weight: True
+
+blank_insertion: False

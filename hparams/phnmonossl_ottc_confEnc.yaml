@@ -124,6 +124,15 @@ ConformerEncoder: !new:speechbrain.lobes.models.transformer.Conformer.ConformerE
       kernel_size: !ref <kernel_size>
       attention_type: !ref <attention_type>
 
+enc: !new:torch.nn.Sequential
+  - !new:speechbrain.lobes.models.VanillaNN.VanillaNN
+     input_shape: [null, null, !ref <ENCODER_DIM>]
+     activation: !ref <activation>
+     dnn_blocks: !ref <dnn_layers>
+     dnn_neurons: !ref <dnn_neurons>
+  - !new:torch.nn.LayerNorm
+     normalized_shape: !ref <dnn_neurons>
+
 ctc_lin:  !new:speechbrain.nnet.linear.Linear
     input_size: !ref <dnn_neurons>
     n_neurons: !ref <output_neurons>  # 40 phonemes + 1 blank + 1 err
@@ -165,7 +174,7 @@ output_neurons: 44 # l2arctic: 40phns(sil)+err+blank + eos + bos =44
 blank_index: 0
 
 model: !new:torch.nn.ModuleList
-    - [!ref <ssl_proj>, !ref <ConformerEncoder>, !ref <ctc_lin>, !ref <lm_weight>]
+    - [!ref <enc>, !ref <ConformerEncoder>, !ref <ctc_lin>, !ref <lm_weight>]
 
 adam_opt_class: !name:torch.optim.Adam
     lr: !ref <lr>
@@ -213,7 +222,7 @@ seed: 3047
 __set_seed: !apply:torch.manual_seed [!ref <seed>]
 
 # training parameters
-number_of_epochs: 100
+number_of_epochs: 300
 batch_size: 32
 lr: 0.0003
 sorting: ascending
@@ -247,7 +256,8 @@ pretrainer: !new:speechbrain.utils.parameter_transfer.Pretrainer
 
 encoder: !new:speechbrain.nnet.containers.LengthsCapableSequential
     perceived_ssl: !ref <perceived_ssl>
-    ssl_proj: !ref <ssl_proj>
+    # ssl_proj: !ref <ssl_proj>
+    enc: !ref <enc>
     ConformerEncoder: !ref <ConformerEncoder>
     ctc_lin: !ref <ctc_lin>
     log_softmax: !ref <log_softmax>

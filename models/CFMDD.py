@@ -39,6 +39,7 @@ from utils.layers.utils import make_pad_mask
 from utils.plot.plot_attn import plot_attention
 
 from models.GatedSeq2SeqAtten import GatedSeq2SeqAttention  
+from models.textgate import TextGate, TextGate_TransDec
 
 import logging
 
@@ -46,7 +47,7 @@ class CFMDD(sb.Brain):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # self.        super().__init__(*args, **kwargs)
-        self.patience = 20
+        self.patience = 50
         
         self.no_improve_epochs = 0
         self.last_improved_epoch = 0
@@ -565,7 +566,7 @@ class CFMDD(sb.Brain):
             canonicals_bos, canonical_lens_bos = batch.phn_encoded_canonical_bos
             canonicals_eos, canonical_lens_eos = batch.phn_encoded_canonical_eos
             mispro_label_lens = canonical_lens_bos
-
+        # import pdb; pdb.set_trace()
 
         # Create canonical phoneme embeddings
         Cano_emb = self.modules.phn_emb(canonicals)  # [B, T_c, D]
@@ -665,18 +666,34 @@ class CFMDD(sb.Brain):
         # ==================== Gate on p_seq_logits with h_mispro using Gated Attention ====================
         # 使用mispronunciation信息作为gate来引导p_seq_logits学习perceived phoneme特征
         if hasattr(self.modules, 'gated_seq2seq_attn') and h_mispro is not None:
-            # h_mispro [B, T_c, D] -> 需要提取gate特征
-            # 使用h_mispro_bin和h_mispro_cls的组合
-            gate_features = torch.cat([h_mispro_bin, h_mispro_cls], dim=-1)  # [B, T_c, 5] (1+4)
-            
-            # 如果使用log概率前的logits进行gate处理（获得更原始的信号）
-            
-            p_seq_logits_gated = self.modules.gated_seq2seq_attn(
-                seq_logits=h_seq_feat,  
-                gate_features=gate_features
-            )  # [B, T_p+1, C]
-            p_seq_logits = self.hparams.log_softmax(p_seq_logits_gated)
-
+            if type(self.modules.gated_seq2seq_attn) == GatedSeq2SeqAttention:
+                # h_mispro [B, T_c, D] -> 需要提取gate特征
+                # 使用h_mispro_bin和h_mispro_cls的组合
+                gate_features = torch.cat([h_mispro_bin, h_mispro_cls], dim=-1)  # [B, T_c, 5] (1+4)
+                
+                # 如果使用log概率前的logits进行gate处理（获得更原始的信号）
+                
+                p_seq_logits_gated = self.modules.gated_seq2seq_attn(
+                    seq_logits=h_seq_feat,  
+                    gate_features=gate_features
+                )  # [B, T_p+1, C]
+                p_seq_logits = self.hparams.log_softmax(p_seq_logits_gated)
+            elif type(self.modules.gated_seq2seq_attn) == TextGate:
+                gate_features = torch.cat([h_mispro_bin, h_mispro_cls], dim=-1)  # [B, T_c, 5] (1+4)
+                # p_seq_logits_gated = self.modules.gated_seq2seq_attn(
+                #     q_audio=h_seq_feat,  
+                #     k_text=gate_features,
+                #     v_text=gate_features,
+                # )  
+                p_seq_logits_gated, gated_interaction = self.modules.gated_seq2seq_attn(
+                    q_audio=dec_out,
+                    k_text=fuse_feat,
+                    v_text=fuse_feat
+                )
+                # p_seq_logits = p_seq_logits_gated
+                p_seq_logits_gated = self.modules.d_out(p_seq_logits_gated)
+                # [B, T_p+1, C]
+                p_seq_logits = self.hparams.log_softmax(p_seq_logits_gated)
         
         hyps = p_seq_logits.argmax(dim=-1)  # [B, T_p+1]
 
@@ -840,7 +857,7 @@ class CFMDD(sb.Brain):
                 dec_out_proj = gated_out + self.modules.TransASR.positional_encoding(gated_out)
         else:
             dec_out_proj = gated_out
-        # import pdb; pdb.set_trace()
+        
         audio_feats_for_pco = self.modules.conpco_proj_audio_feat(dec_out_proj)
         # apply l2 norm
         audio_feats_for_pco = F.normalize(audio_feats_for_pco, p=2, dim=-1)
@@ -861,7 +878,11 @@ class CFMDD(sb.Brain):
                 phn_id=perceiveds,
             ).values()
         except:
-            pdb.set_trace()
+            # pdb.set_trace()
+            # for target targetting decoding, the audio_feats has padding but the tgt_emb_for_pco does not have padding, which will cause error in loss calculation, so temporarily set loss to 0
+            loss_phn_pco = torch.tensor(0.0).to(self.device)
+            loss_center_clap = torch.tensor(0.0).to(self.device)
+
         
         from utils.plot.plot_clap import plot_clap_clusters, plot_phone_cluster, plot_phoneme_centroids_with_instances
         # TODOS:
@@ -1062,7 +1083,7 @@ class CFMDD(sb.Brain):
                     # pdb.set_trace()
                     # sequence_decoder_out = self._apply_mispro_to_hyps(canonicals, p_mispro_cls_logits, mode="default")
                 # pdb.set_trace()
-                # pdb.set_trace()
+                # import pdb; pdb.set_trace()
                 # ------------------------------------------------------------------
 
                 if self.hparams.decoder_target == "perceived":
@@ -1148,10 +1169,10 @@ class CFMDD(sb.Brain):
                         )
                     else:
                         # remove id 70 from sequence_decoder_out
-                        sequence_decoder_out = [
-                            [tok for tok in seq if tok != 70]
-                            for seq in sequence_decoder_out
-                        ]
+                        # sequence_decoder_out = [
+                        #     [tok for tok in seq if tok != 70]
+                        #     for seq in sequence_decoder_out
+                        # ]
                         self.per_metrics_seq.append(
                             ids=ids,
                             predict=sequence_decoder_out,
@@ -1172,7 +1193,7 @@ class CFMDD(sb.Brain):
                     perceived_len=perceived_lens,
                     ind2lab=self.label_encoder.decode_ndim,
                 )
-                
+                # import pdb; pdb.set_trace()
                 self.mpd_metrics_seq.append(
                     ids=ids,
                     predict=sequence_decoder_out,

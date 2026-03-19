@@ -22,18 +22,18 @@ def AutoLLMLoader(model_name, use_lora=False, lora_config=None, replace_output_h
     """
     try:
         # 配置4-bit量化参数
-        quantization_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_compute_dtype=torch.float16,
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_quant_type="nf4",
-        )
+        # quantization_config = BitsAndBytesConfig(
+        #     load_in_4bit=True,
+        #     bnb_4bit_compute_dtype=torch.float16,
+        #     bnb_4bit_use_double_quant=True,
+        #     bnb_4bit_quant_type="nf4",
+        # )
         
         # 加载模型
-        if "Qwen" in model_name:
+        if "Qwen2-Audio" in model_name:
             model = Qwen2AudioForConditionalGeneration.from_pretrained(
                 model_name,
-                quantization_config=quantization_config,
+                #quantization_config=quantization_config,
                 device_map="auto",
                 torch_dtype=torch.float16,
             )

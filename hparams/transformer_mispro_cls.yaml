@@ -1,6 +1,6 @@
 # Hyperparameters toggles
 prefix: ""
-
+lab_enc_file: /home/m64000/work/IF-MDD/exp_l2arctic/wavlm_large_None_PhnMonoSSL_crottc/save/label_encoder.txt
 ## SSL features Selection
 pretrained_models_path: pretrained_models/
 

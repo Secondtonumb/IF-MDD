@@ -977,9 +977,35 @@ class PhnMonoSSLModel(sb.Brain):
                 wav_lens_eval = wav_lens
             
             # Decode predictions
+            
             sequence = sb.decoders.ctc_greedy_decode(
                 p_ctc_eval, wav_lens_eval, blank_id=self.hparams.blank_index
             )
+            
+            # from speechbrain.decoders import CTCBeamSearcher
+            # # 
+            # sbeam_searcher = CTCBeamSearcher(
+            #     blank_index=self.hparams.blank_index,
+            #     vocab_list = [" " + x for x in self.label_encoder.lab2ind.keys()],
+            #     beam_size=1,
+            #     # beam_prune_logp=-10.0,
+            #     # token_prune_min_logp=-1.5,
+            #     # token_prune_min_logp=-0.693,
+            #     # kenlm_model_path="/home/m64000/work/IF-MDD/lm_models_tts/lm_perceived_order4.arpa",
+            #     # kenlm_model_path="/home/m64000/work/IF-MDD/lm_models_l2_arctic/lm_perceived_order4.arpa",
+            #     # alpha=0.5,  
+            #     # beta=1.5,
+            #     )
+            
+            # hyps = sbeam_searcher(p_ctc_eval, wav_lens_eval)
+            # # import pdb; pdb.set_trace()
+            # sequence_beam_text = [hyp[0].text for hyp in hyps]  
+            # # back to token IDs
+            # sequence = []
+            # for i, text in enumerate(sequence_beam_text):
+            #     token_ids = self.label_encoder.encode_sequence(sequence_beam_text[i].split())
+            #     sequence.append(token_ids)
+            
             
             # CTC metrics (only if targets available)
             if has_target and targets is not None:

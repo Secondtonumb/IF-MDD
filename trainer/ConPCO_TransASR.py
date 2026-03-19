@@ -194,7 +194,7 @@ class ConPCO_TransformerASR(TransformerASR):
             # if no encoder, just pass through with pos_embs
             # outputs = src + self.positional_encoding(src)
             outputs = src
-            encoder_out = src + self.positional_encoding(src)
+            encoder_out = src
             
         else:
             outputs = self.encoder(
