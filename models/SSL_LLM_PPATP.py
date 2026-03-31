@@ -79,7 +79,7 @@ class SSL_LLM_PPATP(sb.Brain):
         # 加载混淆矩阵用于生成潜在发音候选
         self.confusion_matrix = None
         self.load_confusion_matrix(getattr(self.hparams, "pronunciation_confusion_matrix_path", None))
-
+        
     def setup_phoneme_mask(self):
         """创建一个掩码，只允许生成音素相关的token"""
         if getattr(self, "phoneme_bias", None) is not None:
@@ -93,6 +93,88 @@ class SSL_LLM_PPATP(sb.Brain):
         # 将音素token的位置设为0（允许生成）
         valid_tokens = list(range(44))  # 0-43 是音素相关的token（包括blank, bos, eos）
         self.phoneme_bias[valid_tokens] = 0
+    
+    def setup_bos_and_sep_tokens(self):
+        """
+        动态初始化 BOS 和 SEP tokens，适配不同模型
+        - LLaMA：SEP 使用内置的 reserved special token
+        - 其他模型：添加新的 BOS 和 SEP special tokens
+        """
+        tok = self.hparams.LLM_tokenizer
+        
+        # 检测是否为 LLaMA 模型（包含 "llama" 在 model name 中）
+        model_name = self.hparams.LLM_model.lower() if hasattr(self.hparams, "LLM_model") else ""
+        is_llama = "llama" in model_name 
+        if is_llama:
+            # LLaMA: 使用内置的 reserved special token
+            if tok.sep_token is None or tok.sep_token_id is None:
+                tok.sep_token = "<|reserved_special_token_0|>"
+                logger.info(f"[LLaMA] Using reserved special token: {tok.sep_token}")
+        else:
+            # 其他模型: 添加新的 BOS 和 SEP special token
+            sep_token = "[SEP_AUDIO]"
+            bos_token = "[BOS_AUDIO]"
+            
+            special_tokens_to_add = {}
+            
+            # 检查 BOS token 是否存在
+            if tok.bos_token_id is None:
+                special_tokens_to_add["bos_token"] = bos_token
+                logger.info(f"[Other Model] BOS token is None, will add: {bos_token}")
+            else:
+                logger.info(f"[Other Model] BOS token already exists: {tok.bos_token} (ID: {tok.bos_token_id})")
+            
+            # 检查 SEP token 是否存在
+            if sep_token not in tok.get_added_vocab():
+                special_tokens_to_add["sep_token"] = sep_token
+                logger.info(f"[Other Model] SEP token does not exist, will add: {sep_token}")
+            else:
+                logger.info(f"[Other Model] SEP token already exists: {sep_token}")
+            
+            # 添加新的 special tokens
+            if special_tokens_to_add:
+                num_added = tok.add_special_tokens(special_tokens_to_add)
+                logger.info(f"[Other Model] Added {num_added} special tokens: {list(special_tokens_to_add.values())}")
+                
+                # 如果模型有 resize_token_embeddings，需要调整
+                if hasattr(self.modules.LLM, "resize_token_embeddings"):
+                    # 处理 Half 精度的 token embeddings resize 问题
+                    # 临时转换到 float32，进行 resize，然后转回原精度
+                    original_dtype = self.modules.LLM.dtype
+                    
+                    # 如果是 Half 精度，临时转换到 float32
+                    if original_dtype == torch.float16:
+                        logger.info(f"[Other Model] Converting model to float32 for token embedding resize (from {original_dtype})")
+                        self.modules.LLM.to(torch.float32)
+                    
+                    try:
+                        self.modules.LLM.resize_token_embeddings(len(tok), mean_resizing=False)
+                        logger.info(f"[Other Model] Resized token embeddings to {len(tok)}")
+                    finally:
+                        # 转换回原始精度
+                        if original_dtype == torch.float16:
+                            logger.info(f"[Other Model] Converting model back to {original_dtype}")
+                            self.modules.LLM.to(original_dtype)
+            else:
+                # 两个 token 都已存在，确保 tokenizer 正确设置了属性
+                logger.info(f"[Other Model] All required special tokens already exist")
+                tok.sep_token = sep_token
+        
+        # 验证 SEP_ID 有效
+        if tok.sep_token_id is None:
+            logger.error("Failed to setup SEP token! sep_token_id is None")
+            logger.error(f"  tok.sep_token = {tok.sep_token}")
+            logger.error(f"  tok.sep_token_id = {tok.sep_token_id}")
+            raise ValueError("Failed to initialize SEP token")
+        
+        # 验证 BOS_ID 有效（对于非 LLaMA 模型，应该已经设置了）
+        if not is_llama and tok.bos_token_id is None:
+            logger.error("Failed to setup BOS token for non-LLaMA model! bos_token_id is None")
+            raise ValueError("Failed to initialize BOS token")
+        
+        logger.info(f"SEP Token setup complete: '{tok.sep_token}' (ID: {tok.sep_token_id})")
+        if not is_llama:
+            logger.info(f"BOS Token: '{tok.bos_token}' (ID: {tok.bos_token_id})")
     
     def load_confusion_matrix(self, confusion_path=None):
         """加载混淆矩阵用于生成潜在发音候选"""
@@ -170,6 +252,9 @@ class SSL_LLM_PPATP(sb.Brain):
         
         # 3. 现在 llm_handle 肯定是原始的 CausalLM class 了，可以放心调用
         embed_fn = llm_handle.get_input_embeddings()
+        
+        # 4. 初始化 BOS 和 SEP tokens（必须在 embed_fn 之后，因为可能需要 resize embeddings）
+        self.setup_bos_and_sep_tokens()
 
         if not hasattr(self, "llm_norm") or self.llm_norm is None:
             # try:
@@ -344,7 +429,7 @@ class SSL_LLM_PPATP(sb.Brain):
                                 perc_phn_list = batch.phn_list_perceived[b]
                                 if not isinstance(perc_phn_list, list):
                                     perc_phn_list = [perc_phn_list]
-                            
+                                    
                             for idx, phn in enumerate(can_phn_list):
                                 phoneme_str = phn
                                 alternatives = []
@@ -631,9 +716,7 @@ class SSL_LLM_PPATP(sb.Brain):
         EOS_ID = tok.eos_token_id
         PAD_ID = tok.pad_token_id if tok.pad_token_id is not None else 0
         
-        # SEP token (use reserved special token if not defined)
-        if tok.sep_token is None or tok.sep_token_id is None:
-            tok.sep_token = "<|reserved_special_token_0|>"
+        # BOS and SEP tokens (initialized by setup_bos_and_sep_tokens() during module initialization)
         SEP_ID = tok.sep_token_id
         
         def col_tokens(tok_id):
@@ -822,7 +905,7 @@ class SSL_LLM_PPATP(sb.Brain):
             # llm_out.logits: [B, seq_len, 128000]
             # pdb.set_trace()
             loss = llm_out.loss  # CrossEntropyLoss if labels provided
-            logger.info(f"LLM Loss: {loss.item():.4f}")
+            # logger.info(f"LLM Loss: {loss.item():.4f}")
             # pdb.set_trace()
             # pdb.set_trace()
             ce_logits = llm_out.logits
@@ -1295,8 +1378,7 @@ class SSL_LLM_PPATP(sb.Brain):
         EOS_ID = tok.eos_token_id
         PAD_ID = tok.pad_token_id if tok.pad_token_id is not None else 0
         
-        if tok.sep_token is None or tok.sep_token_id is None:
-            tok.sep_token = "<|reserved_special_token_0|>"
+        # BOS and SEP tokens (initialized by setup_bos_and_sep_tokens() during module initialization)
         SEP_ID = tok.sep_token_id
         
         def col_tokens(tok_id):
@@ -1451,6 +1533,15 @@ class SSL_LLM_PPATP(sb.Brain):
                         user_content += "\nReturn in CMUdict format with spaces between phonemes."
                 else:
                     user_content += "\nTranscribe the preceding speech into phonemes."
+                # 日志记录：仅在第一次（b=0）输出示例prompt
+                if b == 0 and not getattr(self, "_inference_sample_prompt_logged", False):
+                    logger.info("=" * 80)
+                    logger.info(f"[INFERENCE] Prompt Format: {prompt_format.upper()}")
+                    logger.info("-" * 80)
+                    logger.info(user_content.replace(PLACEHOLDER, "[SPEECH_AUDIO]"))
+                    logger.info("=" * 80)
+                    self._inference_sample_prompt_logged = True
+                
                 # Construct chat structure
                 chat_structure = [
                     {"role": "system", "content": "You are a arabic phoneme transcriber."},
@@ -1715,6 +1806,10 @@ class SSL_LLM_PPATP(sb.Brain):
     
     def on_stage_start(self, stage, epoch):
         "Gets called when a stage (either training, validation, test) starts."
+        # 重置 prompt 日志标志，这样每个阶段都会输出一次示例 prompt
+        self._sample_prompt_logged = False
+        self._inference_sample_prompt_logged = False
+        
         self.ctc_metrics = self.hparams.ctc_stats()
         self.llm_metrics = self.hparams.llm_stats()  # 添加LLM损失统计
         self.mpd_f1_metrics = MpdStats()  # LLM MPD F1统计
