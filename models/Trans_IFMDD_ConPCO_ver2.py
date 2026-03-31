@@ -1790,6 +1790,12 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
         #     self.checkpointer.add_recoverable("f1_history", self)
             
     def on_evaluate_start(self, max_key=None, min_key=None):
+        import pdb;pdb.set_trace()
+        pretrainer = getattr(self.hparams, 'pretrainer', None)
+        if pretrainer is not None and getattr(self.hparams, 'resume_from_folder', False):
+            paths = pretrainer.collect_files(default_source=self.hparams.resume_from_folder)
+            pretrainer.load_collected()
+            logging.info(f"✅Loaded pretrained model from {self.hparams.resume_from_folder}",)
         return super().on_evaluate_start(max_key, min_key)
 
     def on_fit_batch_end(self, batch, outputs, loss, should_step):

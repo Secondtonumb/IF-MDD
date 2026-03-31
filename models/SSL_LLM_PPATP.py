@@ -253,8 +253,10 @@ class SSL_LLM_PPATP(sb.Brain):
         # 3. 现在 llm_handle 肯定是原始的 CausalLM class 了，可以放心调用
         embed_fn = llm_handle.get_input_embeddings()
         
-        # 4. 初始化 BOS 和 SEP tokens（必须在 embed_fn 之后，因为可能需要 resize embeddings）
-        self.setup_bos_and_sep_tokens()
+        # 4. 初始化 BOS 和 SEP tokens（只在第一次执行，后续重用）
+        if not hasattr(self, "_bos_sep_initialized") or not self._bos_sep_initialized:
+            self.setup_bos_and_sep_tokens()
+            self._bos_sep_initialized = True
 
         if not hasattr(self, "llm_norm") or self.llm_norm is None:
             # try:
@@ -691,6 +693,7 @@ class SSL_LLM_PPATP(sb.Brain):
             # import pdb; pdb.set_trace()
             Z = self.modules.projector(Z) # [B, T, H]  
         # pdb.set_trace()
+        
         B, Ts, H = Z.shape
         device = self.device
         tok = self.hparams.LLM_tokenizer

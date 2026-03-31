@@ -30,7 +30,7 @@ def AutoLLMLoader(model_name, use_lora=False, lora_config=None, replace_output_h
         )
         
         # 加载模型
-        if "Qwen" in model_name:
+        if "Qwen2Audio" in model_name:
             model = Qwen2AudioForConditionalGeneration.from_pretrained(
                 model_name,
                 quantization_config=quantization_config,
@@ -41,7 +41,7 @@ def AutoLLMLoader(model_name, use_lora=False, lora_config=None, replace_output_h
             model = AutoModelForCausalLM.from_pretrained(
                 model_name,
                 device_map="auto",
-                torch_dtype=torch.float16,
+                # torch_dtype=torch.float16,
             )
                 # quantization_config=quantization_config,
         
