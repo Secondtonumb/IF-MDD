@@ -1,17 +1,16 @@
 # Hyperparameters toggles
 prefix: ""
 
-lab_enc_file: /home/kevingenghaopeng/MDD/IF-MDD/exp_l2arctic/wavlm_large_None_PhnMonoSSL_ottc_l2arctic/save/label_encoder.txt
-
-ctc_loss_type: "crottc"  # Options: "ctc", "ottc", "crctc", "crottc"
-encoder_type: None  # Options: None, "conformer", "zipformer", "rvq"
+lab_enc_file: /home/kevingenghaopeng/MDD/IF-MDD/exp_iqra/wavlm_large_None_PhnMonoSSL_ottc_confEnc/save/label_encoder.txt
+ctc_loss_type: "crottc"  # Options: "ctc", "ottc", "crctc"
+encoder_type: "None"  # Options: None, "conformer", "zipformer", "rvq"
 
 wandb_project: "l2arctic"
 # Wandb Tags
 tags:
     - PhnMonoSSL
-    - CROTTC
-    - l2arctic
+    - crottc
+    - beta_prior
 
 ## SSL features Selection
 pretrained_models_path: pretrained_models/
@@ -35,6 +34,7 @@ pretrained_models_path: pretrained_models/
 # }
 
 
+
 # select pretrained SSL models
 perceived_ssl_model: "wavlm_large" # in pretrained_models
 canonical_ssl_model: Null
@@ -48,10 +48,10 @@ blend_alpha: 0.5              # If using "blend" fusion
 
 # Input files
 # Data files
-data_folder_save: "./data"
-train_annotation: !ref <data_folder_save>/train-train.json
-valid_annotation: !ref <data_folder_save>/train-dev.json
-test_annotation: !ref <data_folder_save>/test.json
+data_folder_save: "/home/kevingenghaopeng/MDD/IF-MDD/data_iqra_extra_is26"
+train_annotation: !ref <data_folder_save>/iqra_extra_is26_train_aligned.json
+valid_annotation: !ref <data_folder_save>/iqra_extra_is26_dev_aligned.json
+test_annotation: !ref <data_folder_save>/iqra_extra_is26_test_aligned.json
 # Extra data
 train_annotation_extra: !ref <data_folder_save>/train-train_with_extra.json
 use_extra_train_data: False
@@ -65,7 +65,7 @@ max_save_models: 3 # Maximum number of saved models for each metrics
 # generate_training_id: !apply:trainer.generate_training_id.generate_training_id [!ref <perceived_ssl_model_id>, !ref <canonical_ssl_model_id>, !ref <feature_fusion>, !ref <prefix>]
 
 # output files
-output_folder: !ref exp_l2arctic/<perceived_ssl_model>_<canonical_ssl_model>_<feature_fusion>_<prefix>
+output_folder: !ref exp_iqra/<perceived_ssl_model>_<canonical_ssl_model>_<feature_fusion>_<prefix>
 per_file: !ref <output_folder>/per.txt
 mpd_file: !ref <output_folder>/mpd.txt
 save_folder: !ref <output_folder>/save
@@ -83,6 +83,7 @@ modules:
     canonical_ssl: !ref <canonical_ssl>
     perceived_ssl: !ref <perceived_ssl>
     enc: !ref <enc>
+    ConformerEncoder: !ref <ConformerEncoder>
     ctc_lin: !ref <ctc_lin>
     lm_weight: !ref <lm_weight>
 
@@ -111,6 +112,18 @@ enc: !new:torch.nn.Sequential
      dnn_neurons: !ref <dnn_neurons>
   - !new:torch.nn.LayerNorm
      normalized_shape: !ref <dnn_neurons>
+
+
+kernel_size: 7
+attention_type: "RoPEMHA"  # Options: "standard", "RoPE"
+ConformerEncoder: !new:speechbrain.lobes.models.transformer.Conformer.ConformerEncoder
+      num_layers: 2
+      nhead: 8
+      d_ffn: !ref <dnn_neurons>
+      d_model: !ref <dnn_neurons>
+      dropout: 0.1
+      kernel_size: !ref <kernel_size>
+      attention_type: !ref <attention_type>
 
 ctc_lin:  !new:speechbrain.nnet.linear.Linear
     input_size: !ref <dnn_neurons>
@@ -144,18 +157,16 @@ log_softmax: !new:speechbrain.nnet.activations.Softmax
 
 ctc_cost: !name:utils.losses.ot_loss.batched_ottc_loss_bucketized
 
-# ctc_cost_test: !name:speechbrain.nnet.losses.ctc_loss
-#      blank_index: !ref <blank_index>
 
 ctc_cost_mispro: !name:speechbrain.nnet.losses.ctc_loss
     blank_index: !ref <blank_index>
 
 # Outputs
-output_neurons: 44 # l2arctic: 40phns(sil)+err+blank + eos + bos =44
+output_neurons: 71 # l2arctic: 40phns(sil)+err+blank + eos + bos =44
 blank_index: 0
 
 model: !new:torch.nn.ModuleList
-    - [!ref <enc>, !ref <ctc_lin>, !ref <lm_weight>]
+    - [!ref <enc>, !ref <ConformerEncoder>, !ref <ctc_lin>, !ref <lm_weight>]
 
 adam_opt_class: !name:torch.optim.Adam
     lr: !ref <lr>
@@ -170,8 +181,10 @@ checkpointer: !new:speechbrain.utils.checkpoints.Checkpointer
         perceived_ssl: !ref <perceived_ssl>
         counter: !ref <epoch_counter>
     allow_partial_load: True
-# canonical_ssl: !ref <canonical_ssl>
 
+# augmentation: !new:speechbrain.augment.time_domain.SpeedPerturb
+#     orig_freq: !ref <sample_rate>
+#     speeds: [95, 100, 105]
 
 spec_augmentation: !new:speechbrain.augment.freq_domain.SpectrogramDrop
     drop_length_low: 5
@@ -188,9 +201,10 @@ freq_chunk_augmentation: !new:speechbrain.augment.time_domain.DropFreq
     drop_freq_width: 0.10
     epsilon: 1e-12
 
+drop_length_high: 3000
 time_chunk_augmentation: !new:speechbrain.augment.time_domain.DropChunk
     drop_length_low: 1000
-    drop_length_high: 3000
+    drop_length_high: !ref <drop_length_high>
     drop_count_low: 1
     drop_count_high: 3
 
@@ -238,9 +252,10 @@ __set_seed: !apply:torch.manual_seed [!ref <seed>]
 
 # training parameters
 number_of_epochs: 300
-batch_size: 16
-lr: 0.0003
-sorting: ascending
+batch_size: 6
+lr: 0.0002
+# sorting: ascending
+sorting
 sample_rate: 16000
 gradient_accumulation: 2
 lr_pretrained: 0.00001
@@ -263,6 +278,7 @@ valid_dataloader_opts:
 test_dataloader_opts:
     batch_size: !ref <batch_size>
 
+# 
 pretrainer: !new:speechbrain.utils.parameter_transfer.Pretrainer
     collect_in: !ref <save_folder>/
     loadables:
@@ -280,3 +296,80 @@ decoding_function: !name:speechbrain.decoders.ctc_greedy_decode
 
 tokenizer: !new:speechbrain.dataio.encoder.TextEncoder
     load_from_file: utils/label_encoder.txt
+
+label_importance_weights: !apply:torch.Tensor.to
+    - !new:torch.Tensor
+        - [
+            1.0,      # 0: <blank>
+            2.0,      # 1: <eos>
+            0.5,      # 2: <sil> - error_rate=100.00%
+            1.0,      # 3: y
+            1.0,      # 4: a
+            1.0,      # 5: f
+            1.0,      # 6: q
+            1.0,      # 7: A
+            1.0,      # 8: h
+            1.0,      # 9: w
+            1.0,      # 10: l
+            1.0,      # 11: ii
+            1.0,      # 12: H
+            1.0,      # 13: $
+            1.0,      # 14: r
+            1.0,      # 15: n
+            1.0,      # 16: aa
+            1.0,      # 17: d
+            1.0,      # 18: <
+            1.0,      # 19: i
+            1.0,      # 20: s
+            1.0,      # 21: u
+            0.5,      # 22: j - error_rate=11.40%
+            0.5,      # 23: z - error_rate=35.07%
+            1.0,      # 24: m
+            1.0,      # 25: b
+            1.0,      # 26: AA
+            1.0,      # 27: Z - error_rate=10.10%
+            1.0,      # 28: I
+            1.0,      # 29: t
+            1.0,      # 30: k
+            1.0,      # 31: g
+            1.0,      # 32: E
+            1.0,      # 33: ll
+            1.0,      # 34: uu
+            0.5,      # 35: S - error_rate=18.92%
+            0.5,      # 36: * - error_rate=11.42%
+            0.5,      # 37: ^ - error_rate=14.04%
+            1.0,      # 38: UU
+            1.0,      # 39: zz
+            1.0,      # 40: x
+            0.5,      # 41: D - error_rate=10.34%
+            1.0,      # 42: mm
+            1.0,      # 43: ss
+            1.0,      # 44: EE
+            1.0,      # 45: ww
+            1.0,      # 46: nn
+            1.0,      # 47: U
+            1.0,      # 48: T
+            1.0,      # 49: **
+            1.0,      # 50: bb
+            1.0,      # 51: qq
+            0.5,      # 52: dd - error_rate=35.85%
+            1.0,      # 53: rr
+            1.0,      # 54: ZZ
+            1.0,      # 55: $$
+            1.0,      # 56: jj
+            1.0,      # 57: kk
+            1.0,      # 58: SS
+            1.0,      # 59: tt
+            1.0,      # 60: yy
+            1.0,      # 61: ^^
+            1.0,      # 62: TT
+            1.0,      # 63: xx
+            1.0,      # 64: ff
+            1.0,      # 65: DD
+            1.0,      # 66: II
+            1.0,      # 67: hh
+            1.0,      # 68: HH
+            1.0,      # 69: <bos>
+            1.0,      # 70: (reserved)
+            ]
+    - "cuda:0"

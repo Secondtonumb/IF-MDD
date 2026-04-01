@@ -71,7 +71,8 @@ def AutoLLMLoader(model_name, use_lora=False, lora_config=None, replace_output_h
                 lora_alpha=lora_config["alpha"],
                 lora_dropout=lora_config["dropout"],
                 target_modules=lora_config["target_modules"],
-            )
+            )   
+            
             model = get_peft_model(model, peft_config)
             # Print trainable params
             model.print_trainable_parameters()

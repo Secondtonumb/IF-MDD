@@ -146,3 +146,11 @@ python train.py \
         --pretrained_model_path /home/kevingenghaopeng/MDD/IF-MDD/pretrained_models/CTC_for_IF-MDD \
         --components_to_load '["ssl", "enc"]' \
         --freeze_loaded_components True
+
+
+
+python train.py /home/kevingenghaopeng/MDD/IF-MDD/hparams/ConPCO.yaml \
+        --plot_conpco True \
+        --plot_attention True \
+        --plot_conpco_interval 1 \
+        --plot_attention_interval 1 
