@@ -1,0 +1,554 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>FADG0_SI1909 alignment examples</title>
+<style>
+body {
+  margin: 24px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #f7f8fa;
+  color: #202124;
+}
+h1 { margin: 0 0 8px; font-size: 23px; }
+.subtitle { margin: 0 0 16px; color: #5f6368; }
+.player {
+  background: white;
+  border: 1px solid #d8dde6;
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 16px;
+  display: grid;
+  grid-template-columns: minmax(320px, 520px) 1fr;
+  gap: 14px;
+  align-items: center;
+}
+.now-playing {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: #41464d;
+}
+.model-card {
+  background: white;
+  border: 1px solid #d8dde6;
+  border-radius: 8px;
+  padding: 13px 14px 16px;
+  margin: 14px 0;
+  min-width: 980px;
+}
+h2 { margin: 0 0 4px; font-size: 17px; }
+.meta { color: #68707a; font-size: 12px; margin-bottom: 8px; }
+.phones {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.35;
+  color: #3d4249;
+  max-height: 44px;
+  overflow: auto;
+  margin-bottom: 10px;
+}
+.lane-label {
+  font-size: 12px;
+  font-weight: 750;
+  margin: 8px 0 5px;
+}
+.pred-label { margin-top: 12px; }
+.timeline {
+  position: relative;
+  height: 42px;
+  border: 1px solid #d8dde6;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #f0f2f5;
+}
+.timeline.ref { background: #eef6ff; }
+.timeline.pred { background: #fff5e6; }
+.seg {
+  position: absolute;
+  top: 6px;
+  height: 30px;
+  box-sizing: border-box;
+  border-right: 1px solid rgba(255,255,255,0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  cursor: pointer;
+}
+.ref .seg { background: #4c78a8; }
+.pred .seg { background: #f28e2b; }
+.seg:hover, .seg.active {
+  outline: 3px solid #111;
+  z-index: 8;
+  filter: brightness(1.08);
+}
+.seg span {
+  color: #111;
+  font-size: 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: nowrap;
+}
+.axis {
+  position: relative;
+  height: 23px;
+  border-top: 1px solid #333;
+  margin: 5px 0 0;
+}
+.tick { position: absolute; top: -1px; transform: translateX(-50%); }
+.tick-line { width: 1px; height: 7px; background: #333; margin: 0 auto; }
+.tick-label { margin-top: 2px; font-size: 9px; color: #333; }
+</style>
+</head>
+<body>
+<h1>Alignment Example: FADG0_SI1909</h1>
+<div class="subtitle">Duration: 2.790s. Reference and prediction are drawn with the same phone sequence.</div>
+<div class="player">
+  <audio id="audio-player" controls preload="auto" src="file:///work/gm64/m64000/IF-MDD/data/timit_alignments/audio/dev_clean/FADG0_SI1909.wav"></audio>
+  <div id="now-playing" class="now-playing">Click a segment to play that interval.</div>
+</div>
+
+<section class="model-card">
+  <h2>LIBRISPEECH_CTC</h2>
+  <div class="meta">timit_dev / phonemes / /work/gm64/m64000/IF-MDD/data/timit_alignments_39phone/audio/dev_clean/FADG0_SI1909.wav</div>
+  <div class="phones">sil f ae sil sh ow sil d ih n l uw s r ow l z sil b ih n iy th ih sh er sil sil</div>
+  <div class="lane-label">Reference</div>
+  <div class="timeline ref">
+<div class="seg" style="left:0.0000%;width:5.0171%;" title="sil: 0.000-0.140s" data-start="0.000000" data-end="0.140000" data-label="sil" role="button" tabindex="0"><span>sil</span></div>
+<div class="seg" style="left:5.0171%;width:4.3004%;" title="f: 0.140-0.260s" data-start="0.140000" data-end="0.260000" data-label="f" role="button" tabindex="0"><span>f</span></div>
+<div class="seg" style="left:9.6759%;width:6.0922%;" title="ae: 0.270-0.440s" data-start="0.270000" data-end="0.440000" data-label="ae" role="button" tabindex="0"><span>ae</span></div>
+<div class="seg" style="left:15.4098%;width:1.0751%;" title="sil: 0.430-0.460s" data-start="0.430000" data-end="0.460000" data-label="sil" role="button" tabindex="0"><span>sil</span></div>
+<div class="seg" style="left:16.4849%;width:6.4506%;" title="sh: 0.460-0.640s" data-start="0.460000" data-end="0.640000" data-label="sh" role="button" tabindex="0"><span>sh</span></div>
+<div class="seg" style="left:22.9355%;width:8.6008%;" title="ow: 0.640-0.880s" data-start="0.640000" data-end="0.880000" data-label="ow" role="button" tabindex="0"><span>ow</span></div>
+<div class="seg" style="left:31.5363%;width:1.0751%;" title="sil: 0.880-0.910s" data-start="0.880000" data-end="0.910000" data-label="sil" role="button" tabindex="0"><span>sil</span></div>
+<div class="seg" style="left:32.6114%;width:0.7167%;" title="d: 0.910-0.930s" data-start="0.910000" data-end="0.930000" data-label="d" role="button" tabindex="0"><span>d</span></div>
+<div class="seg" style="left:35.1199%;width:1.7918%;" title="ih: 0.980-1.030s" data-start="0.980000" data-end="1.030000" data-label="ih" role="button" tabindex="0"><span>ih</span></div>
+<div class="seg" style="left:36.9118%;width:2.8669%;" title="n: 1.030-1.110s" data-start="1.030000" data-end="1.110000" data-label="n" role="button" tabindex="0"><span>n</span></div>
+<div class="seg" style="left:39.7787%;width:2.5086%;" title="l: 1.110-1.180s" data-start="1.110000" data-end="1.180000" data-label="l" role="button" tabindex="0"><span>l</span></div>
+<div class="seg" style="left:42.6456%;width:4.6588%;" title="uw: 1.190-1.320s" data-start="1.190000" data-end="1.320000" data-label="uw" role="button" tabindex="0"><span>uw</span></div>
+<div class="seg" style="left:46.9460%;width:5.3755%;" title="s: 1.310-1.460s" data-start="1.310000" data-end="1.460000" data-label="s" role="button" tabindex="0"><span>s</span></div>
+<div class="seg" style="left:52.3215%;width:2.5086%;" title="r: 1.460-1.530s" data-start="1.460000" data-end="1.530000" data-label="r" role="button" tabindex="0"><span>r</span></div>
+<div class="seg" style="left:54.8301%;width:3.5837%;" title="ow: 1.530-1.630s" data-start="1.530000" data-end="1.630000" data-label="ow" role="button" tabindex="0"><span>ow</span></div>
+<div class="seg" style="left:58.4138%;width:3.9420%;" title="l: 1.630-1.740s" data-start="1.630000" data-end="1.740000" data-label="l" role="button" tabindex="0"><span>l</span></div>
+<div class="seg" style="left:62.3558%;width:3.5837%;" title="z: 1.740-1.840s" data-start="1.740000" data-end="1.840000" data-label="z" role="button" tabindex="0"><span>z</span></div>
+<div class="seg" style="left:65.9395%;width:2.5086%;" title="sil: 1.840-1.910s" data-start="1.840000" data-end="1.910000" data-label="sil" role="button" tabindex="0"><span>sil</span></div>
+<div class="seg" style="left:68.0897%;width:0.7167%;" title="b: 1.900-1.920s" data-start="1.900000" data-end="1.920000" data-label="b" role="button" tabindex="0"><span>b</span></div>
+<div class="seg" style="left:68.8064%;width:0.7167%;" title="ih: 1.920-1.940s" data-start="1.920000" data-end="1.940000" data-label="ih" role="button" tabindex="0"><span>ih</span></div>
+<div class="seg" style="left:69.5231%;width:2.5086%;" title="n: 1.940-2.010s" data-start="1.940000" data-end="2.010000" data-label="n" role="button" tabindex="0"><span>n</span></div>
+<div class="seg" style="left:72.0317%;width:3.9420%;" title="iy: 2.010-2.120s" data-start="2.010000" data-end="2.120000" data-label="iy" role="button" tabindex="0"><span>iy</span></div>
+<div class="seg" style="left:75.9737%;width:5.3755%;" title="th: 2.120-2.270s" data-start="2.120000" data-end="2.270000" data-label="th" role="button" tabindex="0"><span>th</span></div>
+<div class="seg" style="left:81.3493%;width:1.4335%;" title="ih: 2.270-2.310s" data-start="2.270000" data-end="2.310000" data-label="ih" role="button" tabindex="0"><span>ih</span></div>
+<div class="seg" style="left:82.7827%;width:5.0171%;" title="sh: 2.310-2.450s" data-start="2.310000" data-end="2.450000" data-label="sh" role="button" tabindex="0"><span>sh</span></div>
+<div class="seg" style="left:88.1582%;width:7.5257%;" title="er: 2.460-2.670s" data-start="2.460000" data-end="2.670000" data-label="er" role="button" tabindex="0"><span>er</span></div>
+<div class="seg" style="left:95.6839%;width:2.1502%;" title="sil: 2.670-2.730s" data-start="2.670000" data-end="2.730000" data-label="sil" role="button" tabindex="0"><span>sil</span></div>
+<div class="seg" style="left:97.8341%;width:2.1502%;" title="sil: 2.730-2.790s" data-start="2.730000" data-end="2.790000" data-label="sil" role="button" tabindex="0"><span>sil</span></div>
+</div>
+  <div class="axis">
+<div class="tick" style="left:0.0000%"><div class="tick-line"></div><div class="tick-label">0</div></div>
+<div class="tick" style="left:8.9592%"><div class="tick-line"></div><div class="tick-label">0.25</div></div>
+<div class="tick" style="left:17.9183%"><div class="tick-line"></div><div class="tick-label">0.5</div></div>
+<div class="tick" style="left:26.8775%"><div class="tick-line"></div><div class="tick-label">0.75</div></div>
+<div class="tick" style="left:35.8367%"><div class="tick-line"></div><div class="tick-label">1</div></div>
+<div class="tick" style="left:44.7958%"><div class="tick-line"></div><div class="tick-label">1.25</div></div>
+<div class="tick" style="left:53.7550%"><div class="tick-line"></div><div class="tick-label">1.5</div></div>
+<div class="tick" style="left:62.7142%"><div class="tick-line"></div><div class="tick-label">1.75</div></div>
+<div class="tick" style="left:71.6733%"><div class="tick-line"></div><div class="tick-label">2</div></div>
+<div class="tick" style="left:80.6325%"><div class="tick-line"></div><div class="tick-label">2.25</div></div>
+<div class="tick" style="left:89.5917%"><div class="tick-line"></div><div class="tick-label">2.5</div></div>
+<div class="tick" style="left:98.5509%"><div class="tick-line"></div><div class="tick-label">2.75</div></div>
+</div>
+  <div class="lane-label pred-label">Prediction</div>
+  <div class="timeline pred">
+<div class="seg" style="left:0.0000%;width:7.1942%;" title="sil: 0.000-0.201s score=0.863" data-start="0.000000" data-end="0.200751" data-label="sil" role="button" tabindex="0"><span>sil</span></div>
+<div class="seg" style="left:7.1942%;width:5.0360%;" title="f: 0.201-0.341s score=0.997" data-start="0.200751" data-end="0.341277" data-label="f" role="button" tabindex="0"><span>f</span></div>
+<div class="seg" style="left:12.2302%;width:3.5971%;" title="ae: 0.341-0.442s score=1.000" data-start="0.341277" data-end="0.441652" data-label="ae" role="button" tabindex="0"><span>ae</span></div>
+<div class="seg" style="left:15.8273%;width:5.0360%;" title="sil: 0.442-0.582s score=0.000" data-start="0.441652" data-end="0.582178" data-label="sil" role="button" tabindex="0"><span>sil</span></div>
+<div class="seg" style="left:20.8633%;width:5.7554%;" title="sh: 0.582-0.743s score=1.000" data-start="0.582178" data-end="0.742778" data-label="sh" role="button" tabindex="0"><span>sh</span></div>
+<div class="seg" style="left:26.6187%;width:0.7194%;" title="ow: 0.743-0.763s score=0.995" data-start="0.742778" data-end="0.762853" data-label="ow" role="button" tabindex="0"><span>ow</span></div>
+<div class="seg" style="left:27.3381%;width:4.3165%;" title="sil: 0.763-0.883s score=0.000" data-start="0.762853" data-end="0.883304" data-label="sil" role="button" tabindex="0"><span>sil</span></div>
+<div class="seg" style="left:31.6547%;width:4.3165%;" title="d: 0.883-1.004s score=0.999" data-start="0.883304" data-end="1.003754" data-label="d" role="button" tabindex="0"><span>d</span></div>
+<div class="seg" style="left:35.9712%;width:1.4388%;" title="ih: 1.004-1.044s score=1.000" data-start="1.003754" data-end="1.043905" data-label="ih" role="button" tabindex="0"><span>ih</span></div>
+<div class="seg" style="left:37.4101%;width:3.5971%;" title="n: 1.044-1.144s score=0.844" data-start="1.043905" data-end="1.144280" data-label="n" role="button" tabindex="0"><span>n</span></div>
+<div class="seg" style="left:41.0072%;width:3.5971%;" title="l: 1.144-1.245s score=0.973" data-start="1.144280" data-end="1.244656" data-label="l" role="button" tabindex="0"><span>l</span></div>
+<div class="seg" style="left:44.6043%;width:3.5971%;" title="uw: 1.245-1.345s score=1.000" data-start="1.244656" data-end="1.345031" data-label="uw" role="button" tabindex="0"><span>uw</span></div>
+<div class="seg" style="left:48.2014%;width:4.3165%;" title="s: 1.345-1.465s score=1.000" data-start="1.345031" data-end="1.465482" data-label="s" role="button" tabindex="0"><span>s</span></div>
+<div class="seg" style="left:52.5180%;width:4.3165%;" title="r: 1.465-1.586s score=1.000" data-start="1.465482" data-end="1.585932" data-label="r" role="button" tabindex="0"><span>r</span></div>
+<div class="seg" style="left:56.8345%;width:2.8777%;" title="ow: 1.586-1.666s score=0.997" data-start="1.585932" data-end="1.666232" data-label="ow" role="button" tabindex="0"><span>ow</span></div>
+<div class="seg" style="left:59.7122%;width:2.8777%;" title="l: 1.666-1.747s score=0.967" data-start="1.666232" data-end="1.746533" data-label="l" role="button" tabindex="0"><span>l</span></div>
+<div class="seg" style="left:62.5899%;width:4.3165%;" title="z: 1.747-1.867s score=0.908" data-start="1.746533" data-end="1.866983" data-label="z" role="button" tabindex="0"><span>z</span></div>
+<div class="seg" style="left:66.9065%;width:0.7194%;" title="sil: 1.867-1.887s score=0.000" data-start="1.866983" data-end="1.887058" data-label="sil" role="button" tabindex="0"><span>sil</span></div>
+<div class="seg" style="left:67.6259%;width:1.4388%;" title="b: 1.887-1.927s score=1.000" data-start="1.887058" data-end="1.927209" data-label="b" role="button" tabindex="0"><span>b</span></div>
+<div class="seg" style="left:69.0647%;width:2.1583%;" title="ih: 1.927-1.987s score=1.000" data-start="1.927209" data-end="1.987434" data-label="ih" role="button" tabindex="0"><span>ih</span></div>
+<div class="seg" style="left:71.2230%;width:2.8777%;" title="n: 1.987-2.068s score=0.913" data-start="1.987434" data-end="2.067734" data-label="n" role="button" tabindex="0"><span>n</span></div>
+<div class="seg" style="left:74.1007%;width:2.8777%;" title="iy: 2.068-2.148s score=0.768" data-start="2.067734" data-end="2.148035" data-label="iy" role="button" tabindex="0"><span>iy</span></div>
+<div class="seg" style="left:76.9784%;width:5.0360%;" title="th: 2.148-2.289s score=0.975" data-start="2.148035" data-end="2.288560" data-label="th" role="button" tabindex="0"><span>th</span></div>
+<div class="seg" style="left:82.0144%;width:3.5971%;" title="ih: 2.289-2.389s score=0.000" data-start="2.288560" data-end="2.388936" data-label="ih" role="button" tabindex="0"><span>ih</span></div>
+<div class="seg" style="left:85.6115%;width:5.0360%;" title="sh: 2.389-2.529s score=0.906" data-start="2.388936" data-end="2.529461" data-label="sh" role="button" tabindex="0"><span>sh</span></div>
+<div class="seg" style="left:90.6475%;width:5.7554%;" title="er: 2.529-2.690s score=1.000" data-start="2.529461" data-end="2.690062" data-label="er" role="button" tabindex="0"><span>er</span></div>
+<div class="seg" style="left:96.4029%;width:2.1583%;" title="sil: 2.690-2.750s score=0.000" data-start="2.690062" data-end="2.750287" data-label="sil" role="button" tabindex="0"><span>sil</span></div>
+<div class="seg" style="left:98.5612%;width:1.4388%;" title="sil: 2.750-2.790s score=1.000" data-start="2.750287" data-end="2.790437" data-label="sil" role="button" tabindex="0"><span>sil</span></div>
+</div>
+  <div class="axis">
+<div class="tick" style="left:0.0000%"><div class="tick-line"></div><div class="tick-label">0</div></div>
+<div class="tick" style="left:8.9592%"><div class="tick-line"></div><div class="tick-label">0.25</div></div>
+<div class="tick" style="left:17.9183%"><div class="tick-line"></div><div class="tick-label">0.5</div></div>
+<div class="tick" style="left:26.8775%"><div class="tick-line"></div><div class="tick-label">0.75</div></div>
+<div class="tick" style="left:35.8367%"><div class="tick-line"></div><div class="tick-label">1</div></div>
+<div class="tick" style="left:44.7958%"><div class="tick-line"></div><div class="tick-label">1.25</div></div>
+<div class="tick" style="left:53.7550%"><div class="tick-line"></div><div class="tick-label">1.5</div></div>
+<div class="tick" style="left:62.7142%"><div class="tick-line"></div><div class="tick-label">1.75</div></div>
+<div class="tick" style="left:71.6733%"><div class="tick-line"></div><div class="tick-label">2</div></div>
+<div class="tick" style="left:80.6325%"><div class="tick-line"></div><div class="tick-label">2.25</div></div>
+<div class="tick" style="left:89.5917%"><div class="tick-line"></div><div class="tick-label">2.5</div></div>
+<div class="tick" style="left:98.5509%"><div class="tick-line"></div><div class="tick-label">2.75</div></div>
+</div>
+</section>
+
+
+<section class="model-card">
+  <h2>LIBRISPEECH_CRCTC</h2>
+  <div class="meta">timit_dev / phonemes / /work/gm64/m64000/IF-MDD/data/timit_alignments_39phone/audio/dev_clean/FADG0_SI1909.wav</div>
+  <div class="phones">sil f ae sil sh ow sil d ih n l uw s r ow l z sil b ih n iy th ih sh er sil sil</div>
+  <div class="lane-label">Reference</div>
+  <div class="timeline ref">
+<div class="seg" style="left:0.0000%;width:5.0171%;" title="sil: 0.000-0.140s" data-start="0.000000" data-end="0.140000" data-label="sil" role="button" tabindex="0"><span>sil</span></div>
+<div class="seg" style="left:5.0171%;width:4.3004%;" title="f: 0.140-0.260s" data-start="0.140000" data-end="0.260000" data-label="f" role="button" tabindex="0"><span>f</span></div>
+<div class="seg" style="left:9.6759%;width:6.0922%;" title="ae: 0.270-0.440s" data-start="0.270000" data-end="0.440000" data-label="ae" role="button" tabindex="0"><span>ae</span></div>
+<div class="seg" style="left:15.4098%;width:1.0751%;" title="sil: 0.430-0.460s" data-start="0.430000" data-end="0.460000" data-label="sil" role="button" tabindex="0"><span>sil</span></div>
+<div class="seg" style="left:16.4849%;width:6.4506%;" title="sh: 0.460-0.640s" data-start="0.460000" data-end="0.640000" data-label="sh" role="button" tabindex="0"><span>sh</span></div>
+<div class="seg" style="left:22.9355%;width:8.6008%;" title="ow: 0.640-0.880s" data-start="0.640000" data-end="0.880000" data-label="ow" role="button" tabindex="0"><span>ow</span></div>
+<div class="seg" style="left:31.5363%;width:1.0751%;" title="sil: 0.880-0.910s" data-start="0.880000" data-end="0.910000" data-label="sil" role="button" tabindex="0"><span>sil</span></div>
+<div class="seg" style="left:32.6114%;width:0.7167%;" title="d: 0.910-0.930s" data-start="0.910000" data-end="0.930000" data-label="d" role="button" tabindex="0"><span>d</span></div>
+<div class="seg" style="left:35.1199%;width:1.7918%;" title="ih: 0.980-1.030s" data-start="0.980000" data-end="1.030000" data-label="ih" role="button" tabindex="0"><span>ih</span></div>
+<div class="seg" style="left:36.9118%;width:2.8669%;" title="n: 1.030-1.110s" data-start="1.030000" data-end="1.110000" data-label="n" role="button" tabindex="0"><span>n</span></div>
+<div class="seg" style="left:39.7787%;width:2.5086%;" title="l: 1.110-1.180s" data-start="1.110000" data-end="1.180000" data-label="l" role="button" tabindex="0"><span>l</span></div>
+<div class="seg" style="left:42.6456%;width:4.6588%;" title="uw: 1.190-1.320s" data-start="1.190000" data-end="1.320000" data-label="uw" role="button" tabindex="0"><span>uw</span></div>
+<div class="seg" style="left:46.9460%;width:5.3755%;" title="s: 1.310-1.460s" data-start="1.310000" data-end="1.460000" data-label="s" role="button" tabindex="0"><span>s</span></div>
+<div class="seg" style="left:52.3215%;width:2.5086%;" title="r: 1.460-1.530s" data-start="1.460000" data-end="1.530000" data-label="r" role="button" tabindex="0"><span>r</span></div>
+<div class="seg" style="left:54.8301%;width:3.5837%;" title="ow: 1.530-1.630s" data-start="1.530000" data-end="1.630000" data-label="ow" role="button" tabindex="0"><span>ow</span></div>
+<div class="seg" style="left:58.4138%;width:3.9420%;" title="l: 1.630-1.740s" data-start="1.630000" data-end="1.740000" data-label="l" role="button" tabindex="0"><span>l</span></div>
+<div class="seg" style="left:62.3558%;width:3.5837%;" title="z: 1.740-1.840s" data-start="1.740000" data-end="1.840000" data-label="z" role="button" tabindex="0"><span>z</span></div>
+<div class="seg" style="left:65.9395%;width:2.5086%;" title="sil: 1.840-1.910s" data-start="1.840000" data-end="1.910000" data-label="sil" role="button" tabindex="0"><span>sil</span></div>
+<div class="seg" style="left:68.0897%;width:0.7167%;" title="b: 1.900-1.920s" data-start="1.900000" data-end="1.920000" data-label="b" role="button" tabindex="0"><span>b</span></div>
+<div class="seg" style="left:68.8064%;width:0.7167%;" title="ih: 1.920-1.940s" data-start="1.920000" data-end="1.940000" data-label="ih" role="button" tabindex="0"><span>ih</span></div>
+<div class="seg" style="left:69.5231%;width:2.5086%;" title="n: 1.940-2.010s" data-start="1.940000" data-end="2.010000" data-label="n" role="button" tabindex="0"><span>n</span></div>
+<div class="seg" style="left:72.0317%;width:3.9420%;" title="iy: 2.010-2.120s" data-start="2.010000" data-end="2.120000" data-label="iy" role="button" tabindex="0"><span>iy</span></div>
+<div class="seg" style="left:75.9737%;width:5.3755%;" title="th: 2.120-2.270s" data-start="2.120000" data-end="2.270000" data-label="th" role="button" tabindex="0"><span>th</span></div>
+<div class="seg" style="left:81.3493%;width:1.4335%;" title="ih: 2.270-2.310s" data-start="2.270000" data-end="2.310000" data-label="ih" role="button" tabindex="0"><span>ih</span></div>
+<div class="seg" style="left:82.7827%;width:5.0171%;" title="sh: 2.310-2.450s" data-start="2.310000" data-end="2.450000" data-label="sh" role="button" tabindex="0"><span>sh</span></div>
+<div class="seg" style="left:88.1582%;width:7.5257%;" title="er: 2.460-2.670s" data-start="2.460000" data-end="2.670000" data-label="er" role="button" tabindex="0"><span>er</span></div>
+<div class="seg" style="left:95.6839%;width:2.1502%;" title="sil: 2.670-2.730s" data-start="2.670000" data-end="2.730000" data-label="sil" role="button" tabindex="0"><span>sil</span></div>
+<div class="seg" style="left:97.8341%;width:2.1502%;" title="sil: 2.730-2.790s" data-start="2.730000" data-end="2.790000" data-label="sil" role="button" tabindex="0"><span>sil</span></div>
+</div>
+  <div class="axis">
+<div class="tick" style="left:0.0000%"><div class="tick-line"></div><div class="tick-label">0</div></div>
+<div class="tick" style="left:8.9592%"><div class="tick-line"></div><div class="tick-label">0.25</div></div>
+<div class="tick" style="left:17.9183%"><div class="tick-line"></div><div class="tick-label">0.5</div></div>
+<div class="tick" style="left:26.8775%"><div class="tick-line"></div><div class="tick-label">0.75</div></div>
+<div class="tick" style="left:35.8367%"><div class="tick-line"></div><div class="tick-label">1</div></div>
+<div class="tick" style="left:44.7958%"><div class="tick-line"></div><div class="tick-label">1.25</div></div>
+<div class="tick" style="left:53.7550%"><div class="tick-line"></div><div class="tick-label">1.5</div></div>
+<div class="tick" style="left:62.7142%"><div class="tick-line"></div><div class="tick-label">1.75</div></div>
+<div class="tick" style="left:71.6733%"><div class="tick-line"></div><div class="tick-label">2</div></div>
+<div class="tick" style="left:80.6325%"><div class="tick-line"></div><div class="tick-label">2.25</div></div>
+<div class="tick" style="left:89.5917%"><div class="tick-line"></div><div class="tick-label">2.5</div></div>
+<div class="tick" style="left:98.5509%"><div class="tick-line"></div><div class="tick-label">2.75</div></div>
+</div>
+  <div class="lane-label pred-label">Prediction</div>
+  <div class="timeline pred">
+<div class="seg" style="left:0.0000%;width:7.1942%;" title="sil: 0.000-0.201s score=0.931" data-start="0.000000" data-end="0.200751" data-label="sil" role="button" tabindex="0"><span>sil</span></div>
+<div class="seg" style="left:7.1942%;width:5.0360%;" title="f: 0.201-0.341s score=0.939" data-start="0.200751" data-end="0.341277" data-label="f" role="button" tabindex="0"><span>f</span></div>
+<div class="seg" style="left:12.2302%;width:3.5971%;" title="ae: 0.341-0.442s score=0.999" data-start="0.341277" data-end="0.441652" data-label="ae" role="button" tabindex="0"><span>ae</span></div>
+<div class="seg" style="left:15.8273%;width:5.0360%;" title="sil: 0.442-0.582s score=0.000" data-start="0.441652" data-end="0.582178" data-label="sil" role="button" tabindex="0"><span>sil</span></div>
+<div class="seg" style="left:20.8633%;width:5.0360%;" title="sh: 0.582-0.723s score=1.000" data-start="0.582178" data-end="0.722703" data-label="sh" role="button" tabindex="0"><span>sh</span></div>
+<div class="seg" style="left:25.8993%;width:0.7194%;" title="ow: 0.723-0.743s score=0.976" data-start="0.722703" data-end="0.742778" data-label="ow" role="button" tabindex="0"><span>ow</span></div>
+<div class="seg" style="left:26.6187%;width:5.0360%;" title="sil: 0.743-0.883s score=0.000" data-start="0.742778" data-end="0.883304" data-label="sil" role="button" tabindex="0"><span>sil</span></div>
+<div class="seg" style="left:31.6547%;width:4.3165%;" title="d: 0.883-1.004s score=0.999" data-start="0.883304" data-end="1.003754" data-label="d" role="button" tabindex="0"><span>d</span></div>
+<div class="seg" style="left:35.9712%;width:1.4388%;" title="ih: 1.004-1.044s score=1.000" data-start="1.003754" data-end="1.043905" data-label="ih" role="button" tabindex="0"><span>ih</span></div>
+<div class="seg" style="left:37.4101%;width:3.5971%;" title="n: 1.044-1.144s score=0.782" data-start="1.043905" data-end="1.144280" data-label="n" role="button" tabindex="0"><span>n</span></div>
+<div class="seg" style="left:41.0072%;width:3.5971%;" title="l: 1.144-1.245s score=0.960" data-start="1.144280" data-end="1.244656" data-label="l" role="button" tabindex="0"><span>l</span></div>
+<div class="seg" style="left:44.6043%;width:3.5971%;" title="uw: 1.245-1.345s score=1.000" data-start="1.244656" data-end="1.345031" data-label="uw" role="button" tabindex="0"><span>uw</span></div>
+<div class="seg" style="left:48.2014%;width:4.3165%;" title="s: 1.345-1.465s score=1.000" data-start="1.345031" data-end="1.465482" data-label="s" role="button" tabindex="0"><span>s</span></div>
+<div class="seg" style="left:52.5180%;width:4.3165%;" title="r: 1.465-1.586s score=0.999" data-start="1.465482" data-end="1.585932" data-label="r" role="button" tabindex="0"><span>r</span></div>
+<div class="seg" style="left:56.8345%;width:2.8777%;" title="ow: 1.586-1.666s score=1.000" data-start="1.585932" data-end="1.666232" data-label="ow" role="button" tabindex="0"><span>ow</span></div>
+<div class="seg" style="left:59.7122%;width:2.8777%;" title="l: 1.666-1.747s score=0.978" data-start="1.666232" data-end="1.746533" data-label="l" role="button" tabindex="0"><span>l</span></div>
+<div class="seg" style="left:62.5899%;width:0.7194%;" title="z: 1.747-1.767s score=0.801" data-start="1.746533" data-end="1.766608" data-label="z" role="button" tabindex="0"><span>z</span></div>
+<div class="seg" style="left:63.3094%;width:3.5971%;" title="sil: 1.767-1.867s score=0.000" data-start="1.766608" data-end="1.866983" data-label="sil" role="button" tabindex="0"><span>sil</span></div>
+<div class="seg" style="left:66.9065%;width:2.1583%;" title="b: 1.867-1.927s score=0.975" data-start="1.866983" data-end="1.927209" data-label="b" role="button" tabindex="0"><span>b</span></div>
+<div class="seg" style="left:69.0647%;width:2.1583%;" title="ih: 1.927-1.987s score=1.000" data-start="1.927209" data-end="1.987434" data-label="ih" role="button" tabindex="0"><span>ih</span></div>
+<div class="seg" style="left:71.2230%;width:2.8777%;" title="n: 1.987-2.068s score=0.941" data-start="1.987434" data-end="2.067734" data-label="n" role="button" tabindex="0"><span>n</span></div>
+<div class="seg" style="left:74.1007%;width:2.8777%;" title="iy: 2.068-2.148s score=0.963" data-start="2.067734" data-end="2.148035" data-label="iy" role="button" tabindex="0"><span>iy</span></div>
+<div class="seg" style="left:76.9784%;width:5.0360%;" title="th: 2.148-2.289s score=0.988" data-start="2.148035" data-end="2.288560" data-label="th" role="button" tabindex="0"><span>th</span></div>
+<div class="seg" style="left:82.0144%;width:3.5971%;" title="ih: 2.289-2.389s score=0.000" data-start="2.288560" data-end="2.388936" data-label="ih" role="button" tabindex="0"><span>ih</span></div>
+<div class="seg" style="left:85.6115%;width:5.0360%;" title="sh: 2.389-2.529s score=0.984" data-start="2.388936" data-end="2.529461" data-label="sh" role="button" tabindex="0"><span>sh</span></div>
+<div class="seg" style="left:90.6475%;width:6.4748%;" title="er: 2.529-2.710s score=0.989" data-start="2.529461" data-end="2.710137" data-label="er" role="button" tabindex="0"><span>er</span></div>
+<div class="seg" style="left:97.1223%;width:2.1583%;" title="sil: 2.710-2.770s score=0.000" data-start="2.710137" data-end="2.770362" data-label="sil" role="button" tabindex="0"><span>sil</span></div>
+<div class="seg" style="left:99.2806%;width:0.7194%;" title="sil: 2.770-2.790s score=0.022" data-start="2.770362" data-end="2.790437" data-label="sil" role="button" tabindex="0"><span>sil</span></div>
+</div>
+  <div class="axis">
+<div class="tick" style="left:0.0000%"><div class="tick-line"></div><div class="tick-label">0</div></div>
+<div class="tick" style="left:8.9592%"><div class="tick-line"></div><div class="tick-label">0.25</div></div>
+<div class="tick" style="left:17.9183%"><div class="tick-line"></div><div class="tick-label">0.5</div></div>
+<div class="tick" style="left:26.8775%"><div class="tick-line"></div><div class="tick-label">0.75</div></div>
+<div class="tick" style="left:35.8367%"><div class="tick-line"></div><div class="tick-label">1</div></div>
+<div class="tick" style="left:44.7958%"><div class="tick-line"></div><div class="tick-label">1.25</div></div>
+<div class="tick" style="left:53.7550%"><div class="tick-line"></div><div class="tick-label">1.5</div></div>
+<div class="tick" style="left:62.7142%"><div class="tick-line"></div><div class="tick-label">1.75</div></div>
+<div class="tick" style="left:71.6733%"><div class="tick-line"></div><div class="tick-label">2</div></div>
+<div class="tick" style="left:80.6325%"><div class="tick-line"></div><div class="tick-label">2.25</div></div>
+<div class="tick" style="left:89.5917%"><div class="tick-line"></div><div class="tick-label">2.5</div></div>
+<div class="tick" style="left:98.5509%"><div class="tick-line"></div><div class="tick-label">2.75</div></div>
+</div>
+</section>
+
+
+<section class="model-card">
+  <h2>LIBRISPEECH_OTTC</h2>
+  <div class="meta">timit_dev / phonemes / /work/gm64/m64000/IF-MDD/data/timit_alignments_39phone/audio/dev_clean/FADG0_SI1909.wav</div>
+  <div class="phones">sil f ae sil sh ow sil d ih n l uw s r ow l z sil b ih n iy th ih sh er sil sil</div>
+  <div class="lane-label">Reference</div>
+  <div class="timeline ref">
+<div class="seg" style="left:0.0000%;width:5.0171%;" title="sil: 0.000-0.140s" data-start="0.000000" data-end="0.140000" data-label="sil" role="button" tabindex="0"><span>sil</span></div>
+<div class="seg" style="left:5.0171%;width:4.3004%;" title="f: 0.140-0.260s" data-start="0.140000" data-end="0.260000" data-label="f" role="button" tabindex="0"><span>f</span></div>
+<div class="seg" style="left:9.6759%;width:6.0922%;" title="ae: 0.270-0.440s" data-start="0.270000" data-end="0.440000" data-label="ae" role="button" tabindex="0"><span>ae</span></div>
+<div class="seg" style="left:15.4098%;width:1.0751%;" title="sil: 0.430-0.460s" data-start="0.430000" data-end="0.460000" data-label="sil" role="button" tabindex="0"><span>sil</span></div>
+<div class="seg" style="left:16.4849%;width:6.4506%;" title="sh: 0.460-0.640s" data-start="0.460000" data-end="0.640000" data-label="sh" role="button" tabindex="0"><span>sh</span></div>
+<div class="seg" style="left:22.9355%;width:8.6008%;" title="ow: 0.640-0.880s" data-start="0.640000" data-end="0.880000" data-label="ow" role="button" tabindex="0"><span>ow</span></div>
+<div class="seg" style="left:31.5363%;width:1.0751%;" title="sil: 0.880-0.910s" data-start="0.880000" data-end="0.910000" data-label="sil" role="button" tabindex="0"><span>sil</span></div>
+<div class="seg" style="left:32.6114%;width:0.7167%;" title="d: 0.910-0.930s" data-start="0.910000" data-end="0.930000" data-label="d" role="button" tabindex="0"><span>d</span></div>
+<div class="seg" style="left:35.1199%;width:1.7918%;" title="ih: 0.980-1.030s" data-start="0.980000" data-end="1.030000" data-label="ih" role="button" tabindex="0"><span>ih</span></div>
+<div class="seg" style="left:36.9118%;width:2.8669%;" title="n: 1.030-1.110s" data-start="1.030000" data-end="1.110000" data-label="n" role="button" tabindex="0"><span>n</span></div>
+<div class="seg" style="left:39.7787%;width:2.5086%;" title="l: 1.110-1.180s" data-start="1.110000" data-end="1.180000" data-label="l" role="button" tabindex="0"><span>l</span></div>
+<div class="seg" style="left:42.6456%;width:4.6588%;" title="uw: 1.190-1.320s" data-start="1.190000" data-end="1.320000" data-label="uw" role="button" tabindex="0"><span>uw</span></div>
+<div class="seg" style="left:46.9460%;width:5.3755%;" title="s: 1.310-1.460s" data-start="1.310000" data-end="1.460000" data-label="s" role="button" tabindex="0"><span>s</span></div>
+<div class="seg" style="left:52.3215%;width:2.5086%;" title="r: 1.460-1.530s" data-start="1.460000" data-end="1.530000" data-label="r" role="button" tabindex="0"><span>r</span></div>
+<div class="seg" style="left:54.8301%;width:3.5837%;" title="ow: 1.530-1.630s" data-start="1.530000" data-end="1.630000" data-label="ow" role="button" tabindex="0"><span>ow</span></div>
+<div class="seg" style="left:58.4138%;width:3.9420%;" title="l: 1.630-1.740s" data-start="1.630000" data-end="1.740000" data-label="l" role="button" tabindex="0"><span>l</span></div>
+<div class="seg" style="left:62.3558%;width:3.5837%;" title="z: 1.740-1.840s" data-start="1.740000" data-end="1.840000" data-label="z" role="button" tabindex="0"><span>z</span></div>
+<div class="seg" style="left:65.9395%;width:2.5086%;" title="sil: 1.840-1.910s" data-start="1.840000" data-end="1.910000" data-label="sil" role="button" tabindex="0"><span>sil</span></div>
+<div class="seg" style="left:68.0897%;width:0.7167%;" title="b: 1.900-1.920s" data-start="1.900000" data-end="1.920000" data-label="b" role="button" tabindex="0"><span>b</span></div>
+<div class="seg" style="left:68.8064%;width:0.7167%;" title="ih: 1.920-1.940s" data-start="1.920000" data-end="1.940000" data-label="ih" role="button" tabindex="0"><span>ih</span></div>
+<div class="seg" style="left:69.5231%;width:2.5086%;" title="n: 1.940-2.010s" data-start="1.940000" data-end="2.010000" data-label="n" role="button" tabindex="0"><span>n</span></div>
+<div class="seg" style="left:72.0317%;width:3.9420%;" title="iy: 2.010-2.120s" data-start="2.010000" data-end="2.120000" data-label="iy" role="button" tabindex="0"><span>iy</span></div>
+<div class="seg" style="left:75.9737%;width:5.3755%;" title="th: 2.120-2.270s" data-start="2.120000" data-end="2.270000" data-label="th" role="button" tabindex="0"><span>th</span></div>
+<div class="seg" style="left:81.3493%;width:1.4335%;" title="ih: 2.270-2.310s" data-start="2.270000" data-end="2.310000" data-label="ih" role="button" tabindex="0"><span>ih</span></div>
+<div class="seg" style="left:82.7827%;width:5.0171%;" title="sh: 2.310-2.450s" data-start="2.310000" data-end="2.450000" data-label="sh" role="button" tabindex="0"><span>sh</span></div>
+<div class="seg" style="left:88.1582%;width:7.5257%;" title="er: 2.460-2.670s" data-start="2.460000" data-end="2.670000" data-label="er" role="button" tabindex="0"><span>er</span></div>
+<div class="seg" style="left:95.6839%;width:2.1502%;" title="sil: 2.670-2.730s" data-start="2.670000" data-end="2.730000" data-label="sil" role="button" tabindex="0"><span>sil</span></div>
+<div class="seg" style="left:97.8341%;width:2.1502%;" title="sil: 2.730-2.790s" data-start="2.730000" data-end="2.790000" data-label="sil" role="button" tabindex="0"><span>sil</span></div>
+</div>
+  <div class="axis">
+<div class="tick" style="left:0.0000%"><div class="tick-line"></div><div class="tick-label">0</div></div>
+<div class="tick" style="left:8.9592%"><div class="tick-line"></div><div class="tick-label">0.25</div></div>
+<div class="tick" style="left:17.9183%"><div class="tick-line"></div><div class="tick-label">0.5</div></div>
+<div class="tick" style="left:26.8775%"><div class="tick-line"></div><div class="tick-label">0.75</div></div>
+<div class="tick" style="left:35.8367%"><div class="tick-line"></div><div class="tick-label">1</div></div>
+<div class="tick" style="left:44.7958%"><div class="tick-line"></div><div class="tick-label">1.25</div></div>
+<div class="tick" style="left:53.7550%"><div class="tick-line"></div><div class="tick-label">1.5</div></div>
+<div class="tick" style="left:62.7142%"><div class="tick-line"></div><div class="tick-label">1.75</div></div>
+<div class="tick" style="left:71.6733%"><div class="tick-line"></div><div class="tick-label">2</div></div>
+<div class="tick" style="left:80.6325%"><div class="tick-line"></div><div class="tick-label">2.25</div></div>
+<div class="tick" style="left:89.5917%"><div class="tick-line"></div><div class="tick-label">2.5</div></div>
+<div class="tick" style="left:98.5509%"><div class="tick-line"></div><div class="tick-label">2.75</div></div>
+</div>
+  <div class="lane-label pred-label">Prediction</div>
+  <div class="timeline pred">
+<div class="seg" style="left:0.0000%;width:4.3165%;" title="sil: 0.000-0.120s score=0.996" data-start="0.000000" data-end="0.120451" data-label="sil" role="button" tabindex="0"><span>sil</span></div>
+<div class="seg" style="left:4.3165%;width:5.7554%;" title="f: 0.120-0.281s score=0.863" data-start="0.120451" data-end="0.281051" data-label="f" role="button" tabindex="0"><span>f</span></div>
+<div class="seg" style="left:10.0719%;width:5.7554%;" title="ae: 0.281-0.442s score=0.644" data-start="0.281051" data-end="0.441652" data-label="ae" role="button" tabindex="0"><span>ae</span></div>
+<div class="seg" style="left:15.8273%;width:0.7194%;" title="sil: 0.442-0.462s score=0.000" data-start="0.441652" data-end="0.461727" data-label="sil" role="button" tabindex="0"><span>sil</span></div>
+<div class="seg" style="left:16.5468%;width:7.1942%;" title="sh: 0.462-0.662s score=0.674" data-start="0.461727" data-end="0.662478" data-label="sh" role="button" tabindex="0"><span>sh</span></div>
+<div class="seg" style="left:23.7410%;width:5.7554%;" title="ow: 0.662-0.823s score=0.892" data-start="0.662478" data-end="0.823079" data-label="ow" role="button" tabindex="0"><span>ow</span></div>
+<div class="seg" style="left:29.4964%;width:0.7194%;" title="sil: 0.823-0.843s score=0.000" data-start="0.823079" data-end="0.843154" data-label="sil" role="button" tabindex="0"><span>sil</span></div>
+<div class="seg" style="left:30.2158%;width:3.5971%;" title="d: 0.843-0.944s score=0.924" data-start="0.843154" data-end="0.943529" data-label="d" role="button" tabindex="0"><span>d</span></div>
+<div class="seg" style="left:33.8129%;width:3.5971%;" title="ih: 0.944-1.044s score=0.786" data-start="0.943529" data-end="1.043905" data-label="ih" role="button" tabindex="0"><span>ih</span></div>
+<div class="seg" style="left:37.4101%;width:2.8777%;" title="n: 1.044-1.124s score=0.866" data-start="1.043905" data-end="1.124205" data-label="n" role="button" tabindex="0"><span>n</span></div>
+<div class="seg" style="left:40.2878%;width:2.8777%;" title="l: 1.124-1.205s score=0.895" data-start="1.124205" data-end="1.204505" data-label="l" role="button" tabindex="0"><span>l</span></div>
+<div class="seg" style="left:43.1655%;width:3.5971%;" title="uw: 1.205-1.305s score=0.887" data-start="1.204505" data-end="1.304881" data-label="uw" role="button" tabindex="0"><span>uw</span></div>
+<div class="seg" style="left:46.7626%;width:5.0360%;" title="s: 1.305-1.445s score=0.814" data-start="1.304881" data-end="1.445406" data-label="s" role="button" tabindex="0"><span>s</span></div>
+<div class="seg" style="left:51.7986%;width:2.8777%;" title="r: 1.445-1.526s score=0.894" data-start="1.445406" data-end="1.525707" data-label="r" role="button" tabindex="0"><span>r</span></div>
+<div class="seg" style="left:54.6763%;width:3.5971%;" title="ow: 1.526-1.626s score=0.808" data-start="1.525707" data-end="1.626082" data-label="ow" role="button" tabindex="0"><span>ow</span></div>
+<div class="seg" style="left:58.2734%;width:4.3165%;" title="l: 1.626-1.747s score=0.806" data-start="1.626082" data-end="1.746533" data-label="l" role="button" tabindex="0"><span>l</span></div>
+<div class="seg" style="left:62.5899%;width:2.8777%;" title="z: 1.747-1.827s score=0.922" data-start="1.746533" data-end="1.826833" data-label="z" role="button" tabindex="0"><span>z</span></div>
+<div class="seg" style="left:65.4676%;width:0.7194%;" title="sil: 1.827-1.847s score=0.000" data-start="1.826833" data-end="1.846908" data-label="sil" role="button" tabindex="0"><span>sil</span></div>
+<div class="seg" style="left:66.1871%;width:2.1583%;" title="b: 1.847-1.907s score=0.935" data-start="1.846908" data-end="1.907134" data-label="b" role="button" tabindex="0"><span>b</span></div>
+<div class="seg" style="left:68.3453%;width:2.8777%;" title="ih: 1.907-1.987s score=0.757" data-start="1.907134" data-end="1.987434" data-label="ih" role="button" tabindex="0"><span>ih</span></div>
+<div class="seg" style="left:71.2230%;width:2.1583%;" title="n: 1.987-2.048s score=0.863" data-start="1.987434" data-end="2.047659" data-label="n" role="button" tabindex="0"><span>n</span></div>
+<div class="seg" style="left:73.3813%;width:2.8777%;" title="iy: 2.048-2.128s score=0.911" data-start="2.047659" data-end="2.127960" data-label="iy" role="button" tabindex="0"><span>iy</span></div>
+<div class="seg" style="left:76.2590%;width:5.7554%;" title="th: 2.128-2.289s score=0.551" data-start="2.127960" data-end="2.288560" data-label="th" role="button" tabindex="0"><span>th</span></div>
+<div class="seg" style="left:82.0144%;width:0.7194%;" title="ih: 2.289-2.309s score=0.000" data-start="2.288560" data-end="2.308635" data-label="ih" role="button" tabindex="0"><span>ih</span></div>
+<div class="seg" style="left:82.7338%;width:5.7554%;" title="sh: 2.309-2.469s score=0.626" data-start="2.308635" data-end="2.469236" data-label="sh" role="button" tabindex="0"><span>sh</span></div>
+<div class="seg" style="left:88.4892%;width:7.1942%;" title="er: 2.469-2.670s score=0.716" data-start="2.469236" data-end="2.669987" data-label="er" role="button" tabindex="0"><span>er</span></div>
+<div class="seg" style="left:95.6835%;width:1.4388%;" title="sil: 2.670-2.710s score=0.000" data-start="2.669987" data-end="2.710137" data-label="sil" role="button" tabindex="0"><span>sil</span></div>
+<div class="seg" style="left:97.1223%;width:2.8777%;" title="sil: 2.710-2.790s score=0.765" data-start="2.710137" data-end="2.790437" data-label="sil" role="button" tabindex="0"><span>sil</span></div>
+</div>
+  <div class="axis">
+<div class="tick" style="left:0.0000%"><div class="tick-line"></div><div class="tick-label">0</div></div>
+<div class="tick" style="left:8.9592%"><div class="tick-line"></div><div class="tick-label">0.25</div></div>
+<div class="tick" style="left:17.9183%"><div class="tick-line"></div><div class="tick-label">0.5</div></div>
+<div class="tick" style="left:26.8775%"><div class="tick-line"></div><div class="tick-label">0.75</div></div>
+<div class="tick" style="left:35.8367%"><div class="tick-line"></div><div class="tick-label">1</div></div>
+<div class="tick" style="left:44.7958%"><div class="tick-line"></div><div class="tick-label">1.25</div></div>
+<div class="tick" style="left:53.7550%"><div class="tick-line"></div><div class="tick-label">1.5</div></div>
+<div class="tick" style="left:62.7142%"><div class="tick-line"></div><div class="tick-label">1.75</div></div>
+<div class="tick" style="left:71.6733%"><div class="tick-line"></div><div class="tick-label">2</div></div>
+<div class="tick" style="left:80.6325%"><div class="tick-line"></div><div class="tick-label">2.25</div></div>
+<div class="tick" style="left:89.5917%"><div class="tick-line"></div><div class="tick-label">2.5</div></div>
+<div class="tick" style="left:98.5509%"><div class="tick-line"></div><div class="tick-label">2.75</div></div>
+</div>
+</section>
+
+
+<section class="model-card">
+  <h2>LIBRISPEECH_CROTTC</h2>
+  <div class="meta">timit_dev / phonemes / /work/gm64/m64000/IF-MDD/data/timit_alignments_39phone/audio/dev_clean/FADG0_SI1909.wav</div>
+  <div class="phones">sil f ae sil sh ow sil d ih n l uw s r ow l z sil b ih n iy th ih sh er sil sil</div>
+  <div class="lane-label">Reference</div>
+  <div class="timeline ref">
+<div class="seg" style="left:0.0000%;width:5.0171%;" title="sil: 0.000-0.140s" data-start="0.000000" data-end="0.140000" data-label="sil" role="button" tabindex="0"><span>sil</span></div>
+<div class="seg" style="left:5.0171%;width:4.3004%;" title="f: 0.140-0.260s" data-start="0.140000" data-end="0.260000" data-label="f" role="button" tabindex="0"><span>f</span></div>
+<div class="seg" style="left:9.6759%;width:6.0922%;" title="ae: 0.270-0.440s" data-start="0.270000" data-end="0.440000" data-label="ae" role="button" tabindex="0"><span>ae</span></div>
+<div class="seg" style="left:15.4098%;width:1.0751%;" title="sil: 0.430-0.460s" data-start="0.430000" data-end="0.460000" data-label="sil" role="button" tabindex="0"><span>sil</span></div>
+<div class="seg" style="left:16.4849%;width:6.4506%;" title="sh: 0.460-0.640s" data-start="0.460000" data-end="0.640000" data-label="sh" role="button" tabindex="0"><span>sh</span></div>
+<div class="seg" style="left:22.9355%;width:8.6008%;" title="ow: 0.640-0.880s" data-start="0.640000" data-end="0.880000" data-label="ow" role="button" tabindex="0"><span>ow</span></div>
+<div class="seg" style="left:31.5363%;width:1.0751%;" title="sil: 0.880-0.910s" data-start="0.880000" data-end="0.910000" data-label="sil" role="button" tabindex="0"><span>sil</span></div>
+<div class="seg" style="left:32.6114%;width:0.7167%;" title="d: 0.910-0.930s" data-start="0.910000" data-end="0.930000" data-label="d" role="button" tabindex="0"><span>d</span></div>
+<div class="seg" style="left:35.1199%;width:1.7918%;" title="ih: 0.980-1.030s" data-start="0.980000" data-end="1.030000" data-label="ih" role="button" tabindex="0"><span>ih</span></div>
+<div class="seg" style="left:36.9118%;width:2.8669%;" title="n: 1.030-1.110s" data-start="1.030000" data-end="1.110000" data-label="n" role="button" tabindex="0"><span>n</span></div>
+<div class="seg" style="left:39.7787%;width:2.5086%;" title="l: 1.110-1.180s" data-start="1.110000" data-end="1.180000" data-label="l" role="button" tabindex="0"><span>l</span></div>
+<div class="seg" style="left:42.6456%;width:4.6588%;" title="uw: 1.190-1.320s" data-start="1.190000" data-end="1.320000" data-label="uw" role="button" tabindex="0"><span>uw</span></div>
+<div class="seg" style="left:46.9460%;width:5.3755%;" title="s: 1.310-1.460s" data-start="1.310000" data-end="1.460000" data-label="s" role="button" tabindex="0"><span>s</span></div>
+<div class="seg" style="left:52.3215%;width:2.5086%;" title="r: 1.460-1.530s" data-start="1.460000" data-end="1.530000" data-label="r" role="button" tabindex="0"><span>r</span></div>
+<div class="seg" style="left:54.8301%;width:3.5837%;" title="ow: 1.530-1.630s" data-start="1.530000" data-end="1.630000" data-label="ow" role="button" tabindex="0"><span>ow</span></div>
+<div class="seg" style="left:58.4138%;width:3.9420%;" title="l: 1.630-1.740s" data-start="1.630000" data-end="1.740000" data-label="l" role="button" tabindex="0"><span>l</span></div>
+<div class="seg" style="left:62.3558%;width:3.5837%;" title="z: 1.740-1.840s" data-start="1.740000" data-end="1.840000" data-label="z" role="button" tabindex="0"><span>z</span></div>
+<div class="seg" style="left:65.9395%;width:2.5086%;" title="sil: 1.840-1.910s" data-start="1.840000" data-end="1.910000" data-label="sil" role="button" tabindex="0"><span>sil</span></div>
+<div class="seg" style="left:68.0897%;width:0.7167%;" title="b: 1.900-1.920s" data-start="1.900000" data-end="1.920000" data-label="b" role="button" tabindex="0"><span>b</span></div>
+<div class="seg" style="left:68.8064%;width:0.7167%;" title="ih: 1.920-1.940s" data-start="1.920000" data-end="1.940000" data-label="ih" role="button" tabindex="0"><span>ih</span></div>
+<div class="seg" style="left:69.5231%;width:2.5086%;" title="n: 1.940-2.010s" data-start="1.940000" data-end="2.010000" data-label="n" role="button" tabindex="0"><span>n</span></div>
+<div class="seg" style="left:72.0317%;width:3.9420%;" title="iy: 2.010-2.120s" data-start="2.010000" data-end="2.120000" data-label="iy" role="button" tabindex="0"><span>iy</span></div>
+<div class="seg" style="left:75.9737%;width:5.3755%;" title="th: 2.120-2.270s" data-start="2.120000" data-end="2.270000" data-label="th" role="button" tabindex="0"><span>th</span></div>
+<div class="seg" style="left:81.3493%;width:1.4335%;" title="ih: 2.270-2.310s" data-start="2.270000" data-end="2.310000" data-label="ih" role="button" tabindex="0"><span>ih</span></div>
+<div class="seg" style="left:82.7827%;width:5.0171%;" title="sh: 2.310-2.450s" data-start="2.310000" data-end="2.450000" data-label="sh" role="button" tabindex="0"><span>sh</span></div>
+<div class="seg" style="left:88.1582%;width:7.5257%;" title="er: 2.460-2.670s" data-start="2.460000" data-end="2.670000" data-label="er" role="button" tabindex="0"><span>er</span></div>
+<div class="seg" style="left:95.6839%;width:2.1502%;" title="sil: 2.670-2.730s" data-start="2.670000" data-end="2.730000" data-label="sil" role="button" tabindex="0"><span>sil</span></div>
+<div class="seg" style="left:97.8341%;width:2.1502%;" title="sil: 2.730-2.790s" data-start="2.730000" data-end="2.790000" data-label="sil" role="button" tabindex="0"><span>sil</span></div>
+</div>
+  <div class="axis">
+<div class="tick" style="left:0.0000%"><div class="tick-line"></div><div class="tick-label">0</div></div>
+<div class="tick" style="left:8.9592%"><div class="tick-line"></div><div class="tick-label">0.25</div></div>
+<div class="tick" style="left:17.9183%"><div class="tick-line"></div><div class="tick-label">0.5</div></div>
+<div class="tick" style="left:26.8775%"><div class="tick-line"></div><div class="tick-label">0.75</div></div>
+<div class="tick" style="left:35.8367%"><div class="tick-line"></div><div class="tick-label">1</div></div>
+<div class="tick" style="left:44.7958%"><div class="tick-line"></div><div class="tick-label">1.25</div></div>
+<div class="tick" style="left:53.7550%"><div class="tick-line"></div><div class="tick-label">1.5</div></div>
+<div class="tick" style="left:62.7142%"><div class="tick-line"></div><div class="tick-label">1.75</div></div>
+<div class="tick" style="left:71.6733%"><div class="tick-line"></div><div class="tick-label">2</div></div>
+<div class="tick" style="left:80.6325%"><div class="tick-line"></div><div class="tick-label">2.25</div></div>
+<div class="tick" style="left:89.5917%"><div class="tick-line"></div><div class="tick-label">2.5</div></div>
+<div class="tick" style="left:98.5509%"><div class="tick-line"></div><div class="tick-label">2.75</div></div>
+</div>
+  <div class="lane-label pred-label">Prediction</div>
+  <div class="timeline pred">
+<div class="seg" style="left:0.0000%;width:4.3165%;" title="sil: 0.000-0.120s score=0.996" data-start="0.000000" data-end="0.120451" data-label="sil" role="button" tabindex="0"><span>sil</span></div>
+<div class="seg" style="left:4.3165%;width:5.0360%;" title="f: 0.120-0.261s score=0.916" data-start="0.120451" data-end="0.260976" data-label="f" role="button" tabindex="0"><span>f</span></div>
+<div class="seg" style="left:9.3525%;width:6.4748%;" title="ae: 0.261-0.442s score=0.626" data-start="0.260976" data-end="0.441652" data-label="ae" role="button" tabindex="0"><span>ae</span></div>
+<div class="seg" style="left:15.8273%;width:0.7194%;" title="sil: 0.442-0.462s score=0.000" data-start="0.441652" data-end="0.461727" data-label="sil" role="button" tabindex="0"><span>sil</span></div>
+<div class="seg" style="left:16.5468%;width:7.1942%;" title="sh: 0.462-0.662s score=0.640" data-start="0.461727" data-end="0.662478" data-label="sh" role="button" tabindex="0"><span>sh</span></div>
+<div class="seg" style="left:23.7410%;width:5.0360%;" title="ow: 0.662-0.803s score=0.879" data-start="0.662478" data-end="0.803004" data-label="ow" role="button" tabindex="0"><span>ow</span></div>
+<div class="seg" style="left:28.7770%;width:0.7194%;" title="sil: 0.803-0.823s score=0.000" data-start="0.803004" data-end="0.823079" data-label="sil" role="button" tabindex="0"><span>sil</span></div>
+<div class="seg" style="left:29.4964%;width:4.3165%;" title="d: 0.823-0.944s score=0.901" data-start="0.823079" data-end="0.943529" data-label="d" role="button" tabindex="0"><span>d</span></div>
+<div class="seg" style="left:33.8129%;width:3.5971%;" title="ih: 0.944-1.044s score=0.780" data-start="0.943529" data-end="1.043905" data-label="ih" role="button" tabindex="0"><span>ih</span></div>
+<div class="seg" style="left:37.4101%;width:2.8777%;" title="n: 1.044-1.124s score=0.829" data-start="1.043905" data-end="1.124205" data-label="n" role="button" tabindex="0"><span>n</span></div>
+<div class="seg" style="left:40.2878%;width:2.8777%;" title="l: 1.124-1.205s score=0.883" data-start="1.124205" data-end="1.204505" data-label="l" role="button" tabindex="0"><span>l</span></div>
+<div class="seg" style="left:43.1655%;width:3.5971%;" title="uw: 1.205-1.305s score=0.880" data-start="1.204505" data-end="1.304881" data-label="uw" role="button" tabindex="0"><span>uw</span></div>
+<div class="seg" style="left:46.7626%;width:5.0360%;" title="s: 1.305-1.445s score=0.820" data-start="1.304881" data-end="1.445406" data-label="s" role="button" tabindex="0"><span>s</span></div>
+<div class="seg" style="left:51.7986%;width:2.8777%;" title="r: 1.445-1.526s score=0.854" data-start="1.445406" data-end="1.525707" data-label="r" role="button" tabindex="0"><span>r</span></div>
+<div class="seg" style="left:54.6763%;width:3.5971%;" title="ow: 1.526-1.626s score=0.808" data-start="1.525707" data-end="1.626082" data-label="ow" role="button" tabindex="0"><span>ow</span></div>
+<div class="seg" style="left:58.2734%;width:3.5971%;" title="l: 1.626-1.726s score=0.830" data-start="1.626082" data-end="1.726458" data-label="l" role="button" tabindex="0"><span>l</span></div>
+<div class="seg" style="left:61.8705%;width:3.5971%;" title="z: 1.726-1.827s score=0.834" data-start="1.726458" data-end="1.826833" data-label="z" role="button" tabindex="0"><span>z</span></div>
+<div class="seg" style="left:65.4676%;width:0.7194%;" title="sil: 1.827-1.847s score=0.000" data-start="1.826833" data-end="1.846908" data-label="sil" role="button" tabindex="0"><span>sil</span></div>
+<div class="seg" style="left:66.1871%;width:2.1583%;" title="b: 1.847-1.907s score=0.895" data-start="1.846908" data-end="1.907134" data-label="b" role="button" tabindex="0"><span>b</span></div>
+<div class="seg" style="left:68.3453%;width:2.1583%;" title="ih: 1.907-1.967s score=0.775" data-start="1.907134" data-end="1.967359" data-label="ih" role="button" tabindex="0"><span>ih</span></div>
+<div class="seg" style="left:70.5036%;width:2.8777%;" title="n: 1.967-2.048s score=0.781" data-start="1.967359" data-end="2.047659" data-label="n" role="button" tabindex="0"><span>n</span></div>
+<div class="seg" style="left:73.3813%;width:2.8777%;" title="iy: 2.048-2.128s score=0.856" data-start="2.047659" data-end="2.127960" data-label="iy" role="button" tabindex="0"><span>iy</span></div>
+<div class="seg" style="left:76.2590%;width:5.7554%;" title="th: 2.128-2.289s score=0.515" data-start="2.127960" data-end="2.288560" data-label="th" role="button" tabindex="0"><span>th</span></div>
+<div class="seg" style="left:82.0144%;width:0.7194%;" title="ih: 2.289-2.309s score=0.001" data-start="2.288560" data-end="2.308635" data-label="ih" role="button" tabindex="0"><span>ih</span></div>
+<div class="seg" style="left:82.7338%;width:5.7554%;" title="sh: 2.309-2.469s score=0.588" data-start="2.308635" data-end="2.469236" data-label="sh" role="button" tabindex="0"><span>sh</span></div>
+<div class="seg" style="left:88.4892%;width:9.3525%;" title="er: 2.469-2.730s score=0.538" data-start="2.469236" data-end="2.730212" data-label="er" role="button" tabindex="0"><span>er</span></div>
+<div class="seg" style="left:97.8417%;width:1.4388%;" title="sil: 2.730-2.770s score=0.002" data-start="2.730212" data-end="2.770362" data-label="sil" role="button" tabindex="0"><span>sil</span></div>
+<div class="seg" style="left:99.2806%;width:0.7194%;" title="sil: 2.770-2.790s score=0.009" data-start="2.770362" data-end="2.790437" data-label="sil" role="button" tabindex="0"><span>sil</span></div>
+</div>
+  <div class="axis">
+<div class="tick" style="left:0.0000%"><div class="tick-line"></div><div class="tick-label">0</div></div>
+<div class="tick" style="left:8.9592%"><div class="tick-line"></div><div class="tick-label">0.25</div></div>
+<div class="tick" style="left:17.9183%"><div class="tick-line"></div><div class="tick-label">0.5</div></div>
+<div class="tick" style="left:26.8775%"><div class="tick-line"></div><div class="tick-label">0.75</div></div>
+<div class="tick" style="left:35.8367%"><div class="tick-line"></div><div class="tick-label">1</div></div>
+<div class="tick" style="left:44.7958%"><div class="tick-line"></div><div class="tick-label">1.25</div></div>
+<div class="tick" style="left:53.7550%"><div class="tick-line"></div><div class="tick-label">1.5</div></div>
+<div class="tick" style="left:62.7142%"><div class="tick-line"></div><div class="tick-label">1.75</div></div>
+<div class="tick" style="left:71.6733%"><div class="tick-line"></div><div class="tick-label">2</div></div>
+<div class="tick" style="left:80.6325%"><div class="tick-line"></div><div class="tick-label">2.25</div></div>
+<div class="tick" style="left:89.5917%"><div class="tick-line"></div><div class="tick-label">2.5</div></div>
+<div class="tick" style="left:98.5509%"><div class="tick-line"></div><div class="tick-label">2.75</div></div>
+</div>
+</section>
+
+<script>
+(function () {
+  const audio = document.getElementById("audio-player");
+  const nowPlaying = document.getElementById("now-playing");
+  let active = null;
+  let stopAt = null;
+  let rafId = null;
+
+  function clearActive() {
+    if (active) active.classList.remove("active");
+    active = null;
+  }
+
+  function monitorStop() {
+    if (!audio || stopAt === null) return;
+    if (audio.currentTime >= stopAt) {
+      audio.pause();
+      stopAt = null;
+      clearActive();
+      return;
+    }
+    rafId = requestAnimationFrame(monitorStop);
+  }
+
+  async function playSegment(segment) {
+    if (!audio || !audio.getAttribute("src")) {
+      nowPlaying.textContent = "No audio source available.";
+      return;
+    }
+    if (rafId) cancelAnimationFrame(rafId);
+    audio.pause();
+    clearActive();
+    active = segment;
+    active.classList.add("active");
+    const start = Number(segment.dataset.start);
+    const end = Number(segment.dataset.end);
+    const label = segment.dataset.label || "";
+    stopAt = end;
+    nowPlaying.textContent = `Playing ${label}: ${start.toFixed(3)}s - ${end.toFixed(3)}s`;
+    try {
+      audio.currentTime = Math.max(0, start);
+      await audio.play();
+      rafId = requestAnimationFrame(monitorStop);
+    } catch (error) {
+      nowPlaying.textContent = `Could not autoplay. Press play once, then click again. (${error.name || "playback error"})`;
+    }
+  }
+
+  document.addEventListener("click", (event) => {
+    const segment = event.target.closest(".seg");
+    if (!segment) return;
+    event.preventDefault();
+    playSegment(segment);
+  });
+})();
+</script>
+</body>
+</html>

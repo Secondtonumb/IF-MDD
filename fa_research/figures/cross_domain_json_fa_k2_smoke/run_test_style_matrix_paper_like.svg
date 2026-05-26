@@ -1,0 +1,217 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="974" viewBox="0 0 1180 974">
+<rect width="100%" height="100%" fill="white"/>
+<text x="590.00" y="28.00" font-size="17" font-family="Times New Roman, Times, serif" font-weight="bold" text-anchor="middle" dominant-baseline="middle">Cross-domain forced-alignment phone timing</text>
+<text x="590.00" y="51.00" font-size="11" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="middle" dominant-baseline="middle">Solid lines: L2-ARCTIC in-domain models; dashed lines: LibriSpeech out-of-domain models</text>
+<line x1="330.00" y1="77.00" x2="358.00" y2="77.00" stroke="#222222" stroke-width="1.8"/>
+<circle cx="344.00" cy="77.00" r="4.20" fill="#222222"/>
+<text x="366.00" y="77.00" font-size="11" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="start" dominant-baseline="middle">L2 CTC</text>
+<line x1="468.00" y1="77.00" x2="496.00" y2="77.00" stroke="#1f77b4" stroke-width="1.8"/>
+<rect x="478.95" y="73.95" width="6.09" height="6.09" fill="#1f77b4"/>
+<text x="504.00" y="77.00" font-size="11" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="start" dominant-baseline="middle">L2 CRCTC</text>
+<line x1="606.00" y1="77.00" x2="634.00" y2="77.00" stroke="#2ca02c" stroke-width="1.8"/>
+<path d="M 620.00 72.80 L 624.20 81.20 L 615.80 81.20 Z" fill="#2ca02c"/>
+<text x="642.00" y="77.00" font-size="11" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="start" dominant-baseline="middle">L2 OTTC</text>
+<line x1="744.00" y1="77.00" x2="772.00" y2="77.00" stroke="#d62728" stroke-width="1.8"/>
+<path d="M 758.00 72.80 L 762.20 77.00 L 758.00 81.20 L 753.80 77.00 Z" fill="#d62728"/>
+<text x="780.00" y="77.00" font-size="11" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="start" dominant-baseline="middle">L2 CROTTC</text>
+<line x1="330.00" y1="101.00" x2="358.00" y2="101.00" stroke="#222222" stroke-width="1.8" stroke-dasharray="5 4"/>
+<circle cx="344.00" cy="101.00" r="4.20" fill="#222222"/>
+<text x="366.00" y="101.00" font-size="11" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="start" dominant-baseline="middle">LS CTC</text>
+<line x1="468.00" y1="101.00" x2="496.00" y2="101.00" stroke="#1f77b4" stroke-width="1.8" stroke-dasharray="5 4"/>
+<rect x="478.95" y="97.95" width="6.09" height="6.09" fill="#1f77b4"/>
+<text x="504.00" y="101.00" font-size="11" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="start" dominant-baseline="middle">LS CRCTC</text>
+<line x1="606.00" y1="101.00" x2="634.00" y2="101.00" stroke="#2ca02c" stroke-width="1.8" stroke-dasharray="5 4"/>
+<path d="M 620.00 96.80 L 624.20 105.20 L 615.80 105.20 Z" fill="#2ca02c"/>
+<text x="642.00" y="101.00" font-size="11" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="start" dominant-baseline="middle">LS OTTC</text>
+<line x1="744.00" y1="101.00" x2="772.00" y2="101.00" stroke="#d62728" stroke-width="1.8" stroke-dasharray="5 4"/>
+<path d="M 758.00 96.80 L 762.20 101.00 L 758.00 105.20 L 753.80 101.00 Z" fill="#d62728"/>
+<text x="780.00" y="101.00" font-size="11" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="start" dominant-baseline="middle">LS CROTTC</text>
+<text x="58.00" y="178.00" font-size="13" font-family="Times New Roman, Times, serif" font-weight="bold" text-anchor="middle" dominant-baseline="middle" transform="rotate(-90 58 178)">L2-ARCTIC</text>
+<rect x="105.00" y="122.00" width="455.00" height="132.00" fill="white" stroke="#222" stroke-width="1"/>
+<line x1="105.00" y1="122.00" x2="105.00" y2="254.00" stroke="#dddddd" stroke-width="0.7"/>
+<line x1="105.00" y1="254.00" x2="105.00" y2="258.00" stroke="#222" stroke-width="1"/>
+<text x="105.00" y="268.00" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="middle" dominant-baseline="middle">10</text>
+<line x1="218.75" y1="122.00" x2="218.75" y2="254.00" stroke="#dddddd" stroke-width="0.7"/>
+<line x1="218.75" y1="254.00" x2="218.75" y2="258.00" stroke="#222" stroke-width="1"/>
+<text x="218.75" y="268.00" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="middle" dominant-baseline="middle">20</text>
+<line x1="275.62" y1="122.00" x2="275.62" y2="254.00" stroke="#dddddd" stroke-width="0.7"/>
+<line x1="275.62" y1="254.00" x2="275.62" y2="258.00" stroke="#222" stroke-width="1"/>
+<text x="275.62" y="268.00" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="middle" dominant-baseline="middle">25</text>
+<line x1="332.50" y1="122.00" x2="332.50" y2="254.00" stroke="#dddddd" stroke-width="0.7"/>
+<line x1="332.50" y1="254.00" x2="332.50" y2="258.00" stroke="#222" stroke-width="1"/>
+<text x="332.50" y="268.00" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="middle" dominant-baseline="middle">30</text>
+<line x1="446.25" y1="122.00" x2="446.25" y2="254.00" stroke="#dddddd" stroke-width="0.7"/>
+<line x1="446.25" y1="254.00" x2="446.25" y2="258.00" stroke="#222" stroke-width="1"/>
+<text x="446.25" y="268.00" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="middle" dominant-baseline="middle">40</text>
+<line x1="560.00" y1="122.00" x2="560.00" y2="254.00" stroke="#dddddd" stroke-width="0.7"/>
+<line x1="560.00" y1="254.00" x2="560.00" y2="258.00" stroke="#222" stroke-width="1"/>
+<text x="560.00" y="268.00" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="middle" dominant-baseline="middle">50</text>
+<line x1="105.00" y1="254.00" x2="560.00" y2="254.00" stroke="#dddddd" stroke-width="0.7"/>
+<line x1="101.00" y1="254.00" x2="105.00" y2="254.00" stroke="#222" stroke-width="1"/>
+<text x="96.00" y="254.00" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="end" dominant-baseline="middle">0</text>
+<line x1="105.00" y1="227.60" x2="560.00" y2="227.60" stroke="#dddddd" stroke-width="0.7"/>
+<line x1="101.00" y1="227.60" x2="105.00" y2="227.60" stroke="#222" stroke-width="1"/>
+<text x="96.00" y="227.60" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="end" dominant-baseline="middle">20</text>
+<line x1="105.00" y1="201.20" x2="560.00" y2="201.20" stroke="#dddddd" stroke-width="0.7"/>
+<line x1="101.00" y1="201.20" x2="105.00" y2="201.20" stroke="#222" stroke-width="1"/>
+<text x="96.00" y="201.20" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="end" dominant-baseline="middle">40</text>
+<line x1="105.00" y1="174.80" x2="560.00" y2="174.80" stroke="#dddddd" stroke-width="0.7"/>
+<line x1="101.00" y1="174.80" x2="105.00" y2="174.80" stroke="#222" stroke-width="1"/>
+<text x="96.00" y="174.80" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="end" dominant-baseline="middle">60</text>
+<line x1="105.00" y1="148.40" x2="560.00" y2="148.40" stroke="#dddddd" stroke-width="0.7"/>
+<line x1="101.00" y1="148.40" x2="105.00" y2="148.40" stroke="#222" stroke-width="1"/>
+<text x="96.00" y="148.40" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="end" dominant-baseline="middle">80</text>
+<line x1="105.00" y1="122.00" x2="560.00" y2="122.00" stroke="#dddddd" stroke-width="0.7"/>
+<line x1="101.00" y1="122.00" x2="105.00" y2="122.00" stroke="#222" stroke-width="1"/>
+<text x="96.00" y="122.00" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="end" dominant-baseline="middle">100</text>
+<text x="332.50" y="110.00" font-size="12" font-family="Times New Roman, Times, serif" font-weight="bold" text-anchor="middle" dominant-baseline="middle">Phone-level ACC</text>
+<text x="332.50" y="285.00" font-size="11" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="middle" dominant-baseline="middle">Tolerance (ms)</text>
+<text x="69.00" y="188.00" font-size="11" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="middle" dominant-baseline="middle" transform="rotate(-90 69 188.0)">Phone ACC (%)</text>
+<text x="58.00" y="383.00" font-size="13" font-family="Times New Roman, Times, serif" font-weight="bold" text-anchor="middle" dominant-baseline="middle" transform="rotate(-90 58 383)">TIMIT dev</text>
+<rect x="105.00" y="327.00" width="455.00" height="132.00" fill="white" stroke="#222" stroke-width="1"/>
+<line x1="105.00" y1="327.00" x2="105.00" y2="459.00" stroke="#dddddd" stroke-width="0.7"/>
+<line x1="105.00" y1="459.00" x2="105.00" y2="463.00" stroke="#222" stroke-width="1"/>
+<text x="105.00" y="473.00" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="middle" dominant-baseline="middle">10</text>
+<line x1="218.75" y1="327.00" x2="218.75" y2="459.00" stroke="#dddddd" stroke-width="0.7"/>
+<line x1="218.75" y1="459.00" x2="218.75" y2="463.00" stroke="#222" stroke-width="1"/>
+<text x="218.75" y="473.00" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="middle" dominant-baseline="middle">20</text>
+<line x1="275.62" y1="327.00" x2="275.62" y2="459.00" stroke="#dddddd" stroke-width="0.7"/>
+<line x1="275.62" y1="459.00" x2="275.62" y2="463.00" stroke="#222" stroke-width="1"/>
+<text x="275.62" y="473.00" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="middle" dominant-baseline="middle">25</text>
+<line x1="332.50" y1="327.00" x2="332.50" y2="459.00" stroke="#dddddd" stroke-width="0.7"/>
+<line x1="332.50" y1="459.00" x2="332.50" y2="463.00" stroke="#222" stroke-width="1"/>
+<text x="332.50" y="473.00" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="middle" dominant-baseline="middle">30</text>
+<line x1="446.25" y1="327.00" x2="446.25" y2="459.00" stroke="#dddddd" stroke-width="0.7"/>
+<line x1="446.25" y1="459.00" x2="446.25" y2="463.00" stroke="#222" stroke-width="1"/>
+<text x="446.25" y="473.00" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="middle" dominant-baseline="middle">40</text>
+<line x1="560.00" y1="327.00" x2="560.00" y2="459.00" stroke="#dddddd" stroke-width="0.7"/>
+<line x1="560.00" y1="459.00" x2="560.00" y2="463.00" stroke="#222" stroke-width="1"/>
+<text x="560.00" y="473.00" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="middle" dominant-baseline="middle">50</text>
+<line x1="105.00" y1="459.00" x2="560.00" y2="459.00" stroke="#dddddd" stroke-width="0.7"/>
+<line x1="101.00" y1="459.00" x2="105.00" y2="459.00" stroke="#222" stroke-width="1"/>
+<text x="96.00" y="459.00" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="end" dominant-baseline="middle">0</text>
+<line x1="105.00" y1="432.60" x2="560.00" y2="432.60" stroke="#dddddd" stroke-width="0.7"/>
+<line x1="101.00" y1="432.60" x2="105.00" y2="432.60" stroke="#222" stroke-width="1"/>
+<text x="96.00" y="432.60" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="end" dominant-baseline="middle">20</text>
+<line x1="105.00" y1="406.20" x2="560.00" y2="406.20" stroke="#dddddd" stroke-width="0.7"/>
+<line x1="101.00" y1="406.20" x2="105.00" y2="406.20" stroke="#222" stroke-width="1"/>
+<text x="96.00" y="406.20" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="end" dominant-baseline="middle">40</text>
+<line x1="105.00" y1="379.80" x2="560.00" y2="379.80" stroke="#dddddd" stroke-width="0.7"/>
+<line x1="101.00" y1="379.80" x2="105.00" y2="379.80" stroke="#222" stroke-width="1"/>
+<text x="96.00" y="379.80" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="end" dominant-baseline="middle">60</text>
+<line x1="105.00" y1="353.40" x2="560.00" y2="353.40" stroke="#dddddd" stroke-width="0.7"/>
+<line x1="101.00" y1="353.40" x2="105.00" y2="353.40" stroke="#222" stroke-width="1"/>
+<text x="96.00" y="353.40" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="end" dominant-baseline="middle">80</text>
+<line x1="105.00" y1="327.00" x2="560.00" y2="327.00" stroke="#dddddd" stroke-width="0.7"/>
+<line x1="101.00" y1="327.00" x2="105.00" y2="327.00" stroke="#222" stroke-width="1"/>
+<text x="96.00" y="327.00" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="end" dominant-baseline="middle">100</text>
+<text x="332.50" y="315.00" font-size="12" font-family="Times New Roman, Times, serif" font-weight="bold" text-anchor="middle" dominant-baseline="middle">Phone-level ACC</text>
+<text x="332.50" y="490.00" font-size="11" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="middle" dominant-baseline="middle">Tolerance (ms)</text>
+<text x="69.00" y="393.00" font-size="11" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="middle" dominant-baseline="middle" transform="rotate(-90 69 393.0)">Phone ACC (%)</text>
+<text x="58.00" y="588.00" font-size="13" font-family="Times New Roman, Times, serif" font-weight="bold" text-anchor="middle" dominant-baseline="middle" transform="rotate(-90 58 588)">TIMIT test</text>
+<rect x="105.00" y="532.00" width="455.00" height="132.00" fill="white" stroke="#222" stroke-width="1"/>
+<line x1="105.00" y1="532.00" x2="105.00" y2="664.00" stroke="#dddddd" stroke-width="0.7"/>
+<line x1="105.00" y1="664.00" x2="105.00" y2="668.00" stroke="#222" stroke-width="1"/>
+<text x="105.00" y="678.00" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="middle" dominant-baseline="middle">10</text>
+<line x1="218.75" y1="532.00" x2="218.75" y2="664.00" stroke="#dddddd" stroke-width="0.7"/>
+<line x1="218.75" y1="664.00" x2="218.75" y2="668.00" stroke="#222" stroke-width="1"/>
+<text x="218.75" y="678.00" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="middle" dominant-baseline="middle">20</text>
+<line x1="275.62" y1="532.00" x2="275.62" y2="664.00" stroke="#dddddd" stroke-width="0.7"/>
+<line x1="275.62" y1="664.00" x2="275.62" y2="668.00" stroke="#222" stroke-width="1"/>
+<text x="275.62" y="678.00" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="middle" dominant-baseline="middle">25</text>
+<line x1="332.50" y1="532.00" x2="332.50" y2="664.00" stroke="#dddddd" stroke-width="0.7"/>
+<line x1="332.50" y1="664.00" x2="332.50" y2="668.00" stroke="#222" stroke-width="1"/>
+<text x="332.50" y="678.00" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="middle" dominant-baseline="middle">30</text>
+<line x1="446.25" y1="532.00" x2="446.25" y2="664.00" stroke="#dddddd" stroke-width="0.7"/>
+<line x1="446.25" y1="664.00" x2="446.25" y2="668.00" stroke="#222" stroke-width="1"/>
+<text x="446.25" y="678.00" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="middle" dominant-baseline="middle">40</text>
+<line x1="560.00" y1="532.00" x2="560.00" y2="664.00" stroke="#dddddd" stroke-width="0.7"/>
+<line x1="560.00" y1="664.00" x2="560.00" y2="668.00" stroke="#222" stroke-width="1"/>
+<text x="560.00" y="678.00" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="middle" dominant-baseline="middle">50</text>
+<line x1="105.00" y1="664.00" x2="560.00" y2="664.00" stroke="#dddddd" stroke-width="0.7"/>
+<line x1="101.00" y1="664.00" x2="105.00" y2="664.00" stroke="#222" stroke-width="1"/>
+<text x="96.00" y="664.00" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="end" dominant-baseline="middle">0</text>
+<line x1="105.00" y1="637.60" x2="560.00" y2="637.60" stroke="#dddddd" stroke-width="0.7"/>
+<line x1="101.00" y1="637.60" x2="105.00" y2="637.60" stroke="#222" stroke-width="1"/>
+<text x="96.00" y="637.60" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="end" dominant-baseline="middle">20</text>
+<line x1="105.00" y1="611.20" x2="560.00" y2="611.20" stroke="#dddddd" stroke-width="0.7"/>
+<line x1="101.00" y1="611.20" x2="105.00" y2="611.20" stroke="#222" stroke-width="1"/>
+<text x="96.00" y="611.20" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="end" dominant-baseline="middle">40</text>
+<line x1="105.00" y1="584.80" x2="560.00" y2="584.80" stroke="#dddddd" stroke-width="0.7"/>
+<line x1="101.00" y1="584.80" x2="105.00" y2="584.80" stroke="#222" stroke-width="1"/>
+<text x="96.00" y="584.80" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="end" dominant-baseline="middle">60</text>
+<line x1="105.00" y1="558.40" x2="560.00" y2="558.40" stroke="#dddddd" stroke-width="0.7"/>
+<line x1="101.00" y1="558.40" x2="105.00" y2="558.40" stroke="#222" stroke-width="1"/>
+<text x="96.00" y="558.40" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="end" dominant-baseline="middle">80</text>
+<line x1="105.00" y1="532.00" x2="560.00" y2="532.00" stroke="#dddddd" stroke-width="0.7"/>
+<line x1="101.00" y1="532.00" x2="105.00" y2="532.00" stroke="#222" stroke-width="1"/>
+<text x="96.00" y="532.00" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="end" dominant-baseline="middle">100</text>
+<text x="332.50" y="520.00" font-size="12" font-family="Times New Roman, Times, serif" font-weight="bold" text-anchor="middle" dominant-baseline="middle">Phone-level ACC</text>
+<text x="332.50" y="695.00" font-size="11" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="middle" dominant-baseline="middle">Tolerance (ms)</text>
+<text x="69.00" y="598.00" font-size="11" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="middle" dominant-baseline="middle" transform="rotate(-90 69 598.0)">Phone ACC (%)</text>
+<polyline points="105.00,657.11 218.75,642.97 275.62,629.16 332.50,619.82 446.25,597.89 560.00,576.88" fill="none" stroke="#1f77b4" stroke-width="1.8" stroke-dasharray="5 4"/>
+<rect x="101.95" y="654.06" width="6.09" height="6.09" fill="#1f77b4"/>
+<rect x="215.71" y="639.92" width="6.09" height="6.09" fill="#1f77b4"/>
+<rect x="272.58" y="626.11" width="6.09" height="6.09" fill="#1f77b4"/>
+<rect x="329.45" y="616.77" width="6.09" height="6.09" fill="#1f77b4"/>
+<rect x="443.20" y="594.85" width="6.09" height="6.09" fill="#1f77b4"/>
+<rect x="556.96" y="573.84" width="6.09" height="6.09" fill="#1f77b4"/>
+<text x="870.00" y="520.00" font-size="12" font-family="Times New Roman, Times, serif" font-weight="bold" text-anchor="middle" dominant-baseline="middle">Phone-level TSE</text>
+<rect x="726.00" y="532.00" width="364.00" height="132.00" fill="white" stroke="#222" stroke-width="1"/>
+<line x1="726.00" y1="532.00" x2="726.00" y2="664.00" stroke="#dddddd" stroke-width="0.7"/>
+<text x="726.00" y="678.00" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="middle" dominant-baseline="middle">0</text>
+<line x1="817.00" y1="532.00" x2="817.00" y2="664.00" stroke="#dddddd" stroke-width="0.7"/>
+<text x="817.00" y="678.00" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="middle" dominant-baseline="middle">25</text>
+<line x1="908.00" y1="532.00" x2="908.00" y2="664.00" stroke="#dddddd" stroke-width="0.7"/>
+<text x="908.00" y="678.00" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="middle" dominant-baseline="middle">50</text>
+<line x1="999.00" y1="532.00" x2="999.00" y2="664.00" stroke="#dddddd" stroke-width="0.7"/>
+<text x="999.00" y="678.00" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="middle" dominant-baseline="middle">75</text>
+<line x1="1090.00" y1="532.00" x2="1090.00" y2="664.00" stroke="#dddddd" stroke-width="0.7"/>
+<text x="1090.00" y="678.00" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="middle" dominant-baseline="middle">100</text>
+<text x="718.00" y="621.75" font-size="8.5" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="end" dominant-baseline="middle">LS CRCTC</text>
+<rect x="726.00" y="616.50" width="239.23" height="10.50" fill="#1f77b4"/>
+<text x="970.23" y="621.75" font-size="8.5" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="start" dominant-baseline="middle">65.7</text>
+<text x="908.00" y="695.00" font-size="11" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="middle" dominant-baseline="middle">Phone TSE (ms)</text>
+<text x="58.00" y="793.00" font-size="13" font-family="Times New Roman, Times, serif" font-weight="bold" text-anchor="middle" dominant-baseline="middle" transform="rotate(-90 58 793)">Buckeye</text>
+<rect x="105.00" y="737.00" width="455.00" height="132.00" fill="white" stroke="#222" stroke-width="1"/>
+<line x1="105.00" y1="737.00" x2="105.00" y2="869.00" stroke="#dddddd" stroke-width="0.7"/>
+<line x1="105.00" y1="869.00" x2="105.00" y2="873.00" stroke="#222" stroke-width="1"/>
+<text x="105.00" y="883.00" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="middle" dominant-baseline="middle">10</text>
+<line x1="218.75" y1="737.00" x2="218.75" y2="869.00" stroke="#dddddd" stroke-width="0.7"/>
+<line x1="218.75" y1="869.00" x2="218.75" y2="873.00" stroke="#222" stroke-width="1"/>
+<text x="218.75" y="883.00" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="middle" dominant-baseline="middle">20</text>
+<line x1="275.62" y1="737.00" x2="275.62" y2="869.00" stroke="#dddddd" stroke-width="0.7"/>
+<line x1="275.62" y1="869.00" x2="275.62" y2="873.00" stroke="#222" stroke-width="1"/>
+<text x="275.62" y="883.00" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="middle" dominant-baseline="middle">25</text>
+<line x1="332.50" y1="737.00" x2="332.50" y2="869.00" stroke="#dddddd" stroke-width="0.7"/>
+<line x1="332.50" y1="869.00" x2="332.50" y2="873.00" stroke="#222" stroke-width="1"/>
+<text x="332.50" y="883.00" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="middle" dominant-baseline="middle">30</text>
+<line x1="446.25" y1="737.00" x2="446.25" y2="869.00" stroke="#dddddd" stroke-width="0.7"/>
+<line x1="446.25" y1="869.00" x2="446.25" y2="873.00" stroke="#222" stroke-width="1"/>
+<text x="446.25" y="883.00" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="middle" dominant-baseline="middle">40</text>
+<line x1="560.00" y1="737.00" x2="560.00" y2="869.00" stroke="#dddddd" stroke-width="0.7"/>
+<line x1="560.00" y1="869.00" x2="560.00" y2="873.00" stroke="#222" stroke-width="1"/>
+<text x="560.00" y="883.00" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="middle" dominant-baseline="middle">50</text>
+<line x1="105.00" y1="869.00" x2="560.00" y2="869.00" stroke="#dddddd" stroke-width="0.7"/>
+<line x1="101.00" y1="869.00" x2="105.00" y2="869.00" stroke="#222" stroke-width="1"/>
+<text x="96.00" y="869.00" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="end" dominant-baseline="middle">0</text>
+<line x1="105.00" y1="842.60" x2="560.00" y2="842.60" stroke="#dddddd" stroke-width="0.7"/>
+<line x1="101.00" y1="842.60" x2="105.00" y2="842.60" stroke="#222" stroke-width="1"/>
+<text x="96.00" y="842.60" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="end" dominant-baseline="middle">20</text>
+<line x1="105.00" y1="816.20" x2="560.00" y2="816.20" stroke="#dddddd" stroke-width="0.7"/>
+<line x1="101.00" y1="816.20" x2="105.00" y2="816.20" stroke="#222" stroke-width="1"/>
+<text x="96.00" y="816.20" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="end" dominant-baseline="middle">40</text>
+<line x1="105.00" y1="789.80" x2="560.00" y2="789.80" stroke="#dddddd" stroke-width="0.7"/>
+<line x1="101.00" y1="789.80" x2="105.00" y2="789.80" stroke="#222" stroke-width="1"/>
+<text x="96.00" y="789.80" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="end" dominant-baseline="middle">60</text>
+<line x1="105.00" y1="763.40" x2="560.00" y2="763.40" stroke="#dddddd" stroke-width="0.7"/>
+<line x1="101.00" y1="763.40" x2="105.00" y2="763.40" stroke="#222" stroke-width="1"/>
+<text x="96.00" y="763.40" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="end" dominant-baseline="middle">80</text>
+<line x1="105.00" y1="737.00" x2="560.00" y2="737.00" stroke="#dddddd" stroke-width="0.7"/>
+<line x1="101.00" y1="737.00" x2="105.00" y2="737.00" stroke="#222" stroke-width="1"/>
+<text x="96.00" y="737.00" font-size="9" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="end" dominant-baseline="middle">100</text>
+<text x="332.50" y="725.00" font-size="12" font-family="Times New Roman, Times, serif" font-weight="bold" text-anchor="middle" dominant-baseline="middle">Phone-level ACC</text>
+<text x="332.50" y="900.00" font-size="11" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="middle" dominant-baseline="middle">Tolerance (ms)</text>
+<text x="69.00" y="803.00" font-size="11" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="middle" dominant-baseline="middle" transform="rotate(-90 69 803.0)">Phone ACC (%)</text>
+<text x="590.00" y="950.00" font-size="10.5" font-family="Times New Roman, Times, serif" font-weight="normal" text-anchor="middle" dominant-baseline="middle">Silence phones are filtered before scoring; ACC requires both start and end boundaries within tolerance.</text>
+</svg>

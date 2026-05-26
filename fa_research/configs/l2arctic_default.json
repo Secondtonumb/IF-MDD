@@ -1,0 +1,25 @@
+{
+  "dataset": "l2arctic",
+  "test_json": "/home/m64000/work/IF-MDD/data/test_times.json",
+  "sample_rate": 16000,
+  "tolerances_seconds": [0.02, 0.05, 0.1],
+  "models": {
+    "CTC": "/home/m64000/work/IF-MDD/pretrained_models/L2arctic_acou_model/CTCLoss_MLP",
+    "OTTC": "/home/m64000/work/IF-MDD/pretrained_models/L2arctic_acou_model/l2arctic_OTTC",
+    "CRCTC": "/home/m64000/work/IF-MDD/pretrained_models/L2arctic_acou_model/crctc",
+    "CROTTC": "/home/m64000/work/IF-MDD/pretrained_models/L2arctic_acou_model/crottc"
+  },
+  "targets": {
+    "canonical": {
+      "phones": "canonical_aligned",
+      "starts": "canonical_starts",
+      "ends": "canonical_ends"
+    },
+    "perceived": {
+      "phones": "perceived_train_target",
+      "starts": "target_starts",
+      "ends": "target_ends"
+    }
+  }
+}
+
