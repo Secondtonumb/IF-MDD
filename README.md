@@ -1,22 +1,22 @@
 # IF-MDD
-Official implementation of the paper:  
-[**IF-MDD: Indirect Fusion for Mispronunciation Detection and Diagnosis**](https://github.com/Secondtonumb/Secondtonumb.github.io/blob/main/docs/Geng_ICASSP_2026_final.pdf) 
 
-For more details, check 🎧[Demo](https://secondtonumb.github.io/publication_demo/ICASSP_2026/index.html)
+Official implementation of:
 
+- [**IF-MDD: Indirect Fusion for Mispronunciation Detection and Diagnosis**](https://github.com/Secondtonumb/Secondtonumb.github.io/blob/main/docs/Geng_ICASSP_2026_final.pdf)
+- [**Beyond Acoustic Sparsity and Linguistic Bias: A Prompt-Free Paradigm for Mispronunciation Detection and Diagnosis**](https://arxiv.org/html/2604.22133v1)
+
+For more details, check the demo:
 [![Example](./fig/IF-MDD_example.png)](https://secondtonumb.github.io/publication_demo/ICASSP_2026/index.html)
 
-**Update (2025-10-22):**  
-We added a new CTC decoder that now outputs phonemes with corresponding timestamps. 
-For inference with timestamps, please refer [inference.py](./inference.py)
+## Updates
 
-**Update (2025-10-08):**  
-We released the pretrained CTC checkpoint and an inference example.  
-The model is now available on Hugging Face and can be executed in **10 lines of code**.
-
----
+- `2026-06`: main branch now exposes the pre-FA core research tracks from the new paper: `CROTTC`, `IF-MDD`, and `LLM-MDD`.
+- `2026-06`: recent forced-alignment analysis work is intentionally kept separate from `main`; use the `fa-research-integration` branch for that line of work.
+- `2025-10`: added timestamp-aware CTC decoding in `inference.py`.
+- `2025-10`: released the pretrained CTC checkpoint and inference example.
 
 ## Installation
+
 ```bash
 git clone https://github.com/Secondtonumb/IF-MDD.git
 cd IF-MDD
@@ -25,30 +25,34 @@ conda activate ifmdd
 pip install -r requirements.txt
 ```
 
-## Inference (Pretrained CTC Head)
-Performance on L2-arctic Test
+Notes:
 
-| FRR  | FAR  |  ER  |   P   |   R   |  F1  |  PER  |
-|------|------|------|-------|-------|------|-------|
-| 6.07 | 45.08| 21.25| 60.38 | 54.92 | 57.52| 14.30 |
+- `LLM-MDD` experiments additionally rely on `accelerate`, `bitsandbytes`, and `peft` via `requirements.txt`.
+- Some research configs still contain machine-specific dataset/checkpoint paths and should be adapted before training.
+
+## Pretrained CTC Inference
+
+Performance on L2-ARCTIC test:
+
+| FRR  | FAR  | ER   | P     | R     | F1    | PER   |
+|------|------|------|-------|-------|-------|-------|
+| 6.07 | 45.08| 21.25| 60.38 | 54.92 | 57.52 | 14.30 |
 
 ```python
 from huggingface_hub import hf_hub_download
 import importlib.util
 
-# Customized Encoder ASR 
 path = hf_hub_download(repo_id="Haopeng/CTC_for_IF-MDD", filename="MyEncoderASR.py")
-
-# Dynamic import
 spec = importlib.util.spec_from_file_location("MyEncoderASR", path)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
-# Transcribe
 
-asr_model = module.MyEncoderASR.from_hparams(source="Haopeng/CTC_for_IF-MDD", hparams_file="inference.yaml")
+asr_model = module.MyEncoderASR.from_hparams(
+    source="Haopeng/CTC_for_IF-MDD",
+    hparams_file="inference.yaml",
+)
 x = asr_model.transcribe_file("./examples/arctic_b0503.wav")
 print(x)
-# sil dh ah s eh n t sil ah v s t r ey n jh sil v ih zh ah t ey sh ah n p l uw ao f dh ah t r aa p ih k sil l ae n t sil
 ```
 <mark>For inference with timestamps, please refer [inference.py](./inference.py)</mark>
 
@@ -59,65 +63,75 @@ print(x)
 
 </details>
 
-## Training Steps
-### **Step 0**: Data Preparation (TODO)
+## Research Tracks On `main`
 
-### **Step 1**: Initialize SSL model:
-You have two options:
+### 1. Original IF-MDD release
 
-1. **Use the released CTC model**  
-   You can directly initialize with our [released CTC model](https://huggingface.co/Haopeng/CTC_for_IF-MDD/tree/main).
+- Baseline code: `models/phn_mono_ssl_model.py`
+- Main training entry: `train.py`
+- Original training examples: `run.sh`
 
-2. **Pretrain your own monolingual SSL model with a CTC Head**  
-   Example command:
+### 2. CROTTC acoustic modeling
 
-```bash
-python ver5_train.py \
-        hparams/phnmonossl.yaml \
-        --feature_fusion PhnMonoSSL \
-        --perceived_ssl_model wavlm_large \
-        --ENCODER_DIM 1024 \
-        --prefix wavlm_ctc
-```
-### **step 2**: Train IF-MDD 
-Performance on L2-arctic Test
-| head |  FRR  |  FAR  |  ER   |   P   |   R   |  F1   |  PER  |
-|------|-------|-------|-------|-------|-------|-------|-------|
-| CTC  | 6.12  | 40.64 | 21.57 | 62.03 | 59.36 | 60.67 | 14.87 |
-| Seq  | 5.75  | 44.71 | 19.98 | 61.81 | 55.29 | 58.37 | 13.72 |
+This track corresponds to the prompt-free acoustic modeling direction in the new paper.
 
-Initialize from a pretrained SSL model:
+- Core model: `models/phn_mono_ssl_model_v3_refactored.py`
+- Main configs:
+  - `hparams/phnmonossl_crottc.yaml`
+  - `hparams/phnmonossl_crottc_confEnc.yaml`
+
+Example:
 
 ```bash
-# Transformer MDD with error classifiation head
-python train.py \
-        hparams/transformer_mispro_cls.yaml \
-        --prefix fuse_2_encdec_conf_RoPE_fromprectc_frz_errcls\
-        --feature_fusion TransformerMDD_TP_encdec_errclass \
-        --fuse_enc_or_dec encdec \
-        --encoder_module conformer \
-        --load_pretrained_components True \
-        --pretrained_model_path "<pretrained_model_path>" \ 
-        --components_to_load '["ssl", "enc"]' \
-        --freeze_loaded_components True \
-        --plot_attention True \
-        --plot_attention_interval 5
+python train.py hparams/phnmonossl_crottc.yaml
 ```
-or training from scratch
+
+### 3. IF-MDD integration with CROTTC
+
+This track adds indirect fusion / knowledge-transfer style supervision without using canonical prompts at inference time.
+
+- IF acoustic model: `models/phn_mono_ssl_model_v3_refactored_IF.py`
+- Encoder-decoder IF variant: `models/Trans_IFMDD_ConPCO_ver2.py`
+- Supporting module: `trainer/ConPCO_TransASR.py`
+- Example configs:
+  - `hparams_iqra/phnmonossl_crottc_confEnc_FT_IF.yaml`
+  - `hparams_iqra/Trans_IFMDD_ConPCO_ver2.yaml`
+
+Examples:
 
 ```bash
-# Transformer MDD
-python train.py \
-        hparams/transformer_mispro_cls.yaml \
-        --prefix fuse_2_encdec_conf_RoPE_fromprectc_frz_errcls\
-        --feature_fusion TransformerMDD_TP_encdec_errclass \
-        --fuse_enc_or_dec encdec \
-        --encoder_module conformer \
+python train.py hparams_iqra/phnmonossl_crottc_confEnc_FT_IF.yaml
+python train.py hparams_iqra/Trans_IFMDD_ConPCO_ver2.yaml
 ```
 
+### 4. LLM-MDD experiments
+
+This track contains the investigation code for explicit canonical injection through LLM-based decoding/prompting.
+
+- LLM model: `models/SSL_LLM.py`
+- Loader: `trainer/AutoLLMLoader.py`
+- Configs:
+  - `hparams/SSL_LLM.yaml`
+  - `hparams/SSL_LLM_NoPrompt.yaml`
+  - `hparams/SSL_LLM_Prompt.yaml`
+
+Example:
+
+```bash
+python train.py hparams/SSL_LLM_Prompt.yaml
+```
+
+## Scope Of This Branch
+
+`main` is now focused on the core model families described above.
+
+- Keep here: reusable model code, representative training configs, and README-level documentation for IF-MDD / CROTTC / IF / LLM-MDD.
+- Keep out of `main`: the recent large forced-alignment analysis pipeline, bulk figures, and FA-only evaluation artifacts.
 
 ## Acknowledgements
+
 This implementation is built upon the following repositories:
+
 - [SpeechBrain](https://github.com/speechbrain/speechbrain)
 - [MPL-MDD](https://github.com/Mu-Y/mpl-mdd)
 - [CTC-Attention-Mispronunciation](https://github.com/cageyoko/CTC-Attention-Mispronunciation)

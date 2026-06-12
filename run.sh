@@ -44,3 +44,15 @@ python inference.py \
         --perceived_ssl_model wavlm_large \
         --ENCODER_DIM 1024 \
         --prefix wavlm_ctc
+
+# CROTTC acoustic model
+python train.py \
+        hparams/phnmonossl_crottc.yaml
+
+# IF-MDD with CROTTC backbone
+python train.py \
+        hparams_iqra/phnmonossl_crottc_confEnc_FT_IF.yaml
+
+# LLM-MDD experiments
+python train.py \
+        hparams/SSL_LLM_Prompt.yaml

@@ -26,12 +26,22 @@ import wandb
 import time
 import torchaudio
 
-from models.phn_mono_ssl_model import PhnMonoSSLModel, PhnMonoSSLModel_DualCTCHead, PhnMonoSSLModel_RVQforBoth
+from models.phn_mono_ssl_model import (
+    PhnMonoSSLModel,
+    PhnMonoSSLModel_DualCTCHead,
+    PhnMonoSSLModel_RVQforBoth,
+)
+from models.phn_mono_ssl_model_v3_refactored import (
+    PhnMonoSSLModel as RefactoredPhnMonoSSLModel,
+)
+from models.phn_mono_ssl_model_v3_refactored_IF import PhnMonoSSLModel_IF
+from models.Trans_IFMDD_ConPCO_ver2 import Trans_IFMDD_ConPCO_ver2
 from models.Transformer import TransformerMDD
 from models.Transformer_TP import TransformerMDD_TP
 from models.Transformer_TP_fuse_errclass import TransformerMDD_TP_encdec_errclass
+from models.SSL_LLM import SSL_LLM
 
-from utils.DataPrepIO import LLMDataIOPrep, LLMDataIOPrep_ver2
+from utils.DataPrepIO import LLMDataIOPrep, LLMDataIOPrep_ver2, LLMDataIOPrep_ver3
 sys.path.append("./trainer")
 logger = logging.getLogger(__name__)
 
@@ -64,14 +74,28 @@ if __name__ == "__main__":
     
     # Model Selection
     if hparams["feature_fusion"] == "PhnMonoSSL":
-        asr_brain_class = PhnMonoSSLModel
+        if "ctc_loss_type" in hparams or "encoder_type" in hparams:
+            asr_brain_class = RefactoredPhnMonoSSLModel
+        else:
+            asr_brain_class = PhnMonoSSLModel
+    elif hparams["feature_fusion"] == "PhnMonoSSL_IF":
+        asr_brain_class = PhnMonoSSLModel_IF
+    elif hparams["feature_fusion"] == "Trans_IFMDD_ConPCO_ver2":
+        asr_brain_class = Trans_IFMDD_ConPCO_ver2
     elif hparams["feature_fusion"] == "TransformerMDD":
         asr_brain_class = TransformerMDD
     elif hparams["feature_fusion"] == "TransformerMDD_TP":
         asr_brain_class = TransformerMDD_TP
     elif hparams["feature_fusion"] == "TransformerMDD_TP_encdec_errclass":
         asr_brain_class = TransformerMDD_TP_encdec_errclass
-    if asr_brain_class == TransformerMDD_TP_encdec_errclass:
+    elif hparams["feature_fusion"] == "SSL_LLM":
+        asr_brain_class = SSL_LLM
+    else:
+        raise ValueError(f"Unsupported feature_fusion: {hparams['feature_fusion']}")
+
+    if asr_brain_class == SSL_LLM:
+        DataPrep = LLMDataIOPrep_ver3(hparams)
+    elif asr_brain_class in (TransformerMDD_TP_encdec_errclass, PhnMonoSSLModel_IF):
         DataPrep  = LLMDataIOPrep_ver2(hparams)
     else:
         DataPrep  = LLMDataIOPrep(hparams)
@@ -132,7 +156,7 @@ if __name__ == "__main__":
                 test_loader_kwargs=hparams["test_dataloader_opts"],
                 max_key=key
             )
-        elif key == "PER" or key == "PER_seq":
+        elif key == "PER" or key == "PER_seq" or key == "CTC_PER" or key == "LLM_PER":
             asr_brain.evaluate(
                 test_data,
                 test_loader_kwargs=hparams["test_dataloader_opts"],

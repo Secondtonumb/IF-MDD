@@ -9,3 +9,6 @@ torch==2.7.1
 torchaudio==2.7.1
 transformers==4.57.0
 flashlight-text==0.0.7
+accelerate
+bitsandbytes
+peft
