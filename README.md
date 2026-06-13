@@ -10,8 +10,8 @@ For more details, check the demo:
 
 ## Updates
 
-- `2026-06`: main branch now exposes the pre-FA core research tracks from the new paper: `CROTTC`, `IF-MDD`, and `LLM-MDD`.
-- `2026-06`: recent forced-alignment analysis work is intentionally kept separate from `main`; use the `fa-research-integration` branch for that line of work.
+- `2026-06`: `main` now focuses on the public core research tracks from the new paper: `CROTTC`, `IF-MDD`, `IF + CROTTC`, and `LLM-MDD`.
+- `2026-06`: `PPATP` is the primary documented `LLM-MDD` path in this repository.
 - `2025-10`: added timestamp-aware CTC decoding in `inference.py`.
 - `2025-10`: released the pretrained CTC checkpoint and inference example.
 
@@ -28,7 +28,7 @@ pip install -r requirements.txt
 Notes:
 
 - `LLM-MDD` experiments additionally rely on `accelerate`, `bitsandbytes`, and `peft` via `requirements.txt`.
-- Some research configs still contain machine-specific dataset/checkpoint paths and should be adapted before training.
+- The representative public configs use relative paths by default. For local datasets or pretrained checkpoints outside the repo, pass CLI overrides at launch time.
 
 ## Pretrained CTC Inference
 
@@ -54,79 +54,75 @@ asr_model = module.MyEncoderASR.from_hparams(
 x = asr_model.transcribe_file("./examples/arctic_b0503.wav")
 print(x)
 ```
+
 <mark>For inference with timestamps, please refer [inference.py](./inference.py)</mark>
 
 <details>
-<summary> Check the CTC decode result with timestamps</summary>
+<summary>Check the CTC decode result with timestamps</summary>
 
 ![CTC Verbose Decoder Example](./fig/phoneme_wav.png)
 
 </details>
 
-## Research Tracks On `main`
+## Public Research Tracks
 
-### 1. Original IF-MDD release
+### 1. Original IF-MDD baseline
 
 - Baseline code: `models/phn_mono_ssl_model.py`
-- Main training entry: `train.py`
-- Original training examples: `run.sh`
+- Public baseline config: `hparams/phnmonossl.yaml`
+
+```bash
+python train.py hparams/phnmonossl.yaml --feature_fusion=PhnMonoSSL
+```
 
 ### 2. CROTTC acoustic modeling
 
-This track corresponds to the prompt-free acoustic modeling direction in the new paper.
-
 - Core model: `models/phn_mono_ssl_model_v3_refactored.py`
-- Main configs:
-  - `hparams/phnmonossl_crottc.yaml`
-  - `hparams/phnmonossl_crottc_confEnc.yaml`
-
-Example:
+- Public config: `hparams/phnmonossl_crottc.yaml`
 
 ```bash
-python train.py hparams/phnmonossl_crottc.yaml
+python train.py hparams/phnmonossl_crottc.yaml --feature_fusion=PhnMonoSSL
 ```
 
-### 3. IF-MDD integration with CROTTC
-
-This track adds indirect fusion / knowledge-transfer style supervision without using canonical prompts at inference time.
+### 3. IF + CROTTC integration
 
 - IF acoustic model: `models/phn_mono_ssl_model_v3_refactored_IF.py`
-- Encoder-decoder IF variant: `models/Trans_IFMDD_ConPCO_ver2.py`
-- Supporting module: `trainer/ConPCO_TransASR.py`
-- Example configs:
+- IF sequence model: `models/Trans_IFMDD_ConPCO_ver2.py`
+- Public configs:
   - `hparams_iqra/phnmonossl_crottc_confEnc_FT_IF.yaml`
   - `hparams_iqra/Trans_IFMDD_ConPCO_ver2.yaml`
 
-Examples:
-
 ```bash
-python train.py hparams_iqra/phnmonossl_crottc_confEnc_FT_IF.yaml
-python train.py hparams_iqra/Trans_IFMDD_ConPCO_ver2.yaml
+python train.py hparams_iqra/phnmonossl_crottc_confEnc_FT_IF.yaml --feature_fusion=PhnMonoSSL_IF
+python train.py hparams_iqra/Trans_IFMDD_ConPCO_ver2.yaml --feature_fusion=Trans_IFMDD_ConPCO_ver2
 ```
 
-### 4. LLM-MDD experiments
+### 4. LLM-MDD with PPATP
 
-This track contains the investigation code for explicit canonical injection through LLM-based decoding/prompting.
-
-- LLM model: `models/SSL_LLM.py`
-- Loader: `trainer/AutoLLMLoader.py`
-- Configs:
-  - `hparams/SSL_LLM.yaml`
-  - `hparams/SSL_LLM_NoPrompt.yaml`
-  - `hparams/SSL_LLM_Prompt.yaml`
-
-Example:
+- Primary public LLM model: `models/SSL_LLM_PPATP.py`
+- Supporting projector: `models/projector.py`
+- Public config: `hparams/SSL_LLM_Prompt_ver2_LLAMA3.2_PPATP.yaml`
+- Secondary generic LLM path remains available through `models/SSL_LLM.py`
 
 ```bash
-python train.py hparams/SSL_LLM_Prompt.yaml
+python train.py hparams/SSL_LLM_Prompt_ver2_LLAMA3.2_PPATP.yaml --feature_fusion=SSL_LLM_PPATP
 ```
 
-## Scope Of This Branch
+## Public Smoke Matrix
 
-`main` is now focused on the core model families described above.
+Use the public smoke toolkit to validate the 5 public families:
 
-- Keep here: reusable model code, representative training configs, and README-level documentation for IF-MDD / CROTTC / IF / LLM-MDD.
-- Keep out of `main`: the recent large forced-alignment analysis pipeline, bulk figures, and FA-only evaluation artifacts.
+```bash
+bash run_scripts/public_smoke/submit_public_smoke_matrix.sh
+```
+
+Families:
+
+- `ifmdd`
+- `crottc`
+- `phnmonossl_if`
+- `trans_ifmdd`
+- `ppatp`
 
 ## Acknowledgements
 
