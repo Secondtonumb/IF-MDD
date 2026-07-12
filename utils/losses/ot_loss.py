@@ -28,12 +28,18 @@ def jensen_shannon_divergence(p, q):
     tensor (n,)
         The Jensen-Shannon divergence between the two distributions (per example).
     """
-    q = q + (1-q)*1e-12 - q*1e-12
+    p = p.clamp_min(1e-12)
+    q = q.clamp_min(1e-12)
+    p = p / p.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+    q = q / q.sum(dim=-1, keepdim=True).clamp_min(1e-12)
     m = 0.5 * (p + q)
-    m = torch.log(m)
-    p = torch.log(p)
-    q = torch.log(q)
-    return 0.5 * (F.kl_div(p, m, log_target=True, reduction='none') + F.kl_div(q, m, log_target=True, reduction= 'none'))
+    m_log = torch.log(m)
+    p_log = torch.log(p)
+    q_log = torch.log(q)
+    return 0.5 * (
+        F.kl_div(m_log, p_log, log_target=True, reduction='none')
+        + F.kl_div(m_log, q_log, log_target=True, reduction='none')
+    )
 
 def ot1d_transport(p_weights, q_weights):
     """Compute the 1D optimal transport plan between two discrete measures.
@@ -303,10 +309,9 @@ def batched_ottc_loss_bucketized(x, y, a, b, amask = None, bmask = None, euclidi
         cross_list_ = torch.sum((F.softmax(x[index_qx,:],dim = 1) -  y[index_qy,:].float())**2, axis = 1)
         return (w * cross_list_).sum() , index_qx_, index_qy_ , h_
 
+    cross_list_ = F.cross_entropy(x[index_qx,:] , y[index_qy,:].float(), reduction= 'none')
     if entropy > 0:
         return (w * cross_list_).sum() - entropy * torch.sum(a * torch.log(a + 1e-12)), index_qx_, index_qy_ , h_        
-
-    cross_list_ = F.cross_entropy(x[index_qx,:] , y[index_qy,:].float(), reduction= 'none')
     return (w * cross_list_).sum(),  index_qx_, index_qy_ , h_ 
 
 def batched_ottc_loss_concatenated(x, y, a, b, euclidian = False, jsd = False, entropy = 0.0, loss_options = ''):
@@ -379,10 +384,6 @@ def batched_ottc_loss_concatenated(x, y, a, b, euclidian = False, jsd = False, e
      
     if jsd == True:
         cross_list_ = jensen_shannon_divergence(F.softmax(x[index_qx,:],dim = 1), y[index_qy,:].float()).sum(axis = 1)
-        return (w * cross_list_).sum()
-    
-    if euclidian == True and not soft_before_euclidian:
-        cross_list_ = torch.sum((x[index_qx,:] -  y[index_qy,:].float())**2, axis = 1)
         return (w * cross_list_).sum()
     
     if euclidian == True:
