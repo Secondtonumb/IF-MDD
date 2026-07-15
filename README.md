@@ -25,29 +25,40 @@ conda activate ifmdd
 pip install -r requirements.txt
 ```
 
-## Inference (Pretrained CTC Head)
-Performance on L2-arctic Test
-
-| FRR  | FAR  |  ER  |   P   |   R   |  F1  |  PER  |
+## Inference (OTTC):
+| FRR  | FAR  |  EDR  |   P   |   R   |  F1  |  PER  |  
 |------|------|------|-------|-------|------|-------|
-| 6.07 | 45.08| 21.25| 60.38 | 54.92 | 57.52| 14.30 |
+| 5.14 | 39.71| 22.12 | 66.36 | 60.29 | 63.18| 18.35 |
+
 
 ```python
 from huggingface_hub import hf_hub_download
 import importlib.util
 
-# Customized Encoder ASR 
-path = hf_hub_download(repo_id="Haopeng/CTC_for_IF-MDD", filename="MyEncoderASR.py")
-
-# Dynamic import
+path = hf_hub_download(repo_id="Haopeng/l2_arctic_OTTC", filename="MyEncoderASR.py")
 spec = importlib.util.spec_from_file_location("MyEncoderASR", path)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
-# Transcribe
 
-asr_model = module.MyEncoderASR.from_hparams(source="Haopeng/CTC_for_IF-MDD", hparams_file="inference.yaml")
-x = asr_model.transcribe_file("./examples/arctic_b0503.wav")
-print(x)
+ottc_model = module.MyEncoderASR.from_hparams(
+    source="Haopeng/l2_arctic_OTTC",
+    hparams_file="inference.yaml",
+    run_ctc=True,
+)
+y = ottc_model.transcribe_file("./examples/arctic_b0503.wav")
+
+print(y)
+# sil d ah s eh n t sil ah v s t r ey n jh sil v ih jh ah t ey sh ah n sil p l uw ao f dh iy t r aa p ih k sil l ae n t sil
+
+# For CTC comparision
+
+# ctc_model = module.MyEncoderASR.from_hparams(
+#     source="Haopeng/CTC_for_IF-MDD",
+#     hparams_file="inference.yaml",
+# )
+# x = ctc_model.transcribe_file("./examples/arctic_b0503.wav")
+
+# print(x)
 # sil dh ah s eh n t sil ah v s t r ey n jh sil v ih zh ah t ey sh ah n p l uw ao f dh ah t r aa p ih k sil l ae n t sil
 ```
 <mark>For inference with timestamps, please refer [inference.py](./inference.py)</mark>
