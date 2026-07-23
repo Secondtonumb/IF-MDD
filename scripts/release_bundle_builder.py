@@ -267,6 +267,7 @@ def write_model_card(spec: BundleSpec, output: Path) -> None:
         base_model = ""
         override = "  --override ctc_decode_weight=0.99"
         recoverables = "`model.ckpt` and `perceived_ssl.ckpt`"
+        local_runtime = "bundle-local WavLM configuration"
     else:
         title = "MDD-LLM with Llama 3.2 1B for L2-ARCTIC"
         tags = ("pronunciation-assessment", "speechbrain", "llama")
@@ -276,6 +277,7 @@ def write_model_card(spec: BundleSpec, output: Path) -> None:
             "  --override 'prompt_user_text=Return only the perceived phoneme sequence.'"
         )
         recoverables = "`model.ckpt`"
+        local_runtime = "bundle-local Llama tokenizer and WavLM configuration"
 
     tag_lines = "\n".join(f"- {tag}" for tag in ("speech", "audio", *tags))
     card = f"""---
@@ -289,9 +291,8 @@ datasets:
 
 This repository is a standalone IF-MDD inference bundle. It includes the
 complete {recoverables} inference state, the verified 44-label encoder,
-bundle-local WavLM configuration, and all runtime modules needed by the
-wrapper. The Llama bundle also includes its tokenizer and model
-configuration, so loading does not contact Hugging Face.
+{local_runtime}, and all runtime modules needed by the wrapper, so loading
+does not contact Hugging Face.
 
 ## Single WAV
 
@@ -305,9 +306,7 @@ python custom_interface.py \\
 
 ## Repository Eval
 
-With the
-[`fix/l2-arctic-release`](https://github.com/Secondtonumb/IF-MDD/tree/fix/l2-arctic-release)
-branch:
+With the [`main`](https://github.com/Secondtonumb/IF-MDD/tree/main) branch:
 
 ```bash
 python train.py hparams/{spec.hparams.name} \\
