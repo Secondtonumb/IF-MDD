@@ -110,7 +110,21 @@ Both release bundles support strict checkpoint loading through `train.py` and
 single-audio inference without a repository checkout:
 
 ```bash
-export CROTTC_BUNDLE=/path/to/CROTTC-IF-l2-arctic
+python -m pip install -U huggingface_hub
+
+hf download Haopeng/CROTTC-IF-l2-arctic \
+  --local-dir CROTTC-IF-l2-arctic
+
+hf download Haopeng/MDD-LLM-Llama3.2-1B-L2-ARCTIC \
+  --local-dir MDD-LLM-Llama3.2-1B-L2-ARCTIC
+```
+
+The CROTTC-IF download includes both `checkpoint/model.ckpt` and
+`checkpoint/perceived_ssl.ckpt`. The MDD-LLM download includes its complete
+`checkpoint/model.ckpt`.
+
+```bash
+export CROTTC_BUNDLE="$PWD/CROTTC-IF-l2-arctic"
 python train.py hparams/CROTTC_IF.yaml \
   --mode eval \
   --inference_ckpt "$CROTTC_BUNDLE" \
@@ -123,7 +137,7 @@ python "$CROTTC_BUNDLE/custom_interface.py" \
 ```
 
 ```bash
-export LLM_BUNDLE=/path/to/MDD-LLM-Llama3.2-1B-L2-ARCTIC
+export LLM_BUNDLE="$PWD/MDD-LLM-Llama3.2-1B-L2-ARCTIC"
 python train.py hparams/MDD_LLM_Llama3_2_1B.yaml \
   --mode eval \
   --inference_ckpt "$LLM_BUNDLE"
