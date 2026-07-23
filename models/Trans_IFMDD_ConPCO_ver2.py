@@ -1194,7 +1194,6 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
             phn_id=targets_eos,
         ).values()
         
-        from utils.plot.plot_clap import plot_clap_clusters, plot_phone_cluster, plot_phoneme_centroids_with_instances
         # TODOS:
         '''
         1. Try / Use Dec_out's feature and Tgt Embedding for conpco learning.
@@ -1213,6 +1212,9 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
         
         if current_epoch % self.hparams.plot_conpco_interval == 0 and self.hparams.plot_conpco:
             from pathlib import Path
+            from utils.plot.plot_clap import (
+                plot_phoneme_centroids_with_instances,
+            )
             
             if stage == sb.Stage.VALID:
                 output_dir = Path(self.hparams.conpco_plot_dir) / "valid" / f"{current_epoch:03d}"
@@ -1979,6 +1981,7 @@ class Trans_IFMDD_ConPCO_ver2(sb.Brain):
             "hyps": predictions.get("hyps"),  # [B, T_decoded]
             "top_log_probs": predictions.get("top_log_probs"),  # [B, T_decoded] confidence scores
             "top_lengths": predictions.get("top_lengths"),  # [B] actual lengths
+            "p_ctc_feat": predictions.get("p_ctc_feat"),
         }
     
     def inference(self, test_set, test_loader_kwargs=None, max_key=None, min_key=None, output_file=None):

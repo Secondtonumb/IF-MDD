@@ -11,7 +11,7 @@ For more details, check the demo:
 ## Updates
 
 - `2026-06`: `main` now focuses on the public core research tracks from the new paper: `CROTTC`, `IF-MDD`, `IF + CROTTC`, and `LLM-MDD`.
-- `2026-06`: `PPATP` is the primary documented `LLM-MDD` path in this repository.
+- `2026-07`: added reproducible L2-ARCTIC CROTTC-IF and Llama-3.2 MDD-LLM release recipes.
 - `2025-10`: added timestamp-aware CTC decoding in `inference.py`.
 - `2025-10`: released the pretrained CTC checkpoint and inference example.
 
@@ -27,7 +27,7 @@ pip install -r requirements.txt
 
 Notes:
 
-- `LLM-MDD` experiments additionally rely on `accelerate`, `bitsandbytes`, and `peft` via `requirements.txt`.
+- `MDD-LLM` experiments additionally rely on `accelerate` and `peft` via `requirements.txt`.
 - The representative public configs use relative paths by default. For local datasets or pretrained checkpoints outside the repo, pass CLI overrides at launch time.
 
 ## Pretrained CTC Inference
@@ -84,28 +84,55 @@ python train.py hparams/phnmonossl.yaml --feature_fusion=PhnMonoSSL
 python train.py hparams/phnmonossl_crottc.yaml --feature_fusion=PhnMonoSSL
 ```
 
-### 3. IF + CROTTC integration
+### 3. CROTTC-IF sequence model
 
 - IF acoustic model: `models/phn_mono_ssl_model_v3_refactored_IF.py`
 - IF sequence model: `models/Trans_IFMDD_ConPCO_ver2.py`
-- Public configs:
-  - `hparams_iqra/phnmonossl_crottc_confEnc_FT_IF.yaml`
-  - `hparams_iqra/Trans_IFMDD_ConPCO_ver2.yaml`
+- Public config: `hparams/CROTTC_IF.yaml`
 
 ```bash
-python train.py hparams_iqra/phnmonossl_crottc_confEnc_FT_IF.yaml --feature_fusion=PhnMonoSSL_IF
-python train.py hparams_iqra/Trans_IFMDD_ConPCO_ver2.yaml --feature_fusion=Trans_IFMDD_ConPCO_ver2
+python train.py hparams/CROTTC_IF.yaml --mode train
 ```
 
-### 4. LLM-MDD with PPATP
+### 4. MDD-LLM with Llama-3.2
 
-- Primary public LLM model: `models/SSL_LLM_PPATP.py`
+- Primary public LLM model: `models/SSL_LLM_origin_ver2.py`
 - Supporting projector: `models/projector.py`
-- Public config: `hparams/SSL_LLM_Prompt_ver2_LLAMA3.2_PPATP.yaml`
-- Secondary generic LLM path remains available through `models/SSL_LLM.py`
+- Public config: `hparams/MDD_LLM_Llama3_2_1B.yaml`
 
 ```bash
-python train.py hparams/SSL_LLM_Prompt_ver2_LLAMA3.2_PPATP.yaml --feature_fusion=SSL_LLM_PPATP
+python train.py hparams/MDD_LLM_Llama3_2_1B.yaml --mode train
+```
+
+## L2-ARCTIC Release Bundles
+
+Both release bundles support strict checkpoint loading through `train.py` and
+single-audio inference without a repository checkout:
+
+```bash
+export CROTTC_BUNDLE=/path/to/CROTTC-IF-l2-arctic
+python train.py hparams/CROTTC_IF.yaml \
+  --mode eval \
+  --inference_ckpt "$CROTTC_BUNDLE" \
+  --ctc_decode_weight=0.99
+
+python "$CROTTC_BUNDLE/custom_interface.py" \
+  --hparams-file hyperparams.yaml \
+  --audio examples/arctic_b0503.wav \
+  --override ctc_decode_weight=0.99
+```
+
+```bash
+export LLM_BUNDLE=/path/to/MDD-LLM-Llama3.2-1B-L2-ARCTIC
+python train.py hparams/MDD_LLM_Llama3_2_1B.yaml \
+  --mode eval \
+  --inference_ckpt "$LLM_BUNDLE"
+
+python "$LLM_BUNDLE/custom_interface.py" \
+  --hparams-file hyperparams.yaml \
+  --audio examples/arctic_b0503.wav \
+  --override 'prompt_system_text=You are a pronunciation evaluator.' \
+  --override 'prompt_user_text=Return only the perceived phoneme sequence.'
 ```
 
 ## Public Smoke Matrix
@@ -122,7 +149,7 @@ Families:
 - `crottc`
 - `phnmonossl_if`
 - `trans_ifmdd`
-- `ppatp`
+- `mdd_llm_llama3_2`
 
 ## Acknowledgements
 

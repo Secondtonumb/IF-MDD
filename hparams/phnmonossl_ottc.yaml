@@ -1,6 +1,16 @@
 # Hyperparameters toggles
 prefix: ""
 lab_enc_file: utils/label_encoder.txt
+ctc_loss_type: "ottc"  # Options: "ctc", "ottc", "crctc"
+encoder_type: "none"  # Options: None, "conformer", "zipformer", "rvq"
+
+wandb_project: "l2arctic"
+# Wandb Tags
+tags:
+    - PhnMonoSSL
+    - ottc
+    - None
+    - l2arctic
 
 ## SSL features Selection
 pretrained_models_path: pretrained_models/
@@ -13,13 +23,13 @@ pretrained_models_path: pretrained_models/
 #     "hubert_multilingual": "utter-project/mHuBERT-147", # 768
 #     "clap" : "laion/clap-htsat-fused", # 768
 #     "data2vec_base": "facebook/data2vec-audio-base", # 768
-    
+
 #     "wav2vec2_large": "facebook/wav2vec2-large", # 1024
 #     "hubert_large": "facebook/hubert-large-ls960", # 1024
 #     "wavlm_large": "microsoft/wavlm-large-plus", # 1024
 #     "data2vec_large": "facebook/data2vec-audio-large", #1024
 #     "whisper_medium": "openai/whisper-medium", # 1024
-    
+
 #     "whisper_large_v3_turbo": "openai/whisper-large-v3-turbo", # 1280
 # }
 
@@ -32,7 +42,7 @@ canonical_ssl_model: Null
 ENCODER_DIM: 1024
 
 # # How to fuse the features
-feature_fusion: "PhnMonoSSL"  # Public train.py model selector for the mono SSL baseline
+feature_fusion: "PhnMonoSSL"        # Options: "mono" for single ssl, "dual_ssl_enc" for dual ssl encoder, "dual_loss" for single SSL dual ssl loss
 blend_alpha: 0.5              # If using "blend" fusion
 
 # Input files
@@ -41,15 +51,17 @@ data_folder_save: "./data"
 train_annotation: !ref <data_folder_save>/train-train.json
 valid_annotation: !ref <data_folder_save>/train-dev.json
 test_annotation: !ref <data_folder_save>/test.json
+
 # Extra data
 train_annotation_extra: !ref <data_folder_save>/train-train_with_extra.json
 use_extra_train_data: False
 
-evaluate_key: "PER" # use "mpd_f1_seq" for Transformer decoder path best mpd f1
+# evaluate_key: "PER" # use "mpd_f1_seq" for Transformer decoder path best mpd f1
+evaluate_key: "mpd_f1"   # use "mpd_f1_seq" for Transformer decoder path best mpd f1
                             # "PER_seq" for Transformer decoder's best error rate
                             # "PER" for ctc path best error rate
                             # "mpd_f1" for ctc path best mpd f1
-max_save_models: 3 # Maximum number of saved models for each metrics 
+max_save_models: 50 # Maximum number of saved models for each metrics
 # generate training id for output folder
 # generate_training_id: !apply:trainer.generate_training_id.generate_training_id [!ref <perceived_ssl_model_id>, !ref <canonical_ssl_model_id>, !ref <feature_fusion>, !ref <prefix>]
 
@@ -63,7 +75,7 @@ train_log: !ref <output_folder>/train_log.txt
 on_training_test_wer_folder: !ref <output_folder>/on_training_test_wer
 on_training_test_mpd_folder: !ref <output_folder>/on_training_test_mpd
 
-# Training Target 
+# Training Target
 training_target: "target" # "target": deduplicated canonical phoneme sequence; "target_with_repeats": with repeats
                           # "canonical"
                           # "perceived": deduplicated perceived phoneme sequence
@@ -73,6 +85,7 @@ modules:
     perceived_ssl: !ref <perceived_ssl>
     enc: !ref <enc>
     ctc_lin: !ref <ctc_lin>
+    lm_weight: !ref <lm_weight>
 
 perceived_ssl: !apply:trainer.AutoSSLoader.AutoSSLLoader
     model_name: !ref <perceived_ssl_model>
@@ -104,10 +117,15 @@ ctc_lin:  !new:speechbrain.nnet.linear.Linear
     input_size: !ref <dnn_neurons>
     n_neurons: !ref <output_neurons>  # 40 phonemes + 1 blank + 1 err
 
+# lm_weight for OTTC's alpha prediction
+lm_weight: !new:speechbrain.nnet.linear.Linear
+    input_size: !ref <dnn_neurons>
+    n_neurons: 1  # 40 phonemes + 1 blank + 1 err
+
 # Model parameters
 activation: !name:torch.nn.LeakyReLU
 dnn_layers: 2
-dnn_neurons: 384  
+dnn_neurons: 384
 freeze_perceived_ssl: False
 freeze_canonical_ssl: False
 freeze_perceived_feature_extractor: True  # freeze the CNN extractor in wav2vec
@@ -116,8 +134,19 @@ freeze_canonical_feature_extractor: True         # Freeze Whisper encoder?
 log_softmax: !new:speechbrain.nnet.activations.Softmax
     apply_log: True
 
-ctc_cost: !name:speechbrain.nnet.losses.ctc_loss
-    blank_index: !ref <blank_index>
+# ctc_cost: !name:speechbrain.nnet.losses.ctc_loss
+#     blank_index: !ref <blank_index>
+
+# ctc_cost: !new:utils.CTCLossWithLabelPriors.CTCLossWithLabelPriors
+#     prior_scaling_factor: 0.3
+#     ctc_implementation: 'k2'
+#     blank: !ref <blank_index>
+#     reduction: 'sum'
+
+ctc_cost: !name:utils.losses.ot_loss.batched_ottc_loss_bucketized
+ctc_cost_test: !name:speechbrain.nnet.losses.ctc_loss
+     blank_index: !ref <blank_index>
+
 
 ctc_cost_mispro: !name:speechbrain.nnet.losses.ctc_loss
     blank_index: !ref <blank_index>
@@ -127,7 +156,7 @@ output_neurons: 44 # l2arctic: 40phns(sil)+err+blank + eos + bos =44
 blank_index: 0
 
 model: !new:torch.nn.ModuleList
-    - [!ref <enc>, !ref <ctc_lin>]
+    - [!ref <enc>, !ref <ctc_lin>, !ref <lm_weight>]
 
 adam_opt_class: !name:torch.optim.Adam
     lr: !ref <lr>
@@ -154,13 +183,19 @@ epoch_counter: !new:speechbrain.utils.epoch_loop.EpochCounter
 train_logger: !new:speechbrain.utils.train_logger.FileTrainLogger
     save_file: !ref <train_log>
 
+# ctc_stats: !name:speechbrain.utils.metric_stats.MetricStats
+#     metric: !new:utils.CTCLossWithLabelPriors.CTCLossWithLabelPriors
+#         prior_scaling_factor: 0.3
+#         ctc_implementation: 'k2'
+#         blank: !ref <blank_index>
+#         reduction: 'none'
+
 ctc_stats: !name:speechbrain.utils.metric_stats.MetricStats
     metric: !name:speechbrain.nnet.losses.ctc_loss
         blank_index: !ref <blank_index>
         reduction: batch
 
 per_stats: !name:speechbrain.utils.metric_stats.ErrorRateStats
-
 
 # # TIMIT
 # timit_local_data_folder: "/common/db/TIMIT"  # Path to TIMIT datase
@@ -169,12 +204,14 @@ seed: 3047
 __set_seed: !apply:torch.manual_seed [!ref <seed>]
 
 # training parameters
-number_of_epochs: 100
+number_of_epochs: 150
 batch_size: 16
-lr: 0.0003
-sorting: ascending
+lr: 0.0001
+# sorting: ascending
+# sorting: descending
+sorting: random
 sample_rate: 16000
-gradient_accumulation: 2
+gradient_accumulation: 1
 lr_pretrained: 0.00001
 
 # Mix-Precision Training
@@ -186,14 +223,14 @@ eval_precision: fp32    # 推理同样切换到 FP16
 # Dataloader options
 train_dataloader_opts:
     batch_size: !ref <batch_size>
-    
+
 
 valid_dataloader_opts:
     batch_size: !ref <batch_size>
-    
+
 
 test_dataloader_opts:
-    batch_size: 1
+    batch_size: !ref <batch_size>
 
 pretrainer: !new:speechbrain.utils.parameter_transfer.Pretrainer
     collect_in: !ref <save_folder>/
@@ -212,3 +249,7 @@ decoding_function: !name:speechbrain.decoders.ctc_greedy_decode
 
 tokenizer: !new:speechbrain.dataio.encoder.TextEncoder
     load_from_file: utils/label_encoder.txt
+
+freeze_lm_weight: True
+
+blank_insertion: False
