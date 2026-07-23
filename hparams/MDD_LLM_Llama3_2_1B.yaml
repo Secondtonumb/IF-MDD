@@ -1,0 +1,302 @@
+# Public L2-ARCTIC MDD-LLM recipe: SSL_LLM_origin_ver2 + Llama-3.2-1B-Instruct.
+# yamllint disable
+# Hyperparameters toggles
+prefix: LLAMA3_2
+bundle_root: .
+
+lab_enc_file: utils/label_encoder.txt
+ctc_loss_type: ottc
+wandb_project: IF-MDD-L2-ARCTIC
+encoder_type: conformer    # Options: None, "conformer", "zipformer", "rvq"
+# Wandb Tags
+tags:
+- SSL_LLM
+- ottc
+- l2-arctic
+
+## SSL features Selection
+pretrained_models_path: pretrained_models/
+# select pretrained SSL models
+
+# Pretrained Component Loading
+load_pretrained_components: true      # Enable loading specific components from pretrained model
+pretrained_model_path: pretrained_models/ottc_audioencoder
+components_to_load: [ssl, post_ssl_encoder]     # Components to load: ssl (necessary), ctc_branch (to monitor CTC performance)
+
+freeze_loaded_components: true        # Whether to freeze the loaded components, # 768
+
+perceived_ssl_model: wavlm_large   # in pretrained_models
+perceived_ssl_source: !ref <perceived_ssl_model>
+load_pretrained_ssl_weights: true
+canonical_ssl_model:
+
+# # models hidden size, varies by model
+ENCODER_DIM: 1024
+LLM_DIM: 2048
+
+# # How to fuse the features
+feature_fusion: SSL_LLM_origin_ver2 # Options: "mono" for single ssl, "dual_ssl_enc" for dual ssl encoder, "dual_loss" for single SSL dual ssl loss
+llm_source: meta-llama/Llama-3.2-1B-Instruct
+load_pretrained_llm_weights: true
+ctc_weight: 0.3               # 降低 CTC 权重，增加 LLM 分支权重 (CE loss 权重 = 0.7)
+# Input files
+# Data files
+data_folder_save: ./data
+train_annotation: ./data/train-train.json
+valid_annotation: ./data/train-dev.json
+test_annotation: ./data/test.json
+
+inference_output_file: !ref <output_folder>/inference_results.jsonl
+# Extra data
+train_annotation_extra: ./data/train-train_with_extra.json
+use_extra_train_data: false
+
+use_prompt: true
+prompt_type: text          # "soft" 可学习的向量 | "discrete" 离散 token
+prompt_len: 16             # 增加到 16，提供更多上下文（原 8）
+prompt_init: normal        # "normal" 更适合 LLM，标准差为 0.02
+prompt_dropout: 0.1        # 添加 dropout 防止过拟合
+prompt_ids:                # soft prompt 不需要 ids
+
+# Externalizable text prompt used by the Llama chat-template path.
+prompt_system_text: "You are a phoneme transcriber."
+prompt_user_text: "Transcribe the preceding speech into phonemes."
+
+
+evaluate_key: LLM_PER   # use "LLM_PER" for LLM_path with best error rate
+                            # "mpd_f1_seq" for Transformer decoder's best F1
+max_save_models: 3 # Maximum number of saved models for each metrics
+
+# output files
+output_folder: results/MDD-LLM-Llama3.2-1B-L2-ARCTIC
+per_file: !ref <output_folder>/per.txt
+mpd_file: !ref <output_folder>/mpd.txt
+save_folder: !ref <output_folder>/save
+train_log: !ref <output_folder>/train_log.txt
+
+# Training Target
+training_target: target   # "target": deduplicated canonical phoneme sequence; "target_with_repeats": with repeats
+                          # "canonical"
+                          # "perceived": deduplicated perceived phoneme sequence
+# Modules (SpeechBrain lobes)
+modules:
+  perceived_ssl: &id001 !apply:trainer.AutoSSLoader.AutoSSLLoader
+    model_name: !ref <perceived_ssl_source>
+    freeze: false
+    freeze_feature_extractor: true
+    save_path: pretrained_models/
+    output_all_hiddens: false
+    load_pretrained_weights: !ref <load_pretrained_ssl_weights>
+  ssl_proj: &id002 !new:torch.nn.Sequential
+  - !new:speechbrain.lobes.models.VanillaNN.VanillaNN
+    input_shape: [null, null, 1024]
+    activation: &id009 !name:torch.nn.LeakyReLU
+    dnn_blocks: 2
+    dnn_neurons: 384
+  - !new:torch.nn.LayerNorm
+    normalized_shape: 384
+
+  ConformerEncoder: &id003 !new:speechbrain.lobes.models.transformer.Conformer.ConformerEncoder
+    num_layers: 2
+    nhead: 8
+    d_ffn: 384
+    d_model: 384
+    dropout: 0.1
+    kernel_size: 7
+    attention_type: RoPEMHA
+
+# CTC linear layer
+  projector: &id005 !new:models.projector.EncoderProjectorCov1d
+    encoder_projector_ds_rate: 4
+    encoder_dim: 384
+    llm_dim: 2048
+
+
+# Verbose for Audio Encoder
+  LLM: &id008 !apply:trainer.AutoLLMLoader.AutoLLMLoader
+    model_name: !ref <llm_source>
+    use_lora: true
+    load_pretrained_weights: !ref <load_pretrained_llm_weights>
+    lora_config: &id007
+
+      r: 16
+      alpha: 16
+      dropout: 0.05
+      target_modules: [q_proj, v_proj]
+  ctc_lin: &id004 !new:speechbrain.nnet.linear.Linear
+    input_size: 384
+    n_neurons: 44                     # 40 phonemes + 1 blank + 1 err
+
+# lm in OTTC branch, not use for training
+  lm_weight: &id006 !new:speechbrain.nnet.linear.Linear
+
+    input_size: 384
+    n_neurons: 1  # 40 phonemes + 1 blank + 1 err
+
+# LLM
+audio_encoder_modules: !new:torch.nn.Sequential
+- *id001
+- *id002
+- *id003
+post_encoder_modules: &id012 !new:torch.nn.ModuleList
+- [*id002, *id003, *id004]
+perceived_ssl: *id001
+preceived_ssl_emb_layer: -1
+
+# Projector
+post_encoder_reduction_factor: 4
+# mem_proj_cnn: !new:torch.nn.Conv1d
+#     in_channels: !ref <dnn_neurons>
+#     out_channels: !ref <LLM_DIM>
+#     kernel_size: !ref <post_encoder_reduction_factor>
+#     stride: !ref <post_encoder_reduction_factor>
+#     padding: 0
+# projector:  !new:torch.nn.Sequential
+#     - !ref <mem_proj_cnn>
+#     - !new:torch.nn.ReLU
+#     - !new:torch.nn.BatchNorm1d
+#         num_features: !ref <LLM_DIM>
+
+projector: *id005
+ctc_head_input: enc_ctc    # Options: "ssl" for SSL features; "enc_ctc" for encoder output; "enc_llm" for LLM encoder input
+
+ssl_proj: *id002
+kernel_size: 7
+attention_type: RoPEMHA   # "RelPosMHAXL"
+ConformerEncoder: *id003
+ctc_lin: *id004
+lm_weight: *id006
+LLM_model: !ref <llm_source>
+
+# 统计跟踪器
+llm_stats: !name:speechbrain.utils.metric_stats.MetricStats
+  metric: !name:speechbrain.nnet.losses.kldiv_loss
+    reduction: batch
+
+# LLaMA model with LoRA config
+use_lora: true
+rank: 16
+lora_config: *id007
+
+LLM: *id008
+LLM_tokenizer: !apply:trainer.AutoLLMLoader.AutoLLMTokenizer
+  model_name: !ref <llm_source>
+
+# Model parameters
+activation: *id009
+dnn_layers: 2
+dnn_neurons: 384
+freeze_perceived_ssl: false
+freeze_canonical_ssl: false
+freeze_perceived_feature_extractor: true  # freeze the CNN extractor in wav2vec
+freeze_canonical_feature_extractor: true         # Freeze Whisper encoder?
+
+log_softmax: !new:speechbrain.nnet.activations.Softmax
+  apply_log: true
+
+ctc_cost: !name:speechbrain.nnet.losses.ctc_loss
+  blank_index: 0
+
+# Outputs
+output_neurons: 44 # l2arctic: 40phns(sil)+err+blank + eos + bos =44
+blank_index: 0
+
+# ctc_branch: !new:torch.nn.ModuleList
+#   - [!ref <audio_encoder>, !ref <ctc_lin>]
+
+# model: !new:torch.nn.ModuleList
+#     - [!ref <perceived_ssl>, !ref <enc>, !ref <ctc_lin>, !ref <LLM>, !ref <enc_ctc>] # !ref <phn_embed>, !ref <phn_head>]
+
+model: &id010 !new:torch.nn.ModuleList
+
+- [*id001, *id002, *id003, *id005, *id008, *id004]                                                                   # !ref <phn_embed>, !ref <phn_head>]
+
+trainable_model: !new:torch.nn.ModuleList
+- [*id005, *id008]                    # !ref <ctc_lin>] # !ref <phn_embed>, !ref <phn_head>]
+
+# model: !new:torch.nn.ModuleList
+#     - [!ref <projector>, !ref <LLM>, !ref <ctc_lin>] # !ref <phn_embed>, !ref <phn_head>]
+
+adam_opt_class: !name:torch.optim.Adam
+  lr: 0.0002
+
+checkpointer: !new:speechbrain.utils.checkpoints.Checkpointer
+  checkpoints_dir: !ref <save_folder>
+  recoverables:
+    model: *id010
+    counter: &id011 !new:speechbrain.utils.epoch_loop.EpochCounter
+      limit: 100
+
+  allow_partial_load: true
+
+augmentation: !new:speechbrain.augment.time_domain.SpeedPerturb
+  orig_freq: 16000
+  speeds: [95, 100, 105]
+
+epoch_counter: *id011
+train_logger: !new:speechbrain.utils.train_logger.FileTrainLogger
+  save_file: !ref <train_log>
+
+ctc_stats: !name:speechbrain.utils.metric_stats.MetricStats
+  metric: !name:speechbrain.nnet.losses.ctc_loss
+    blank_index: 0
+    reduction: batch
+
+per_stats: !name:speechbrain.utils.metric_stats.ErrorRateStats
+
+# # TIMIT
+# timit_local_data_folder: "/common/db/TIMIT"  # Path to TIMIT datase
+
+seed: 3047
+__set_seed: !apply:torch.manual_seed [3047]
+
+# training parameters
+number_of_epochs: 100
+valid_search_interval: 1
+batch_size: 4
+lr: 0.0002  # 从 0.0003 降低，防止 LLM loss 上升
+# sorting: descending # For OOM testing
+sorting: ascending
+sample_rate: 16000
+gradient_accumulation: 1
+grad_clip: 1.0  # 新增：梯度裁剪，防止梯度爆炸
+lr_pretrained: 0.00001
+lr_prompt: 0.001  # 新增：prompt 专用学习率（可以比主模型高一些）
+
+# Mix-Precision Training
+auto_mix_prec: true
+# or
+precision: fp16         # 支持 "fp32"、"fp16" 或 "bf16"
+eval_precision: fp32    # 推理同样切换到 FP16
+
+# Dataloader options
+train_dataloader_opts:
+  batch_size: 4
+  pin_memory: true
+
+valid_dataloader_opts:
+  batch_size: 4
+  pin_memory: true
+
+test_dataloader_opts:
+  batch_size: 32
+  pin_memory: true
+
+pretrainer: !new:speechbrain.utils.parameter_transfer.Pretrainer
+  collect_in: !ref <save_folder>
+  loadables:
+    model: *id010
+AudioEncoderPretrainer: !new:speechbrain.utils.parameter_transfer.Pretrainer
+  collect_in: !ref <pretrained_model_path>
+  loadables:
+    perceived_ssl: *id001
+    post_encoder_modules: *id012
+  paths:
+    perceived_ssl: !ref <pretrained_model_path>/perceived_ssl.ckpt
+    post_encoder_modules: !ref <pretrained_model_path>/model.ckpt
+
+decoding_function: !name:speechbrain.decoders.ctc_greedy_decode
+  blank_id: 0
+
+tokenizer: !new:speechbrain.dataio.encoder.TextEncoder
+  load_from_file: utils/label_encoder.txt

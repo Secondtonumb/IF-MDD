@@ -27,6 +27,27 @@ from speechbrain.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+
+class _IdentityEncoder(nn.Module):
+    """Preserve the no-op encoder used by zero-layer legacy recipes."""
+
+    def __init__(self, output_hidden_states=False):
+        super().__init__()
+        self.output_hidden_states = output_hidden_states
+
+    def forward(
+        self,
+        src,
+        src_mask=None,
+        src_key_padding_mask=None,
+        pos_embs=None,
+        **kwargs,
+    ):
+        if self.output_hidden_states:
+            return src, [], [src]
+        return src, []
+
+
 class ConPCO_TransformerASR(TransformerASR):
     def __init__(
         self,
@@ -100,6 +121,11 @@ class ConPCO_TransformerASR(TransformerASR):
 
         # reset parameters using xavier_normal_
         self._init_params()
+
+        # Recent SpeechBrain versions leave ``encoder`` undefined for a
+        # zero-layer recipe. This model still calls it to obtain decoder memory.
+        if not hasattr(self, "encoder"):
+            self.encoder = _IdentityEncoder(output_hidden_states)
         
         if custom_src_module is not None:
             self.custom_src_module = custom_src_module

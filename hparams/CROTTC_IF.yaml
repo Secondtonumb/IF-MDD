@@ -1,0 +1,657 @@
+# Public L2-ARCTIC CROTTC-IF recipe.
+# yamllint disable
+# Hyperparameters toggles
+
+# coverage_scorer = CoverageScorer(vocab_size=output_vocab_size, weight=1.5)
+# speechbrain.decoders.scorer.CoverageScorer
+
+prefix: ''
+bundle_root: .
+loss_device: cuda:0
+
+## SSL features Selection
+pretrained_models_path: pretrained_models/
+
+lab_enc_file: utils/label_encoder.txt
+ctc_loss_type: ottc    # Options: "ctc", "ottc", "crctc"
+encoder_type: none    # Options: None, "conformer", "zipformer", "rvq"
+
+wandb_project: IF-MDD-L2-ARCTIC
+# Wandb Tags
+tags:
+- Trans_IFMDD_ConPCO
+- ottc
+    # - ConformerEncoder
+- l2-arctic
+
+# Pretrained Component Loading
+load_pretrained_components:      # Enable loading specific components from pretrained model
+pretrained_model_path: pretrained_models/L2arctic_acou_model/l2arctic_OTTC
+
+# components_to_load: ["ssl", "encoder"] # Components to load: ssl, encoder, enc_projection, ctc_head, decoder
+components_to_load: [ssl]
+freeze_loaded_components: true        # Whether to freeze the loaded components, # 768
+
+# select pretrained SSL models
+perceived_ssl_model: wavlm_large   # in pretrained_models
+perceived_ssl_source: !ref <perceived_ssl_model>
+load_pretrained_ssl_weights: true
+
+# # models hidden size, varies by model
+ENCODER_DIM: 1024
+
+# # How to fuse the features
+feature_fusion: Trans_IFMDD_ConPCO_ver2          # Options: "mono" for single ssl, "dual_ssl_enc" for dual ssl encoder, "dual_loss" for single SSL dual ssl loss
+blend_alpha: 0.5              # If using "blend" fusion
+
+# Input files
+# Data files
+data_folder_save: ./data
+train_annotation: ./data/train-train_new.json
+valid_annotation: ./data/train-dev_new.json
+test_annotation: ./data/test.json
+
+# Extra data
+train_annotation_extra: ./data/train-train_with_extra.json
+inference_output_file: !ref <output_folder>/inference_results.jsonl
+# Extra data
+
+use_extra_train_data: false
+
+# generate training id for output folder
+# generate_training_id: !apply:trainer.generate_training_id.generate_training_id [!ref <perceived_ssl_model_id>, !ref <canonical_ssl_model_id>, !ref <feature_fusion>, !ref <prefix>]
+
+# evaluate_key: "PER_seq" # use "mpd_f1_seq" for Transformer decoder path best mpd f1
+evaluate_key: mpd_f1_seq
+                            # "PER_seq" for Transformer decoder's best error rate
+                            # "PER" for ctc path best error rate
+                            # "mpd_f1" for ctc path best mpd f1
+max_save_models: 4 # Maximum number of saved models for each metrics
+
+# output files
+output_folder: results/CROTTC-IF-l2-arctic
+per_file: !ref <output_folder>/per.txt
+mpd_file: !ref <output_folder>/mpd.txt
+save_folder: !ref <output_folder>/save
+train_log: !ref <output_folder>/train_log.txt
+
+on_training_test_wer_folder: !ref <output_folder>/on_training_test_wer
+on_training_test_mpd_folder: !ref <output_folder>/on_training_test_mpd
+
+# Modules (SpeechBrain lobes)
+modules:
+  perceived_ssl: &id006 !apply:trainer.AutoSSLoader.AutoSSLLoader
+    model_name: !ref <perceived_ssl_source>
+    freeze: false
+    freeze_feature_extractor: true
+    save_path: pretrained_models/
+    output_all_hiddens: false
+    load_pretrained_weights: !ref <load_pretrained_ssl_weights>
+
+  enc: &id001 !new:torch.nn.Sequential
+    # custom_encoder: Null
+    # custom_encoder: !ref <ConformerEncoder>
+    # custom_tgt_module: !ref <phn_emb>
+    # activation: !ref <activation>
+
+# get TransASR's decoder
+  - &id007 !new:speechbrain.lobes.models.VanillaNN.VanillaNN
+    input_shape: [null, null, 1024]
+    activation: &id002 !name:torch.nn.LeakyReLU
+    dnn_blocks: 2
+    dnn_neurons: 384
+
+  - !new:torch.nn.LayerNorm
+    normalized_shape: 384
+
+  ctc_lin: &id008 !new:speechbrain.nnet.linear.Linear
+    input_size: 384
+    n_neurons: 44                     # 40 phonemes + 1 blank + 1 err
+
+# pre_encoder
+# custom_src_module: !new:speechbrain.nnet.containers.LengthsCapableSequential
+#     - !ref <perceived_ssl>
+#     - !ref <enc>
+
+# ctc_head_targeting
+  TransASR: &id009 !new:trainer.ConPCO_TransASR.ConPCO_TransformerASR
+    tgt_vocab: 44
+    input_size: 384
+    d_model: 384
+    nhead: 8
+    # num_encoder_layers: !ref <num_encoder_layers>
+    num_encoder_layers: 0
+    num_decoder_layers: 2
+    d_ffn: 1024
+    output_hidden_states: false
+    normalize_before: true
+    kernel_size: 3
+    encoder_module: conformer
+    attention_type: RoPEMHA
+    causal: false
+    custom_src_module: *id001
+  d_out: &id010 !new:speechbrain.nnet.linear.Linear
+    input_size: 384
+    n_neurons: 44                     # 40 phonemes + 1 blank + 1 err
+
+# Text prompt module
+  phn_emb: &id012 !new:torch.nn.Sequential
+
+  - &id011 !new:torch.nn.Embedding
+    num_embeddings: 44
+    embedding_dim: 384
+
+  - !new:torch.nn.LayerNorm
+    normalized_shape: 384
+
+# phn_emb: !new:torch.nn.Sequential
+#     - !ref <phn_emb_head>
+#     - !new:torch.nn.LayerNorm
+#         normalized_shape: !ref <dnn_neurons>
+
+# phn_emb_TransEnc: !new:speechbrain.lobes.models.transformer.Transformer.TransformerEncoder
+#     num_layers: 2
+#     nhead: !ref <nhead>
+#     d_ffn: !ref <d_ffn>
+#     d_model: !ref <dnn_neurons>
+#     attention_type: "RelPosMHAXL"
+#     causal: false
+
+# Mispro class:
+  fuse_net: &id003 !new:speechbrain.lobes.models.transformer.Transformer.TransformerDecoder # separate fuse net for dec
+
+    num_layers: 2
+    nhead: 8
+    d_ffn: 1024
+    d_model: 384
+    activation: *id002
+    attention_type: RelPosMHAXL
+    causal: true
+
+  fuse_net_dec: *id003
+  mispro_head: &id017 !new:torch.nn.Sequential
+  - &id013 !new:torch.nn.Conv1d
+    in_channels: 384
+    out_channels: 128
+    kernel_size: 5
+    stride: 1
+    padding: 2
+
+  - !new:torch.nn.BatchNorm1d
+    num_features: 128
+  - !new:torch.nn.GELU {}
+  - &id014 !new:torch.nn.Conv1d
+    in_channels: 128
+    out_channels: 64
+    kernel_size: 5
+    stride: 1
+    padding: 2
+
+  - !new:torch.nn.BatchNorm1d
+    num_features: 64
+
+# Memory projection (applied to encoder memory before feeding into fuse_net)
+# Set mem_proj_out_dim to match fuse_net d_model (defaults to <dnn_neurons>)
+  mispro_head_binary_out: &id015 !new:torch.nn.Conv1d
+    in_channels: 64
+    out_channels: 1
+    kernel_size: 1
+    stride: 1
+    padding: 0
+
+  mispro_head_class_out: &id016 !new:torch.nn.Linear
+    in_features: 64
+    out_features: 4
+
+  mem_proj: &id018 !new:torch.nn.Sequential
+  - &id004 !new:torch.nn.Linear
+    in_features: 384
+    out_features: 384
+    # bias: true
+
+# mapping Transformer encoder's output to fuse_net's d_model
+  - !new:torch.nn.LayerNorm
+    normalized_shape: 384
+  - !new:torch.nn.ReLU
+  mem_proj_cnn_post_enc: &id019 !new:models.projector.EncoderProjectorCov1d
+    encoder_projector_ds_rate: 4
+    encoder_dim: 384
+    llm_dim: 384
+
+# mapping Transformer encoder's output to fuse_net's d_model
+  mem_proj_dec: &id020 !new:torch.nn.Sequential
+  - *id004
+  - !new:torch.nn.LayerNorm
+    normalized_shape: 384
+  - !new:torch.nn.ReLU
+  fuse_proj: &id021 !new:torch.nn.Linear
+
+    # Projections for ConPCO Loss
+    in_features: 768                                 # if concat enc and dec fuse features
+    out_features: 384
+    # bias: true
+
+# ─── Autoregressive Greedy Searcher ──────────────────────────────────────
+# valid_search: !new:speechbrain.decoders.seq2seq.S2STransformerBeamSearcher
+#   modules: [!ref <TransASR>, !ref <d_out>]
+#   bos_index: !ref <bos_index>
+#   eos_index: !ref <eos_index>
+#   min_decode_ratio: 0.0
+#   max_decode_ratio: 1.0
+#   length_normalization: True
+#   using_eos_threshold: False
+#   beam_size: 5
+#   scorer: !ref <scorer>
+
+  conpco_proj_audio_feat: &id024 !new:torch.nn.Sequential
+  - &id005 !new:torch.nn.Linear
+    in_features: 384
+    out_features: 32
+  - !new:torch.nn.GELU
+  # - !new:torch.nn.Dropout
+  - !new:torch.nn.Linear
+    in_features: 32
+    out_features: 32
+  # - !new:torch.nn.Dropout
+  # - !ref <dummy_LayerNorm>
+  conpco_proj_perceived_phn_feat: &id025 !new:torch.nn.Sequential
+
+    # ConformerEncoder: !ref <ConformerEncoder>
+
+# phn_emb_TransEnc: !ref <phn_emb_TransEnc>
+
+  - *id005
+  - !new:torch.nn.GELU
+  # - !new:torch.nn.Dropout
+  - !new:torch.nn.Linear
+    in_features: 32
+    out_features: 32
+  # - !ref <dummy_LayerNorm>
+
+perceived_ssl: *id006
+preceived_ssl_emb_layer: -1
+
+# canonical_ssl: !apply:trainer.AutoSSLoader.AutoSSLLoader
+#     model_name: !ref <canonical_ssl_model>
+#     freeze: !ref <freeze_canonical_ssl>
+#     freeze_feature_extractor: !ref <freeze_perceived_feature_extractor>
+#     save_path: !ref <pretrained_models_path>
+vnn: *id007
+enc: *id001
+ctc_lin: *id008
+ctc_head_target: perceived    # Options: "perceived", "canonical"
+
+# Seq head targeting
+decoder_target: target   # Options: "target" "perceived";  len(perceived) = len(canonical), aligned
+# decoder_target: "perceived" # Options: "target" "perceived";  len(perceived) = len(canonical), aligned
+
+# decoding with mispronunciation detection strategy
+allow_mispro_threshold: false
+mispro_threshold: -0.8
+
+# confidence thresholding
+allow_confidence_thresholding: false
+confidence_threshold: -0.8
+
+# mispro_assembled decoding
+apply_mispro_to_hyps: false
+
+# Test Decoding mode
+valid_decode_mode: teacher_forcing    # Options: "AR" for autoregressive beam search, this does not need Cano Emb
+                        # "teacher_forcing" Use Cano Emb for ground truth length.
+test_decode_mode: AR    # Options: "AR" for autoregressive beam search, this does not need Cano Emb
+                        # "teacher_forcing" Use Cano Emb for ground truth length.
+# eval with silence
+eval_with_silence: true
+
+# transformer
+nhead: 8
+d_ffn: 1024
+num_encoder_layers: 2
+num_decoder_layers: 2
+encoder_module: conformer # transformer, conformer, branchformer
+# attention_type: RoPEMHA # regularMHA， RoPEMHA (with conformer)
+causal: false
+# activation: gelu
+
+# TransASR: !new:speechbrain.lobes.models.transformer.TransformerASR.TransformerASR
+
+kernel_size: 3
+attention_type: RoPEMHA    # Options: "standard", "RoPE"
+
+ConformerEncoder: !new:speechbrain.lobes.models.transformer.Conformer.ConformerEncoder
+  num_layers: 2
+  nhead: 8
+  d_ffn: 384
+  d_model: 384
+  dropout: 0.0
+  kernel_size: 3
+  attention_type: RoPEMHA
+
+
+TransASR: *id009
+TransASR_decoder: &id028 !apply:getattr
+- *id009
+- decoder
+d_out: *id010
+phn_emb_head: *id011
+phn_emb: *id012
+Correct: 0
+Substitution: 1
+Deletion: 2
+Insertion: 3
+
+# mispro_head: For mispronunciation detection
+mispro_cnn1: *id013
+mispro_cnn2: *id014
+mispro_head_binary_out: *id015
+mispro_head_class_out: *id016
+mispro_head: *id017
+mem_proj_out_dim: 384
+
+# With RelPosMHAXL, avoid adding absolute positional encoding on memory to prevent mixing abs+rel encodings.
+mem_proj_linear: *id004
+mem_proj: *id018
+post_encoder_reduction_factor: 4
+# mem_proj_cnn: !new:torch.nn.Conv1d
+#     in_channels: !ref <dnn_neurons>
+#     out_channels: !ref <dnn_neurons>
+#     kernel_size: !ref <post_encoder_reduction_factor>
+#     stride: !ref <post_encoder_reduction_factor>
+#     padding: 0
+# mem_proj_cnn_post_enc:  !new:torch.nn.Sequential
+#     - !ref <mem_proj_cnn>
+#     - !new:torch.nn.BatchNorm1d
+#         num_features: !ref <dnn_neurons>
+
+mem_proj_cnn_post_enc: *id019
+mem_proj_dec: *id020
+fuse_enc_or_dec: encdec
+fuse_net_layers: 2
+
+fuse_net: *id003
+fuse_net_dec: &id027 !new:speechbrain.lobes.models.transformer.Transformer.TransformerDecoder
+  num_layers: 2
+  nhead: 8
+  d_ffn: 1024
+  d_model: 384
+  activation: *id002
+  attention_type: RelPosMHAXL
+  causal: true
+
+# concat the fuse features from enc and dec
+fuse_proj: *id021
+valid_search: !new:speechbrain.decoders.seq2seq.S2STransformerBeamSearcher
+  modules: [*id009, *id010]
+  bos_index: 42
+  eos_index: 43
+  min_decode_ratio: 0.0
+  max_decode_ratio: 0.3
+  length_normalization: false
+  using_eos_threshold: false
+  beam_size: 1
+  scorer: &id022 !new:speechbrain.decoders.ScorerBuilder
+  # scorer: !ref <scorer>
+# test_search: !new:speechbrain.decoders.seq2seq.S2STransformerBeamSearcher
+#   modules: [!ref <TransASR>, !ref <d_out>]
+#   bos_index: !ref <bos_index>
+#   eos_index: !ref <eos_index>
+#   min_decode_ratio: 0.0
+#   max_decode_ratio: 0.3
+#   length_normalization: False
+#   using_eos_threshold: False
+#   beam_size: 1
+
+    full_scorers: [&id023 !new:speechbrain.decoders.CTCScorer {ctc_fc: *id008,
+          blank_index: 0, eos_index: 43
+
+}]
+    weights:
+      ctc: 0.99
+
+# ────────────────────────────────────────────────────────────────────────
+
+# Model parameters
+test_search: !new:speechbrain.decoders.seq2seq.S2STransformerBeamSearcher
+  modules: [*id009, *id010]
+  bos_index: 42
+  eos_index: 43
+  min_decode_ratio: 0.0
+  max_decode_ratio: 0.5
+  temperature: 1.1
+  length_normalization: false
+  using_eos_threshold: false
+  beam_size: 10
+  scorer: *id022
+ctc_scorer: *id023
+coverage_scorer: !new:speechbrain.decoders.scorer.CoverageScorer
+  vocab_size: 44
+  threshold: 2.0
+
+# scorer: !new:speechbrain.decoders.ScorerBuilder
+#    full_scorers: [!ref <ctc_scorer>, !ref <coverage_scorer>]
+#    weights:
+#      ctc: !ref <ctc_decode_weight>
+#      coverage: !ref <coverage_weight>
+scorer: *id022
+activation: *id002
+dnn_layers: 2
+dnn_neurons: 384
+freeze_perceived_ssl: false
+freeze_canonical_ssl: false
+freeze_perceived_feature_extractor: true  # freeze the CNN extractor in wav2vec
+freeze_canonical_feature_extractor: true  # Freeze Whisper encoder?
+
+log_softmax: !new:speechbrain.nnet.activations.Softmax
+  apply_log: true
+
+ctc_weight: 0.5
+ctc_decode_weight: 0.99
+coverage_weight: 2.0
+
+ctc_cost: !name:speechbrain.nnet.losses.ctc_loss
+  blank_index: 0
+
+
+seq_cost: !name:speechbrain.nnet.losses.nll_loss
+  reduction: batchmean
+  label_smoothing: 0.1
+    # weight: !ref <seq_cost_weights>
+
+# Mispro detection loss
+mispro_cost_bin: !name:speechbrain.nnet.losses.bce_loss
+  reduction: batchmean
+  pos_weight: !apply:torch.Tensor.to
+  - !new:torch.Tensor
+    - [2.0]
+  - !ref <loss_device>
+mispro_cost_cls: !name:speechbrain.nnet.losses.kldiv_loss
+  reduction: batchmean
+
+# guided attention cost： speechbrain.nnet.loss.guidedattn_loss.GuidedAttentionLoss
+sigma: 0.4 # smaller sigma force model to learn diagnostic features
+ga_cost: !name:speechbrain.nnet.loss.guidedattn_loss.GuidedAttentionLoss
+  sigma: 0.4
+
+# ConPCO Loss
+
+ConPCO_dim: 32
+dummy_linear: *id005
+dummy_LayerNorm: !new:torch.nn.LayerNorm
+  normalized_shape: 32
+
+# whether apply dec_out with positional embedding for ConPCO, default: False
+conpco_use_dec_pos_emb_on_audio_feat: true
+
+conpco_proj_audio_feat: *id024
+conpco_proj_perceived_phn_feat: *id025
+conpco_lambda_d_phn: 0.5
+conpco_lambda_t_phn: 0.1
+conpco_lambda_clap_t2a: 0.5
+conpco_margin: 1.0
+
+conpco_cost: &id026 !new:utils.losses.ConPCO_norm.ContrastivePhonemicOrdinalRegularizer
+  lambda_d_phn: 0.5
+  lambda_t_phn: 0.1
+  lambda_clap_t2a: 0.5
+  margin: 1.0
+  ignore_index: 0
+
+
+conpco_stats: !name:speechbrain.utils.metric_stats.MultiMetricStats
+  metric: *id026
+  batch_eval: true
+
+# Outputs
+output_neurons: 44 # l2arctic: 40phns(sil)+err+blank=42
+blank_index: 0
+bos_index: 42
+eos_index: 43
+
+model: &id029 !new:torch.nn.ModuleList
+- [*id001, *id008, *id009, *id012, *id003, *id027, *id017, *id015, *id016, *id010,
+  *id018, *id019, *id020, *id021, *id024, *id025]
+trainable_model: !new:torch.nn.ModuleList
+- [*id028, *id012, *id003, *id027, *id017, *id015, *id016, *id010, *id018, *id019,
+  *id020, *id021, *id024, *id025]
+adam_opt_class: !name:torch.optim.Adam
+  lr: 0.0002
+
+pretrained_opt_class: !name:torch.optim.Adam
+  lr: 0.00001
+
+checkpointer: !new:speechbrain.utils.checkpoints.Checkpointer
+  checkpoints_dir: !ref <save_folder>
+  recoverables:
+    model: *id029
+    perceived_ssl: *id006
+    counter: &id030 !new:speechbrain.utils.epoch_loop.EpochCounter
+      limit: 1000
+
+  allow_partial_load: true
+
+checkpointer_recover: !new:speechbrain.utils.checkpoints.Checkpointer
+  checkpoints_dir: !ref <pretrained_model_path>
+  recoverables:
+    perceived_ssl: *id006
+  allow_partial_load: true
+    #  model: !ref <model>
+
+augmentation: !new:speechbrain.augment.time_domain.SpeedPerturb
+  orig_freq: 16000
+  speeds: [95, 100, 105]
+
+epoch_counter: *id030
+train_logger: !new:speechbrain.utils.train_logger.FileTrainLogger
+  save_file: !ref <train_log>
+
+ctc_stats: !name:speechbrain.utils.metric_stats.MetricStats
+  metric: !name:speechbrain.nnet.losses.ctc_loss
+    blank_index: 0
+    reduction: batch
+
+seqlabel_stats: !name:speechbrain.utils.metric_stats.MetricStats
+    # metric: !name:speechbrain.nnet.losses.kldiv_loss
+  metric: !name:speechbrain.nnet.losses.nll_loss
+    reduction: batch
+    label_smoothing: 0.1
+
+mispro_stats: !name:speechbrain.utils.metric_stats.MetricStats
+  metric: !name:speechbrain.nnet.losses.bce_loss
+    reduction: batch
+    pos_weight: !apply:torch.Tensor.to
+    - !new:torch.Tensor
+      - [2.0]
+    - !ref <loss_device>
+mispro_class_stats: !name:speechbrain.utils.metric_stats.MetricStats
+  metric: !name:speechbrain.nnet.losses.kldiv_loss
+    reduction: batch
+
+ga_stats: !name:speechbrain.utils.metric_stats.MetricStats
+  metric: !name:speechbrain.nnet.loss.guidedattn_loss.GuidedAttentionLoss
+    sigma: 0.4
+
+per_stats: !name:speechbrain.utils.metric_stats.ErrorRateStats
+
+
+seed: 3047
+__set_seed: !apply:torch.manual_seed [3047]
+
+# training parameters
+number_of_epochs: 1000
+valid_search_interval: 1
+batch_size: 32
+lr: 0.0002
+sorting: ascending
+# sorting: descending
+# sorting: random
+sample_rate: 16000
+gradient_accumulation: 1
+lr_pretrained: 0.00001
+
+# Mix-Precision Training
+auto_mix_prec: true
+# or
+precision: fp16         # 支持 "fp32"、"fp16" 或 "bf16"
+
+# CTC-based Encoder/SSL Freezing
+enable_ctc_freezing: false    # Enable automatic freezing when CTC converges
+ctc_patience: 5                # Number of epochs to wait before freezing (increased from 5)
+ctc_threshold_factor: 1.1     # Threshold = min_ctc_loss * this_factor (tighter threshold)
+
+# Metric-based Encoder/SSL Freezing
+enable_metric_freezing: false          # Enable automatic freezing when validation metrics converge
+freezing_metric: both                  # Options: "PER", "F1", "both"
+metric_patience: 20                   # Number of epochs to wait before freezing
+per_threshold_factor: 1.01            # Threshold = min_PER * this_factor (for PER, lower is better)
+f1_threshold_factor: 0.99             # Threshold = max_F1 * this_factor (for F1, higher is better)
+min_epochs_before_metric_freeze: 100   # Minimum epochs before considering metric-based freezing
+
+# Dataloader options
+train_dataloader_opts:
+  batch_size: 32
+    # num_workers: 6
+valid_dataloader_opts:
+  batch_size: 32
+    # num_workers: 6
+
+test_dataloader_opts:
+  batch_size: 32
+    # num_workers: 6
+
+noam_annealing: !new:speechbrain.nnet.schedulers.NewBobScheduler
+  initial_value: 0.0002
+  annealing_factor: 0.8
+  improvement_threshold: 0.0025
+  patient: 0
+
+# Plot attention for fusion
+plot_attention: false
+plot_attention_interval: 10
+valid_attention_plot_dir: !ref <output_folder>/valid_attention_plots
+test_attention_plot_dir: !ref <output_folder>/test_attention_plots
+
+# ConPCO visualization
+plot_conpco_interval: 10
+plot_conpco: false
+conpco_plot_dir: !ref <output_folder>/conpco_plots
+max_phones: 10
+conPCO_plot_show_audio_centroid: false
+conPCO_plot_show_audio_scatter: true
+conPCO_plot_show_phoneme_centroid: true
+conPCO_plot_show_phoneme_scatter: false
+
+encoder: &id031 !new:torch.nn.ModuleList
+
+- [*id001, *id008]
+resume_from_folder: !ref <pretrained_model_path>
+
+pretrainer: !new:speechbrain.utils.parameter_transfer.Pretrainer
+  collect_in: !ref <pretrained_model_path>
+  loadables:
+    perceived_ssl: *id006
+    model: *id031
+mispro_loss_weights: 1.0
+ga_loss_weights: 10
+conpco_loss_weights: 1.0
+conpco_center_loss_weights: 1.0

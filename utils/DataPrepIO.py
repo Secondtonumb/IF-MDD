@@ -85,6 +85,18 @@ class BaseDataIOPrep:
     
     def _setup_label_encoder(self, datasets):
         """Setup label encoder."""
+        configured_encoder = self.hparams.get("lab_enc_file")
+        if configured_encoder:
+            configured_encoder = os.path.abspath(
+                os.path.expanduser(str(configured_encoder))
+            )
+            if not os.path.isfile(configured_encoder):
+                raise FileNotFoundError(
+                    f"Configured label encoder not found: {configured_encoder}"
+                )
+            self.label_encoder.load(configured_encoder)
+            self.label_encoder.expect_len(self.hparams["output_neurons"])
+            return
         lab_enc_file = os.path.join(self.hparams["save_folder"], "label_encoder.txt")
         self.label_encoder.insert_bos_eos(
             bos_label="<bos>",
@@ -102,6 +114,7 @@ class BaseDataIOPrep:
             special_labels=special_labels,
             sequence_input=True,
         )
+        self.label_encoder.expect_len(self.hparams["output_neurons"])
     
     def prepare(self):
         """Main method to prepare datasets. Should be overridden by subclasses."""
@@ -770,6 +783,18 @@ class TimestampDataIOPrepforHybridCTCAttn(TimestampDataIOPrep):
 
     def _setup_label_encoder(self, datasets):
         """Setup label encoder."""
+        configured_encoder = self.hparams.get("lab_enc_file")
+        if configured_encoder:
+            configured_encoder = os.path.abspath(
+                os.path.expanduser(str(configured_encoder))
+            )
+            if not os.path.isfile(configured_encoder):
+                raise FileNotFoundError(
+                    f"Configured label encoder not found: {configured_encoder}"
+                )
+            self.label_encoder.load(configured_encoder)
+            self.label_encoder.expect_len(self.hparams["output_neurons"])
+            return
         lab_enc_file = os.path.join(self.hparams["save_folder"], "label_encoder.txt")
         print("Loading or creating label encoder from file:", lab_enc_file)
         special_labels = {
@@ -784,6 +809,7 @@ class TimestampDataIOPrepforHybridCTCAttn(TimestampDataIOPrep):
             special_labels=special_labels,
             sequence_input=True,
         )
+        self.label_encoder.expect_len(self.hparams["output_neurons"])
     
     
     def prepare(self):
