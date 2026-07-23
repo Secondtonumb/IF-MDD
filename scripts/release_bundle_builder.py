@@ -254,6 +254,74 @@ if __name__ == "__main__":
     destination.chmod(0o755)
 
 
+def write_model_card(spec: BundleSpec, output: Path) -> None:
+    """Write bundle-specific standalone inference instructions."""
+
+    if spec.bundle_type == "crottc-if":
+        title = "CROTTC-IF for L2-ARCTIC"
+        tags = (
+            "automatic-speech-recognition",
+            "pronunciation-assessment",
+            "speechbrain",
+        )
+        base_model = ""
+        override = "  --override ctc_decode_weight=0.99"
+        recoverables = "`model.ckpt` and `perceived_ssl.ckpt`"
+    else:
+        title = "MDD-LLM with Llama 3.2 1B for L2-ARCTIC"
+        tags = ("pronunciation-assessment", "speechbrain", "llama")
+        base_model = "base_model:\n- meta-llama/Llama-3.2-1B-Instruct\n"
+        override = (
+            "  --override 'prompt_system_text=You are a pronunciation evaluator.' \\\n"
+            "  --override 'prompt_user_text=Return only the perceived phoneme sequence.'"
+        )
+        recoverables = "`model.ckpt`"
+
+    tag_lines = "\n".join(f"- {tag}" for tag in ("speech", "audio", *tags))
+    card = f"""---
+tags:
+{tag_lines}
+datasets:
+- l2_arctic
+{base_model}---
+
+# {title}
+
+This repository is a standalone IF-MDD inference bundle. It includes the
+complete {recoverables} inference state, the verified 44-label encoder,
+bundle-local WavLM configuration, and all runtime modules needed by the
+wrapper. The Llama bundle also includes its tokenizer and model
+configuration, so loading does not contact Hugging Face.
+
+## Single WAV
+
+```bash
+pip install -r requirements.txt
+python custom_interface.py \\
+  --hparams-file hyperparams.yaml \\
+  --audio /path/to/audio.wav \\
+{override}
+```
+
+## Repository Eval
+
+With the
+[`fix/l2-arctic-release`](https://github.com/Secondtonumb/IF-MDD/tree/fix/l2-arctic-release)
+branch:
+
+```bash
+python train.py hparams/{spec.hparams.name} \\
+  --mode eval \\
+  --inference_ckpt /path/to/{spec.name}
+```
+
+Set `HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1` to enforce offline loading.
+`manifest.json` records the required recoverables, architecture signature,
+defaults, and label-encoder SHA256.
+"""
+    (output / "README.md").write_text(card, encoding="utf-8")
+
+
 def build_bundle(spec: BundleSpec) -> Path:
     checkpoint = spec.checkpoint.expanduser().resolve()
     if not checkpoint.is_dir():
@@ -339,4 +407,5 @@ def build_bundle(spec: BundleSpec) -> Path:
         encoding="utf-8",
     )
     write_custom_interface(output)
+    write_model_card(spec, output)
     return output
