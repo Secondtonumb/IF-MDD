@@ -294,6 +294,14 @@ complete {recoverables} inference state, the verified 44-label encoder,
 {local_runtime}, and all runtime modules needed by the wrapper, so loading
 does not contact Hugging Face.
 
+## Download
+
+```bash
+python -m pip install -U huggingface_hub
+hf download Haopeng/{spec.name} --local-dir {spec.name}
+cd {spec.name}
+```
+
 ## Single WAV
 
 ```bash
