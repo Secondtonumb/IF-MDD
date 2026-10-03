@@ -132,3 +132,14 @@ This implementation is built upon the following repositories:
 - [SpeechBrain](https://github.com/speechbrain/speechbrain)
 - [MPL-MDD](https://github.com/Mu-Y/mpl-mdd)
 - [CTC-Attention-Mispronunciation](https://github.com/cageyoko/CTC-Attention-Mispronunciation)
+
+## License
+
+The original IF-MDD source code is licensed under the
+[Apache License 2.0](LICENSE), which permits commercial use, modification,
+and redistribution under its terms.
+
+Third-party code and dependencies retain their respective licenses.
+Model checkpoints and datasets are not covered by this source-code license;
+please refer to their respective model cards, dataset documentation, and
+license terms.
